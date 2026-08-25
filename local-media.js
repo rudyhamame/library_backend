@@ -4,7 +4,7 @@ import { basename, dirname, extname, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const moduleDirectory = dirname(fileURLToPath(import.meta.url));
-const configPath = resolve(moduleDirectory, 'data/local-media.json');
+const configPath = resolve(moduleDirectory, process.env.LOCAL_MEDIA_CONFIG_PATH || 'data/local-media.json');
 let activeMoviesRoot = resolve(moduleDirectory, process.env.LOCAL_MEDIA_DIR || 'media/movies');
 let enabledMovieIds = null;
 let titleOverrides = {};

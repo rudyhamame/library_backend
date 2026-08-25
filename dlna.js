@@ -5,7 +5,8 @@ import { fileURLToPath } from 'node:url';
 import dgram from 'node:dgram';
 import { getTelegramVideoStream } from './telegram.js';
 
-export const dlnaRoot = resolve(dirname(fileURLToPath(import.meta.url)), 'data/dlna');
+const moduleDirectory = dirname(fileURLToPath(import.meta.url));
+export const dlnaRoot = resolve(process.env.DLNA_DATA_DIR || resolve(moduleDirectory, 'data/dlna'));
 const entries = new Map();
 const cacheJobs = new Map();
 

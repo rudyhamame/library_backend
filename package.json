@@ -6,13 +6,15 @@
     "dev": "node server.js",
     "start": "node server.js",
     "migrate:mongodb": "node scripts/migrate-playlists.js",
-    "telegram:session": "node scripts/create-telegram-session.js"
+    "telegram:session": "node scripts/create-telegram-session.js",
+    "telegram:qr-session": "node scripts/create-telegram-qr-session.js"
   },
   "dependencies": {
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
     "mongodb": "^7.5.0",
+    "qrcode-terminal": "^0.12.0",
     "telegram": "^2.26.22"
   }
 }

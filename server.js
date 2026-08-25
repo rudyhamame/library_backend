@@ -212,12 +212,49 @@ app.get('/api/local/movies/:id/subtitle-cues', async (req, res) => {
   } catch (error) { res.status(404).json({ error: error.message }); }
 });
 app.get('/api/playback/history', async (_, res) => {
-  try { res.json({ items: await getPlaybackHistory() }); }
+  try {
+    res.set('Cache-Control', 'no-store');
+    res.json({ items: await getPlaybackHistory() });
+  }
   catch (error) { res.status(500).json({ error: error.message }); }
+});
+app.get('/api/playback/roku/get', async (req, res) => {
+  try {
+    const itemId = String(req.query?.itemId || '');
+    if (!itemId) return res.status(400).json({ error: 'itemId is required' });
+    res.set('Cache-Control', 'no-store');
+    res.json({ item: await getPlayback(itemId) });
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+app.put('/api/playback/roku/save', async (req, res) => {
+  try {
+    const itemId = String(req.query?.itemId || req.body?.itemId || '');
+    if (!itemId) return res.status(400).json({ error: 'itemId is required' });
+    const completedValue = String(req.query?.completed ?? req.body?.completed ?? 'false').toLowerCase();
+    const payload = {
+      itemId,
+      title: String(req.query?.title ?? req.body?.title ?? ''),
+      source: String(req.query?.source ?? req.body?.source ?? 'roku'),
+      url: itemId,
+      position: Number(req.query?.position ?? req.body?.position ?? 0),
+      duration: Number(req.query?.duration ?? req.body?.duration ?? 0),
+      completed: completedValue === 'true' || completedValue === '1',
+    };
+    const item = await savePlayback(payload);
+    console.log(`[Roku playback] saved ${itemId} at ${item.position}s`);
+    res.json({ item });
+  } catch (error) { res.status(500).json({ error: error.message }); }
 });
 app.get('/api/playback/:itemId', async (req, res) => {
   try { res.json({ item: await getPlayback(String(req.params.itemId)) }); }
   catch (error) { res.status(500).json({ error: error.message }); }
+});
+app.post('/api/playback/get', async (req, res) => {
+  try {
+    const itemId = String(req.body?.itemId || '');
+    if (!itemId) return res.status(400).json({ error: 'itemId is required' });
+    res.json({ item: await getPlayback(itemId) });
+  } catch (error) { res.status(500).json({ error: error.message }); }
 });
 app.put('/api/playback/:itemId', async (req, res) => {
   try {

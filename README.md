@@ -20,6 +20,8 @@ GET /api/health
 
 ## Render
 
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https%3A%2F%2Fgithub.com%2Frudyhamame%2Fstream_back)
+
 The repository includes `render.yaml` and a Docker image with FFmpeg. Create a
 Render Blueprint from this repository and provide the secret environment
 variables requested by the Blueprint. Never commit `.env`, Telegram session

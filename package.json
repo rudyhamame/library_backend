@@ -5,7 +5,8 @@
   "scripts": {
     "dev": "node server.js",
     "start": "node server.js",
-    "migrate:mongodb": "node scripts/migrate-playlists.js"
+    "migrate:mongodb": "node scripts/migrate-playlists.js",
+    "telegram:session": "node scripts/create-telegram-session.js"
   },
   "dependencies": {
     "cors": "^2.8.5",

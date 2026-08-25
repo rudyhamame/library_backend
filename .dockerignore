@@ -1,0 +1,12 @@
+.git
+.gitignore
+.env
+.telegram-session
+node_modules
+media
+data
+out
+deploy
+*.tgz
+*.log
+

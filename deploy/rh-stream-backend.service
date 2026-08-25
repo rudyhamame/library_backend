@@ -1,0 +1,22 @@
+[Unit]
+Description=RH Stream backend
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/media/rudy/PLUGIN/streaming/backend
+EnvironmentFile=/media/rudy/PLUGIN/streaming/backend/.env
+Environment=NODE_ENV=production
+Environment=FFMPEG_PATH=/home/rudy/.local/bin/ffmpeg
+ExecStart=/home/rudy/.nvm/versions/node/v24.16.0/bin/node server.js
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=30
+KillSignal=SIGINT
+NoNewPrivileges=true
+PrivateTmp=true
+LimitNOFILE=65536
+
+[Install]
+WantedBy=default.target

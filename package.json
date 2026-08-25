@@ -1,0 +1,17 @@
+{
+  "name": "streaming-catalog-api",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node server.js",
+    "start": "node server.js",
+    "migrate:mongodb": "node scripts/migrate-playlists.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "mongodb": "^7.5.0",
+    "telegram": "^2.26.22"
+  }
+}

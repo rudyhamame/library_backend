@@ -1,0 +1,9 @@
+.env
+.telegram-session
+node_modules/
+media/
+data/
+out/
+*.tgz
+*.log
+.DS_Store

@@ -18,6 +18,8 @@ services:
         sync: false
       - key: TELEGRAM_MAX_STREAMS
         value: "2"
+      - key: PUBLIC_BASE_URL
+        value: https://rh-stream-backend.onrender.com
       - key: MONGODB_URI
         sync: false
       - key: MONGODB_DB
@@ -28,4 +30,3 @@ services:
         value: playback_progress
       - key: MONGODB_IPTV_COLLECTION
         value: iptv_sources
-

@@ -2,6 +2,7 @@ import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
 import { Readable } from 'node:stream';
+import { spawn } from 'node:child_process';
 import { shapeArabicForRoku } from './arabic-shaper.js';
 import { createXtreamSource, deleteXtreamSource, getAllXtreamSources, getXtreamSource, getXtreamSources, publicXtreamSource, updateXtreamSelection, updateXtreamSource } from './xtream-store.js';
 import { getXtreamCatalog, getXtreamCategories, getXtreamMovieInfo, getXtreamSeriesEpisodes, validateXtreamConnection, xtreamPlaybackPath, xtreamProviderUrl } from './xtream.js';
@@ -11,6 +12,7 @@ import { getFavorites, toggleFavorite } from './favorites-store.js';
 const app = express();
 const port = process.env.PORT || 8787;
 let dashboardCache = { expires: 0, data: null };
+const previewCache = new Map();
 const arabicText = /[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]/;
 const rokuText = (value) => arabicText.test(String(value || '')) ? shapeArabicForRoku(value) : String(value || '');
 
@@ -89,6 +91,73 @@ app.get('/api/playback/history', async (_, res) => {
     res.json({ items: await getPlaybackHistory() });
   }
   catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+function parseXtreamPlaybackItem(itemId) {
+  const parsed = new URL(String(itemId || ''), 'http://rh-stream.internal');
+  const match = parsed.pathname.match(/^\/api\/xtream\/play\/([^/]+)\/(movie|series)\/([^/]+)$/);
+  if (!match) return null;
+  return {
+    sourceId: decodeURIComponent(match[1]),
+    kind: match[2],
+    id: decodeURIComponent(match[3]),
+    extension: parsed.searchParams.get('ext') || 'mp4',
+  };
+}
+
+function capturePreview(inputUrl, position) {
+  return new Promise((resolve, reject) => {
+    const args = [
+      '-hide_banner', '-loglevel', 'error',
+      '-ss', String(Math.max(0, position)), '-i', inputUrl,
+      '-an', '-sn', '-frames:v', '1',
+      '-vf', 'scale=640:-2:force_original_aspect_ratio=decrease',
+      '-q:v', '3', '-f', 'image2pipe', '-vcodec', 'mjpeg', 'pipe:1',
+    ];
+    const child = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    const chunks = [];
+    let total = 0;
+    let errorText = '';
+    const timeout = setTimeout(() => child.kill('SIGKILL'), 25_000);
+    child.stdout.on('data', chunk => {
+      total += chunk.length;
+      if (total <= 5 * 1024 * 1024) chunks.push(chunk);
+      else child.kill('SIGKILL');
+    });
+    child.stderr.on('data', chunk => { errorText += chunk.toString(); });
+    child.on('error', reject);
+    child.on('close', code => {
+      clearTimeout(timeout);
+      if (code === 0 && total > 0 && total <= 5 * 1024 * 1024) resolve(Buffer.concat(chunks));
+      else reject(new Error(errorText.trim().slice(-300) || `ffmpeg exited with ${code}`));
+    });
+  });
+}
+
+app.get('/api/playback/preview', async (req, res) => {
+  try {
+    const itemId = String(req.query?.itemId || '');
+    if (!itemId) return res.status(400).json({ error: 'itemId is required' });
+    const playback = await getPlayback(itemId);
+    if (!playback) return res.sendStatus(404);
+    const target = parseXtreamPlaybackItem(playback.url || itemId);
+    if (!target) return res.status(404).json({ error: 'Preview is unavailable for this item' });
+    const source = await getXtreamSource(target.sourceId);
+    if (!source) return res.sendStatus(404);
+    const position = Math.max(0, Math.floor(Number(playback.position) || 0));
+    const cacheKey = `${itemId}:${position}`;
+    let frame = previewCache.get(cacheKey);
+    if (!frame) {
+      frame = await capturePreview(xtreamProviderUrl(source, target.kind, target.id, target.extension), position);
+      previewCache.set(cacheKey, frame);
+      while (previewCache.size > 30) previewCache.delete(previewCache.keys().next().value);
+    }
+    res.set({ 'Content-Type': 'image/jpeg', 'Cache-Control': 'private, max-age=86400', 'Content-Length': String(frame.length) });
+    res.end(frame);
+  } catch (error) {
+    console.warn(`[Playback preview] ${error.message}`);
+    res.status(502).json({ error: 'Could not capture the saved playback frame' });
+  }
 });
 app.get('/api/favorites', async (_, res) => {
   try { res.set('Cache-Control', 'no-store'); res.json({ items: await getFavorites() }); }

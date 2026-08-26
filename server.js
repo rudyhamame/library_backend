@@ -587,6 +587,33 @@ async function resolveXtreamEnabledItems(source, enabledKeys) {
     }));
 }
 
+function suppliedXtreamEnabledItems(source, enabledKeys, suppliedItems) {
+  if (!Array.isArray(suppliedItems)) return [];
+  const allowed = enabledKeys.map(String).filter(key => /^(channel|movie|series):[^:]+$/.test(key));
+  const suppliedByKey = new Map(suppliedItems
+    .filter(item => item && typeof item === 'object' && allowed.includes(String(item.key)))
+    .map(item => [String(item.key), item]));
+  return allowed.map(key => {
+    const item = suppliedByKey.get(key);
+    if (!item) return null;
+    const [kind, id] = key.split(':', 2);
+    const category = String(item.category || source.name || 'Other');
+    return {
+      key,
+      id: String(item.id || id),
+      kind,
+      title: String(item.title || `${kind} ${id}`),
+      logo: String(item.logo || ''),
+      categoryId: String(item.categoryId || ''),
+      category,
+      language: String(item.language || detectXtreamLanguage(item, category)),
+      extension: String(item.extension || (kind === 'channel' ? 'm3u8' : 'mp4')),
+      duration: String(item.duration || ''),
+      added: String(item.added || ''),
+    };
+  }).filter(Boolean);
+}
+
 app.get('/api/xtream/sources/:id/enabled', async (req, res) => {
   try {
     const source = await getXtreamSource(req.params.id);
@@ -611,7 +638,14 @@ app.put('/api/xtream/sources/:id/selection', async (req, res) => {
     if (!Array.isArray(req.body?.enabledKeys)) return res.status(400).json({ error: 'enabledKeys must be an array' });
     const source = await getXtreamSource(req.params.id);
     if (!source) return res.sendStatus(404);
-    const enabledItems = await resolveXtreamEnabledItems(source, req.body.enabledKeys);
+    // The manager already has the selected catalog rows. Persist them directly
+    // instead of downloading every Xtream list again merely to resolve keys.
+    // Full provider catalog reloads here were causing browser "Failed to fetch"
+    // after Render ran out of memory or timed out.
+    const enabledItems = suppliedXtreamEnabledItems(source, req.body.enabledKeys, req.body.enabledItems);
+    if (enabledItems.length !== req.body.enabledKeys.length) {
+      return res.status(400).json({ error: 'Selected item details are missing. Reload the catalog and try again.' });
+    }
     const enabledKeys = enabledItems.map(item => item.key);
     const enabledSet = new Set(enabledKeys);
     const updated = await updateXtreamSource(req.params.id, {

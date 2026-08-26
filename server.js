@@ -448,17 +448,27 @@ app.get('/api/xtream/catalog', async (req, res) => {
     const enabled = new Set(source.enabledKeys || []);
     const query = String(req.query.q || '').trim().toLocaleLowerCase();
     const category = String(req.query.category || 'all');
+    const language = String(req.query.language || 'all');
     const pageSize = Math.min(200, Math.max(10, Number.parseInt(req.query.limit, 10) || 50));
     const requestedPage = Math.max(1, Number.parseInt(req.query.page, 10) || 1);
-    const filtered = allItems.filter(item =>
+    const categoryNames = new Map(categories.map(item => [item.id, item.name]));
+    const catalog = allItems.map(item => ({
+      ...item,
+      language: detectXtreamLanguage(item, categoryNames.get(item.categoryId) || source.name || 'Other'),
+    }));
+    const languagePriority = { Arabic: 0, English: 1 };
+    const languages = [...new Set(catalog.map(item => item.language))]
+      .sort((a, b) => (languagePriority[a] ?? 10) - (languagePriority[b] ?? 10) || a.localeCompare(b));
+    const filtered = catalog.filter(item =>
       (category === 'all' || item.categoryId === category)
+      && (language === 'all' || item.language === language)
       && (!query || item.title.toLocaleLowerCase().includes(query))
     );
     const pageCount = Math.max(1, Math.ceil(filtered.length / pageSize));
     const page = Math.min(requestedPage, pageCount);
     const start = (page - 1) * pageSize;
     res.json({
-      source: publicXtreamSource(source), categories,
+      source: publicXtreamSource(source), categories, languages,
       items: filtered.slice(start, start + pageSize).map(item => ({ ...item, enabled: enabled.has(item.key) })),
       pagination: { page, pageSize, pageCount, total: filtered.length },
     });

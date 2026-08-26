@@ -61,7 +61,7 @@ app.get('/api/health', async (_, res) => {
   }
 });
 async function buildXtreamMoviesPayload() {
-  const selectedXtreamMovies = await getSelectedXtreamItems('movie');
+  const selectedXtreamMovies = (await getSelectedXtreamItems('movie')).sort((a, b) => Number(b.added || 0) - Number(a.added || 0));
   return Promise.all(selectedXtreamMovies.map(async item => {
       let duration = item.duration || '';
       try {
@@ -395,7 +395,7 @@ app.get('/api/xtream/play/:sourceId/:kind/:id', async (req, res) => {
   } catch (error) { res.status(502).json({ error: error.message }); }
 });
 async function buildXtreamSeriesPayload() {
-  const selected = await getSelectedXtreamItems('series');
+  const selected = (await getSelectedXtreamItems('series')).sort((a, b) => Number(b.added || 0) - Number(a.added || 0));
   const items = [];
   for (const seriesItem of selected) {
     try {
@@ -413,6 +413,7 @@ async function buildXtreamSeriesPayload() {
           seasonTitle: episode.seasonTitle, rokuSeasonTitle: rokuText(episode.seasonTitle),
           seasonSort: episode.seasonNumber, episodeNumber: episode.episodeNumber,
           duration: episode.duration, thumbnail: episode.thumbnail,
+          added: seriesItem.added,
           url: playbackUrl, playbackUrl, streamFormat: episode.extension === 'mp4' ? 'mp4' : 'hls',
         });
       }

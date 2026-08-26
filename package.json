@@ -5,11 +5,14 @@
   "scripts": {
     "dev": "node server.js",
     "start": "node server.js",
+    "configure:r2-cors": "node scripts/configure-r2-cors.js",
     "migrate:mongodb": "node scripts/migrate-playlists.js",
     "telegram:session": "node scripts/create-telegram-session.js",
     "telegram:qr-session": "node scripts/create-telegram-qr-session.js"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1117.0",
+    "@aws-sdk/s3-request-presigner": "^3.1117.0",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",

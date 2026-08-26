@@ -10,8 +10,11 @@ import { shapeArabicForRoku } from './arabic-shaper.js';
 import { dlnaBrowse, dlnaDescription, dlnaRoot, getDlnaCacheJob, startDlnaCache, startSsdp } from './dlna.js';
 import { beginTelegramAuth, getAllTelegramCatalog, getTelegramCatalog, getTelegramThumbnail, getTelegramVideoStream, resolveTelegramChannel, submitTelegramCode, submitTelegramPassword, telegramStatus } from './telegram.js';
 import { createIptvSource, deleteIptvSource, getIptvSource, getIptvSources, updateIptvSource } from './iptv-store.js';
+import { createXtreamSource, deleteXtreamSource, getAllXtreamSources, getXtreamSource, getXtreamSources, publicXtreamSource, updateXtreamSelection, updateXtreamSource } from './xtream-store.js';
+import { getXtreamCatalog, getXtreamCategories, getXtreamSeriesEpisodes, validateXtreamConnection, xtreamPlaybackPath, xtreamProviderUrl } from './xtream.js';
 import { getPlayback, getPlaybackHistory, savePlayback } from './playback-store.js';
 import { findLocalMovie, getLocalMoviesRoot, listLocalMovies, localMoviePath, localMovieSubtitlePath, setLocalMovieEnabled, setLocalMovieSubtitle, setLocalMovieTitle, setLocalMoviesRoot, uploadLocalMovieSubtitle } from './local-media.js';
+import { abortMultipart, cloudMediaConfigured, completeMultipart, createMultipart, importToStream, listCloudMovies, refreshCloudMovie } from './cloud-media.js';
 
 const app = express();
 const port = process.env.PORT || 8787;
@@ -49,6 +52,35 @@ async function getIptvChannels(source) {
   const items = parseIptvM3u(await response.text());
   iptvCache.set(source.id, { items, expires: Date.now() + 300_000 });
   return items;
+}
+
+async function getSelectedXtreamItems(kind) {
+  const sources = await getAllXtreamSources();
+  const groups = await Promise.all(sources.map(async source => {
+    const enabled = new Set(Array.isArray(source.enabledKeys) ? source.enabledKeys : []);
+    if (![...enabled].some(key => key.startsWith(`${kind}:`))) return [];
+    try {
+      const catalog = await getXtreamCatalog(source, kind);
+      return catalog.filter(item => enabled.has(item.key)).map(item => ({ ...item, sourceId: source._id, sourceName: source.name }));
+    } catch (error) {
+      console.warn(`[Xtream] Could not refresh ${kind} catalog for ${source.name}: ${error.message}`);
+      return [];
+    }
+  }));
+  return groups.flat();
+}
+
+function directXtreamItem(item) {
+  const playbackUrl = xtreamPlaybackPath(item.sourceId, item.kind, item.id, item.extension);
+  return {
+    ...item,
+    source: 'xtream',
+    url: playbackUrl,
+    playbackUrl,
+    rokuTitle: rokuText(item.title),
+    rokuTextKind: /[A-Za-z]/.test(item.title) ? 'latin' : 'arabic',
+    streamFormat: item.kind === 'channel' ? 'hls' : (item.extension === 'mp4' ? 'mp4' : 'hls'),
+  };
 }
 function publicOrigin() {
   if (process.env.PUBLIC_BASE_URL) return process.env.PUBLIC_BASE_URL.replace(/\/$/, '');
@@ -117,6 +149,40 @@ app.get('/api/network-origin', (_, res) => res.json({ origin: publicOrigin() }))
 app.get('/api/local/movies', async (_, res) => {
   try { res.json({ items: await listLocalMovies() }); }
   catch (error) { res.status(500).json({ error: error.message }); }
+});
+app.get('/api/roku/movies', async (_, res) => {
+  try {
+    let localMovies = [];
+    let cloudMovies = [];
+    try { localMovies = await listLocalMovies(); } catch (error) { console.warn(`[Movies] Local library unavailable: ${error.message}`); }
+    try { cloudMovies = await listCloudMovies(); } catch {}
+    const xtreamMovies = (await getSelectedXtreamItems('movie')).map(item => ({ ...directXtreamItem(item), kind: 'movie', contentKind: 'movie', rokuEnabled: true }));
+    res.json({ items: [...localMovies, ...cloudMovies.map(movie => ({ ...movie, source: 'cloudflare-stream', kind: 'movie', contentKind: 'movie', streamFormat: 'hls', rokuEnabled: true, url: movie.playbackUrl, rokuTitle: rokuText(movie.title), rokuTextKind: /[A-Za-z]/.test(movie.title) ? 'latin' : 'arabic' })), ...xtreamMovies] });
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+app.get('/api/cloud/movies', async (_, res) => {
+  try { res.json({ configured: cloudMediaConfigured(), items: await listCloudMovies() }); }
+  catch (error) { res.status(500).json({ error: error.message }); }
+});
+app.post('/api/cloud/r2/multipart', async (req, res) => {
+  try { res.status(201).json(await createMultipart(req.body || {})); }
+  catch (error) { res.status(400).json({ error: error.message }); }
+});
+app.post('/api/cloud/r2/multipart/complete', async (req, res) => {
+  try { res.json(await completeMultipart(req.body || {})); }
+  catch (error) { res.status(400).json({ error: error.message }); }
+});
+app.post('/api/cloud/r2/multipart/abort', async (req, res) => {
+  try { await abortMultipart(req.body || {}); res.json({ ok: true }); }
+  catch (error) { res.status(400).json({ error: error.message }); }
+});
+app.post('/api/cloud/stream/import', async (req, res) => {
+  try { res.status(202).json(await importToStream(req.body || {})); }
+  catch (error) { res.status(400).json({ error: error.message }); }
+});
+app.get('/api/cloud/stream/:id', async (req, res) => {
+  try { const movie = await refreshCloudMovie(req.params.id); if (!movie) return res.sendStatus(404); res.json(movie); }
+  catch (error) { res.status(502).json({ error: error.message }); }
 });
 app.get('/api/local/config', async (_, res) => {
   try { res.json({ path: await getLocalMoviesRoot() }); }
@@ -329,8 +395,96 @@ app.get('/api/iptv/channels', async (req, res) => {
     const source = req.query.sourceId
       ? await getIptvSource(String(req.query.sourceId))
       : (await getIptvSources())[0];
-    if (!source) return res.status(400).json({ error: 'Select an IPTV playlist first' });
-    res.json({ source, items: await getIptvChannels(source) });
+    let playlistItems = [];
+    if (source) {
+      try { playlistItems = await getIptvChannels(source); }
+      catch (error) { console.warn(`[IPTV] M3U source ${source.name} unavailable: ${error.message}`); }
+    }
+    const xtreamItems = req.query.sourceId ? [] : (await getSelectedXtreamItems('channel')).map(item => ({
+      ...directXtreamItem(item),
+      group: item.sourceName,
+      rokuGroup: rokuText(item.sourceName),
+    }));
+    if (!source && !xtreamItems.length) return res.status(400).json({ error: 'Add an IPTV source or select Xtream channels first' });
+    res.json({ source, items: [...playlistItems, ...xtreamItems] });
+  } catch (error) { res.status(502).json({ error: error.message }); }
+});
+
+function parseXtreamInput(body, existing = null) {
+  const name = String(body?.name || existing?.name || '').trim();
+  const supplied = String(body?.url || '').trim();
+  if (!name) throw new Error('Source name is required');
+  if (!supplied && existing) return { name };
+  if (!supplied) throw new Error('Paste the Xtream get.php URL');
+  let url;
+  try { url = new URL(supplied); } catch { throw new Error('Enter a valid Xtream URL'); }
+  if (!['http:', 'https:'].includes(url.protocol)) throw new Error('Xtream URL must use HTTP or HTTPS');
+  const username = String(url.searchParams.get('username') || body?.username || '').trim();
+  const password = String(url.searchParams.get('password') || body?.password || '').trim();
+  if (!username || !password) throw new Error('The Xtream URL must include username and password');
+  const pathname = url.pathname.replace(/\/(?:get|player_api)\.php\/?$/i, '').replace(/\/$/, '');
+  return { name, baseUrl: `${url.protocol}//${url.host}${pathname}`, username, password };
+}
+
+app.get('/api/xtream/sources', async (_, res) => {
+  try { res.json({ items: await getXtreamSources() }); }
+  catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+app.post('/api/xtream/sources', async (req, res) => {
+  try {
+    const source = parseXtreamInput(req.body);
+    await validateXtreamConnection({ ...source, _id: 'validation' });
+    res.status(201).json(await createXtreamSource(source));
+  } catch (error) { res.status(400).json({ error: error.message }); }
+});
+
+app.put('/api/xtream/sources/:id', async (req, res) => {
+  try {
+    const existing = await getXtreamSource(req.params.id);
+    if (!existing) return res.sendStatus(404);
+    const changes = parseXtreamInput(req.body, existing);
+    if (changes.baseUrl) await validateXtreamConnection({ ...existing, ...changes });
+    res.json(await updateXtreamSource(req.params.id, changes));
+  } catch (error) { res.status(400).json({ error: error.message }); }
+});
+
+app.delete('/api/xtream/sources/:id', async (req, res) => {
+  try {
+    if (!await deleteXtreamSource(req.params.id)) return res.sendStatus(404);
+    res.sendStatus(204);
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+app.get('/api/xtream/catalog', async (req, res) => {
+  try {
+    const source = await getXtreamSource(String(req.query.sourceId || ''));
+    if (!source) return res.status(404).json({ error: 'Xtream source not found' });
+    const aliases = { live: 'channel', channel: 'channel', movie: 'movie', vod: 'movie', series: 'series' };
+    const kind = aliases[String(req.query.kind || '')];
+    if (!kind) return res.status(400).json({ error: 'kind must be channel, movie, or series' });
+    const [items, categories] = await Promise.all([getXtreamCatalog(source, kind), getXtreamCategories(source, kind)]);
+    const enabled = new Set(source.enabledKeys || []);
+    res.json({ source: publicXtreamSource(source), categories, items: items.map(item => ({ ...item, enabled: enabled.has(item.key) })) });
+  } catch (error) { res.status(502).json({ error: error.message }); }
+});
+
+app.put('/api/xtream/sources/:id/selection', async (req, res) => {
+  try {
+    if (!Array.isArray(req.body?.enabledKeys)) return res.status(400).json({ error: 'enabledKeys must be an array' });
+    const allowed = req.body.enabledKeys.map(String).filter(key => /^(channel|movie|series):[^:]+$/.test(key));
+    const updated = await updateXtreamSelection(req.params.id, allowed);
+    if (!updated) return res.sendStatus(404);
+    res.json(updated);
+  } catch (error) { res.status(400).json({ error: error.message }); }
+});
+
+app.get('/api/xtream/play/:sourceId/:kind/:id', async (req, res) => {
+  try {
+    const source = await getXtreamSource(req.params.sourceId);
+    if (!source) return res.sendStatus(404);
+    if (!['channel', 'movie', 'series'].includes(req.params.kind)) return res.sendStatus(400);
+    res.redirect(302, xtreamProviderUrl(source, req.params.kind, req.params.id, req.query.ext));
   } catch (error) { res.status(502).json({ error: error.message }); }
 });
 app.get('/api/telegram/roku/prepare', async (req, res) => {
@@ -379,6 +533,35 @@ async function buildPlaylistPayload() {
     }).sort((left, right) => left.seriesTitle.localeCompare(right.seriesTitle, 'ar') || left.seasonSort - right.seasonSort || left.episodeNumber - right.episodeNumber);
     return { items, structure };
 }
+
+async function buildXtreamSeriesPayload() {
+  const selected = await getSelectedXtreamItems('series');
+  const items = [];
+  for (const seriesItem of selected) {
+    try {
+      const source = await getXtreamSource(seriesItem.sourceId);
+      if (!source) continue;
+      const details = await getXtreamSeriesEpisodes(source, seriesItem.id);
+      for (const episode of details.episodes) {
+        const playbackUrl = xtreamPlaybackPath(source._id, 'series', episode.id, episode.extension);
+        const title = episode.title || `${details.title} · ${episode.episodeNumber}`;
+        items.push({
+          id: `xtream:${source._id}:series:${episode.id}`,
+          source: 'xtream', kind: 'episode', contentKind: 'episode',
+          title, rokuTitle: rokuText(title), rokuTextKind: /[A-Za-z]/.test(title) ? 'latin' : 'arabic',
+          seriesTitle: details.title, rokuSeriesTitle: rokuText(details.title),
+          seasonTitle: episode.seasonTitle, rokuSeasonTitle: rokuText(episode.seasonTitle),
+          seasonSort: episode.seasonNumber, episodeNumber: episode.episodeNumber,
+          duration: episode.duration, thumbnail: episode.thumbnail,
+          url: playbackUrl, playbackUrl, streamFormat: episode.extension === 'mp4' ? 'mp4' : 'hls',
+        });
+      }
+    } catch (error) {
+      console.warn(`[Xtream] Could not expand series ${seriesItem.title}: ${error.message}`);
+    }
+  }
+  return items;
+}
 app.get('/api/telegram/playlist', async (_, res) => {
   try {
     res.json(await buildPlaylistPayload());
@@ -388,9 +571,13 @@ app.get('/api/telegram/playlist', async (_, res) => {
 app.get('/api/telegram/roku/series', async (_, res) => {
   try {
     console.log('[Roku] Series opened: refreshing Telegram connection through GramJS');
-    const [telegram, payload] = await Promise.all([telegramStatus(), buildPlaylistPayload()]);
-    console.log(`[Roku] Series catalog ready: ${payload.items.length} items; Telegram authenticated=${telegram.authenticated}`);
-    res.json(payload);
+    const [telegram, payload, xtreamItems] = await Promise.all([
+      telegramStatus().catch(error => ({ authenticated: false, error: error.message })),
+      buildPlaylistPayload().catch(error => ({ items: [], structure: { series: [] }, error: error.message })),
+      buildXtreamSeriesPayload(),
+    ]);
+    console.log(`[Roku] Series catalog ready: ${payload.items.length} Telegram + ${xtreamItems.length} Xtream items; Telegram authenticated=${telegram.authenticated}`);
+    res.json({ ...payload, items: [...payload.items, ...xtreamItems] });
   } catch (error) {
     console.error('[Roku] Series catalog failed:', error.message);
     res.status(502).json({ error: error.message });

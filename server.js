@@ -37,6 +37,13 @@ function rokuPagePayload(items, pageInfo) {
 
 function detectXtreamLanguage(item, category) {
   const text = `${category || ''} ${item.title || ''}`;
+  const categoryCode = String(category || '').match(/^\s*([A-Za-z]{2})\s*(?:[|:\-]|$)/)?.[1]?.toUpperCase();
+  const categoryLanguages = {
+    AR: 'Arabic', EN: 'English', AF: 'Afghan', AL: 'Albanian', BE: 'Belarusian', BG: 'Bulgarian',
+    DE: 'German', ES: 'Spanish', FR: 'French', HI: 'Hindi', IT: 'Italian', KU: 'Kurdish',
+    PT: 'Portuguese', RU: 'Russian', TR: 'Turkish', UR: 'Urdu', FA: 'Persian', NL: 'Dutch',
+  };
+  if (categoryCode) return categoryLanguages[categoryCode] || categoryCode;
   if (arabicText.test(text) || /\b(arabic|arab|ar)\b/i.test(text)) return 'Arabic';
   const rules = [
     ['English', /\b(english|eng|en)\b/i], ['French', /\b(french|francais|fr)\b/i],
@@ -117,6 +124,7 @@ app.get('/api/roku/series/categories', async (_, res) => {
         title: category,
         rokuTitle: series.rokuCategory || rokuText(category),
         category,
+        language: detectXtreamLanguage({ title: '' }, category),
         contentKind: 'series-category',
       });
     }

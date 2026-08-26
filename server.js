@@ -118,7 +118,7 @@ async function getRokuSelectedItems(kind) {
 }
 
 function directXtreamItem(item) {
-  const playbackUrl = xtreamPlaybackPath(item.sourceId, item.kind, item.id, item.extension);
+  const playbackUrl = rokuXtreamPlaybackPath(item.sourceId, item.kind, item.id, item.extension);
   return {
     ...item,
     source: 'xtream',
@@ -127,8 +127,15 @@ function directXtreamItem(item) {
     playbackUrl,
     rokuTitle: rokuText(item.title),
     rokuTextKind: /[A-Za-z]/.test(item.title) ? 'latin' : 'arabic',
-    streamFormat: item.kind === 'channel' ? 'hls' : (item.extension === 'mp4' ? 'mp4' : 'hls'),
+    // The Roku endpoint always returns fragmented MP4, even when a provider
+    // labels an MPEG-TS stream as .mp4.
+    streamFormat: item.kind === 'channel' ? 'hls' : 'mp4',
   };
+}
+
+function rokuXtreamPlaybackPath(sourceId, kind, id, extension = '') {
+  const ext = String(extension || '').replace(/[^a-z0-9]/gi, '').toLowerCase();
+  return `/api/xtream/roku/${encodeURIComponent(sourceId)}/${kind}/${encodeURIComponent(id)}${ext ? `?ext=${encodeURIComponent(ext)}` : ''}`;
 }
 app.use(cors());
 app.use(express.json());
@@ -249,7 +256,7 @@ app.get('/api/playback/history', async (_, res) => {
 
 function parseXtreamPlaybackItem(itemId) {
   const parsed = new URL(String(itemId || ''), 'http://rh-stream.internal');
-  const match = parsed.pathname.match(/^\/api\/xtream\/play\/([^/]+)\/(movie|series)\/([^/]+)$/);
+  const match = parsed.pathname.match(/^\/api\/xtream\/(?:play|roku)\/([^/]+)\/(movie|series)\/([^/]+)$/);
   if (!match) return null;
   return {
     sourceId: decodeURIComponent(match[1]),
@@ -615,6 +622,52 @@ app.get('/api/xtream/play/:sourceId/:kind/:id', async (req, res) => {
     }).pipe(res);
   } catch (error) { res.status(502).json({ error: error.message }); }
 });
+
+app.get('/api/xtream/roku/:sourceId/:kind/:id', async (req, res) => {
+  let child;
+  try {
+    const source = await getXtreamSource(req.params.sourceId);
+    if (!source) return res.sendStatus(404);
+    if (!['movie', 'series'].includes(req.params.kind)) return res.sendStatus(400);
+
+    // Several Xtream providers send MPEG-TS even for URLs ending in .mp4.
+    // Roku reports that mismatch as "malformed data (-5)". Fragmented MP4
+    // keeps the original H.264/AAC tracks while giving Roku a valid MP4
+    // streaming container without downloading the whole file first.
+    const inputUrl = xtreamProviderUrl(source, req.params.kind, req.params.id, req.query.ext);
+    const args = [
+      '-hide_banner', '-loglevel', 'error',
+      '-i', inputUrl,
+      '-map', '0:v:0?', '-map', '0:a:0?',
+      '-c', 'copy', '-sn', '-dn',
+      '-movflags', 'frag_keyframe+empty_moov+default_base_moof',
+      '-f', 'mp4', 'pipe:1',
+    ];
+    child = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    let errorText = '';
+    child.stderr.on('data', chunk => { errorText += chunk.toString(); });
+    child.on('error', error => {
+      console.error('[Xtream Roku remux] failed to start:', error.message);
+      if (!res.headersSent) res.status(502).json({ error: 'Could not start Roku media remux' });
+      else res.destroy(error);
+    });
+    child.on('close', code => {
+      if (code !== 0 && code !== null) console.warn(`[Xtream Roku remux] ${req.params.kind}:${req.params.id} exited ${code}: ${errorText.trim().slice(-240)}`);
+      if (!res.writableEnded) res.end();
+    });
+    res.on('close', () => { if (child && !child.killed) child.kill('SIGKILL'); });
+
+    res.status(200);
+    res.setHeader('Content-Type', 'video/mp4');
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('Accept-Ranges', 'none');
+    child.stdout.pipe(res);
+  } catch (error) {
+    if (child && !child.killed) child.kill('SIGKILL');
+    if (!res.headersSent) res.status(502).json({ error: error.message });
+    else res.destroy(error);
+  }
+});
 async function buildXtreamSeriesPayload({ limit, selected: suppliedSelected } = {}) {
   let selected = suppliedSelected || (await getAllXtreamItems('series')).slice().sort((a, b) => Number(b.added || 0) - Number(a.added || 0));
   if (Number.isFinite(limit) && limit > 0) selected = selected.slice(0, limit);
@@ -630,7 +683,7 @@ async function buildXtreamSeriesPayload({ limit, selected: suppliedSelected } = 
         if (!source) { groups[index] = items; continue; }
         const details = await getXtreamSeriesEpisodes(source, seriesItem.id);
         for (const episode of details.episodes) {
-          const playbackUrl = xtreamPlaybackPath(source._id, 'series', episode.id, episode.extension);
+          const playbackUrl = rokuXtreamPlaybackPath(source._id, 'series', episode.id, episode.extension);
           const title = episode.title || `${details.title} · ${episode.episodeNumber}`;
           items.push({
             id: `xtream:${source._id}:series:${episode.id}`,
@@ -644,7 +697,7 @@ async function buildXtreamSeriesPayload({ limit, selected: suppliedSelected } = 
             rokuCategory: seriesItem.rokuCategory,
             language: seriesItem.language,
             added: seriesItem.added,
-            url: playbackUrl, playbackUrl, streamFormat: episode.extension === 'mp4' ? 'mp4' : 'hls',
+            url: playbackUrl, playbackUrl, streamFormat: 'mp4',
           });
         }
       } catch (error) {

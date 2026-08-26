@@ -11,7 +11,7 @@ import { dlnaBrowse, dlnaDescription, dlnaRoot, getDlnaCacheJob, startDlnaCache,
 import { beginTelegramAuth, getAllTelegramCatalog, getTelegramCatalog, getTelegramThumbnail, getTelegramVideoStream, resolveTelegramChannel, submitTelegramCode, submitTelegramPassword, telegramStatus } from './telegram.js';
 import { createIptvSource, deleteIptvSource, getIptvSource, getIptvSources, updateIptvSource } from './iptv-store.js';
 import { createXtreamSource, deleteXtreamSource, getAllXtreamSources, getXtreamSource, getXtreamSources, publicXtreamSource, updateXtreamSelection, updateXtreamSource } from './xtream-store.js';
-import { getXtreamCatalog, getXtreamCategories, getXtreamSeriesEpisodes, validateXtreamConnection, xtreamPlaybackPath, xtreamProviderUrl } from './xtream.js';
+import { getXtreamCatalog, getXtreamCategories, getXtreamMovieInfo, getXtreamSeriesEpisodes, validateXtreamConnection, xtreamPlaybackPath, xtreamProviderUrl } from './xtream.js';
 import { getPlayback, getPlaybackHistory, savePlayback } from './playback-store.js';
 import { findLocalMovie, getLocalMoviesRoot, listLocalMovies, localMoviePath, localMovieSubtitlePath, setLocalMovieEnabled, setLocalMovieSubtitle, setLocalMovieTitle, setLocalMoviesRoot, uploadLocalMovieSubtitle } from './local-media.js';
 import { abortMultipart, cloudMediaConfigured, completeMultipart, createMultipart, importToStream, listCloudMovies, refreshCloudMovie } from './cloud-media.js';
@@ -60,8 +60,12 @@ async function getSelectedXtreamItems(kind) {
     const enabled = new Set(Array.isArray(source.enabledKeys) ? source.enabledKeys : []);
     if (![...enabled].some(key => key.startsWith(`${kind}:`))) return [];
     try {
-      const catalog = await getXtreamCatalog(source, kind);
-      return catalog.filter(item => enabled.has(item.key)).map(item => ({ ...item, sourceId: source._id, sourceName: source.name }));
+      const [catalog, categories] = await Promise.all([getXtreamCatalog(source, kind), getXtreamCategories(source, kind)]);
+      const categoryNames = new Map(categories.map(category => [category.id, category.name]));
+      return catalog.filter(item => enabled.has(item.key)).map(item => {
+        const category = categoryNames.get(item.categoryId) || source.name || 'Other';
+        return { ...item, category, rokuCategory: rokuText(category), sourceId: source._id, sourceName: source.name };
+      });
     } catch (error) {
       console.warn(`[Xtream] Could not refresh ${kind} catalog for ${source.name}: ${error.message}`);
       return [];
@@ -156,7 +160,15 @@ app.get('/api/roku/movies', async (_, res) => {
     let cloudMovies = [];
     try { localMovies = await listLocalMovies(); } catch (error) { console.warn(`[Movies] Local library unavailable: ${error.message}`); }
     try { cloudMovies = await listCloudMovies(); } catch {}
-    const xtreamMovies = (await getSelectedXtreamItems('movie')).map(item => ({ ...directXtreamItem(item), kind: 'movie', contentKind: 'movie', rokuEnabled: true }));
+    const selectedXtreamMovies = await getSelectedXtreamItems('movie');
+    const xtreamMovies = await Promise.all(selectedXtreamMovies.map(async item => {
+      let duration = item.duration || '';
+      try {
+        const source = await getXtreamSource(item.sourceId);
+        if (source) duration = (await getXtreamMovieInfo(source, item.id)).duration || duration;
+      } catch (error) { console.warn(`[Xtream] Could not load movie duration for ${item.id}: ${error.message}`); }
+      return { ...directXtreamItem(item), duration, kind: 'movie', contentKind: 'movie', rokuEnabled: true };
+    }));
     res.json({ items: [...localMovies, ...cloudMovies.map(movie => ({ ...movie, source: 'cloudflare-stream', kind: 'movie', contentKind: 'movie', streamFormat: 'hls', rokuEnabled: true, url: movie.playbackUrl, rokuTitle: rokuText(movie.title), rokuTextKind: /[A-Za-z]/.test(movie.title) ? 'latin' : 'arabic' })), ...xtreamMovies] });
   } catch (error) { res.status(500).json({ error: error.message }); }
 });

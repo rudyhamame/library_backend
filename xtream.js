@@ -43,10 +43,24 @@ export async function getXtreamCatalog(source, kind) {
       categoryId: stringId(row.category_id),
       logo: String(row.stream_icon || row.cover || ''),
       extension: String(row.container_extension || (kind === 'channel' ? 'm3u8' : 'mp4')),
+      duration: String(row.duration || row.duration_secs || ''),
       rating: String(row.rating || ''),
       added: String(row.added || row.last_modified || ''),
     };
   });
+}
+
+export async function getXtreamMovieInfo(source, movieId) {
+  const data = await request(source, { action: 'get_vod_info', vod_id: movieId });
+  const seconds = Number(data?.info?.duration_secs || data?.movie_data?.duration_secs || 0);
+  let duration = String(data?.info?.duration || data?.movie_data?.duration || '');
+  if (!duration && seconds > 0) {
+    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    const remaining = Math.floor(seconds % 60);
+    duration = [hours, minutes, remaining].map(value => String(value).padStart(2, '0')).join(':');
+  }
+  return { duration, seconds };
 }
 
 export async function getXtreamCategories(source, kind) {

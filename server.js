@@ -59,6 +59,11 @@ function detectXtreamLanguage(item, category) {
   return 'Other';
 }
 
+function titleLanguageCode(item) {
+  const match = String(item?.title || '').match(/^\s*([A-Za-z]{2})\s*(?:[-|:])/);
+  return match ? match[1].toUpperCase() : 'OTHER';
+}
+
 async function getAllXtreamItems(kind) {
   // The Roku can issue overlapping page/category requests. Coalesce those
   // requests so only one full provider catalog is mapped at a time.
@@ -448,20 +453,20 @@ app.get('/api/xtream/catalog', async (req, res) => {
     const enabled = new Set(source.enabledKeys || []);
     const query = String(req.query.q || '').trim().toLocaleLowerCase();
     const category = String(req.query.category || 'all');
-    const language = String(req.query.language || 'all');
+    const language = String(req.query.language || 'all').toUpperCase();
     const pageSize = Math.min(200, Math.max(10, Number.parseInt(req.query.limit, 10) || 50));
     const requestedPage = Math.max(1, Number.parseInt(req.query.page, 10) || 1);
     const categoryNames = new Map(categories.map(item => [item.id, item.name]));
     const catalog = allItems.map(item => ({
       ...item,
-      language: detectXtreamLanguage(item, categoryNames.get(item.categoryId) || source.name || 'Other'),
+      languageCode: titleLanguageCode(item),
     }));
-    const languagePriority = { Arabic: 0, English: 1 };
-    const languages = [...new Set(catalog.map(item => item.language))]
+    const languagePriority = { AR: 0, EN: 1 };
+    const languages = [...new Set(catalog.map(item => item.languageCode))]
       .sort((a, b) => (languagePriority[a] ?? 10) - (languagePriority[b] ?? 10) || a.localeCompare(b));
     const filtered = catalog.filter(item =>
       (category === 'all' || item.categoryId === category)
-      && (language === 'all' || item.language === language)
+      && (language === 'ALL' || item.languageCode === language)
       && (!query || item.title.toLocaleLowerCase().includes(query))
     );
     const pageCount = Math.max(1, Math.ceil(filtered.length / pageSize));

@@ -18,8 +18,6 @@ const rokuText = (value) => arabicText.test(String(value || '')) ? shapeArabicFo
 // Roku cannot reliably receive a JSON document containing a provider's entire
 // catalog (this source alone has 44,995 series). Keep the initial screen fast;
 // additional catalog pages are loaded separately by the Roku client.
-const rokuInitialMovieLimit = Math.max(20, Number.parseInt(process.env.ROKU_INITIAL_MOVIE_LIMIT || '100', 10));
-const rokuInitialChannelLimit = Math.max(20, Number.parseInt(process.env.ROKU_INITIAL_CHANNEL_LIMIT || '150', 10));
 // Each series can contain hundreds of episode records. A small page is
 // intentional on Render's 256 MB instance; Roku loads further pages only when
 // the user reaches the end of the current series list.
@@ -229,8 +227,11 @@ function buildXtreamChannelsPayload(items) {
   }));
 }
 
-app.get('/api/roku/movies', async (req, res) => {
-  try { res.json(rokuPagePayload(await buildXtreamMoviesPayload(), rokuPage(req, rokuInitialMovieLimit))); }
+app.get('/api/roku/movies', async (_, res) => {
+  try {
+    const items = await buildXtreamMoviesPayload();
+    res.json({ items, page: 0, limit: items.length, total: items.length, hasMore: false });
+  }
   catch (error) { res.status(500).json({ error: error.message }); }
 });
 app.get('/api/playback/history', async (_, res) => {
@@ -607,8 +608,8 @@ app.get('/api/roku/library', async (_, res) => {
     ]);
     const [series, movies, channels] = await Promise.all([
       buildXtreamSeriesPayload({ selected: selectedSeries.slice(0, rokuInitialSeriesLimit) }),
-      buildXtreamMoviesPayload({ selected: selectedMovies.slice(0, rokuInitialMovieLimit) }),
-      Promise.resolve(buildXtreamChannelsPayload(selectedChannels.slice(0, rokuInitialChannelLimit))),
+      buildXtreamMoviesPayload({ selected: selectedMovies }),
+      Promise.resolve(buildXtreamChannelsPayload(selectedChannels)),
     ]);
     res.json({ items: [...series, ...movies, ...channels] });
   }
@@ -632,9 +633,10 @@ app.get('/api/roku/series', async (req, res) => {
     res.status(502).json({ error: error.message });
   }
 });
-app.get('/api/roku/channels', async (req, res) => {
+app.get('/api/roku/channels', async (_, res) => {
   try {
-    res.json(rokuPagePayload(buildXtreamChannelsPayload(await getRokuSelectedItems('channel')), rokuPage(req, rokuInitialChannelLimit)));
+    const items = buildXtreamChannelsPayload(await getRokuSelectedItems('channel'));
+    res.json({ items, page: 0, limit: items.length, total: items.length, hasMore: false });
   } catch (error) { res.status(502).json({ error: error.message }); }
 });
 app.listen(port, '0.0.0.0', () => {

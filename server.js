@@ -125,6 +125,47 @@ app.get('/api/roku/series/categories', async (_, res) => {
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
+app.get('/api/roku/search', async (req, res) => {
+  try {
+    const kind = String(req.query.kind || '');
+    const query = String(req.query.q || '').trim().toLocaleLowerCase();
+    if ((kind !== 'series' && kind !== 'movie') || !query) return res.status(400).json({ error: 'kind and q are required' });
+    const matches = (await getAllXtreamItems(kind))
+      .filter(item => item.title.toLocaleLowerCase().includes(query))
+      .slice(0, 60);
+    if (kind === 'series') {
+      return res.json({ items: matches.map(item => ({
+        id: `series-search:${item.sourceId}:${item.id}`,
+        title: item.title,
+        rokuTitle: rokuText(item.title),
+        category: item.category,
+        rokuCategory: item.rokuCategory,
+        sourceId: String(item.sourceId),
+        seriesId: item.id,
+        contentKind: 'series-search',
+      })) });
+    }
+    const items = matches.map(item => ({
+      ...directXtreamItem(item),
+      thumbnail: item.logo,
+      duration: item.duration || '',
+      kind: 'movie', contentKind: 'movie', rokuEnabled: true,
+    }));
+    res.json({ items });
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+app.get('/api/roku/series/detail', async (req, res) => {
+  try {
+    const sourceId = String(req.query.sourceId || '');
+    const seriesId = String(req.query.seriesId || '');
+    if (!sourceId || !seriesId) return res.status(400).json({ error: 'sourceId and seriesId are required' });
+    const series = (await getAllXtreamItems('series')).find(item => String(item.sourceId) === sourceId && item.id === seriesId);
+    if (!series) return res.status(404).json({ error: 'Series not found' });
+    res.json({ items: await buildXtreamSeriesPayload({ selected: [series] }) });
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
 async function buildXtreamMoviesPayload({ limit } = {}) {
   let movies = (await getAllXtreamItems('movie')).sort((a, b) => Number(b.added || 0) - Number(a.added || 0));
   if (Number.isFinite(limit) && limit > 0) movies = movies.slice(0, limit);

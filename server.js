@@ -5,7 +5,7 @@ import { Readable } from 'node:stream';
 import { spawn } from 'node:child_process';
 import { shapeArabicForRoku } from './arabic-shaper.js';
 import { createXtreamSource, deleteXtreamSource, getAllXtreamSources, getXtreamSource, getXtreamSources, publicXtreamSource, updateXtreamSelection, updateXtreamSource } from './xtream-store.js';
-import { getXtreamCatalog, getXtreamCategories, getXtreamMovieInfo, getXtreamSeriesEpisodes, validateXtreamConnection, xtreamPlaybackPath, xtreamProviderUrl } from './xtream.js';
+import { getXtreamCatalog, getXtreamCategories, getXtreamSeriesEpisodes, validateXtreamConnection, xtreamPlaybackPath, xtreamProviderUrl } from './xtream.js';
 import { getPlayback, getPlaybackHistory, savePlayback } from './playback-store.js';
 import { getFavorites, toggleFavorite } from './favorites-store.js';
 
@@ -16,15 +16,13 @@ const previewCache = new Map();
 const arabicText = /[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]/;
 const rokuText = (value) => arabicText.test(String(value || '')) ? shapeArabicForRoku(value) : String(value || '');
 
-async function getSelectedXtreamItems(kind) {
+async function getAllXtreamItems(kind) {
   const sources = await getAllXtreamSources();
   const groups = await Promise.all(sources.map(async source => {
-    const enabled = new Set(Array.isArray(source.enabledKeys) ? source.enabledKeys : []);
-    if (![...enabled].some(key => key.startsWith(`${kind}:`))) return [];
     try {
       const [catalog, categories] = await Promise.all([getXtreamCatalog(source, kind), getXtreamCategories(source, kind)]);
       const categoryNames = new Map(categories.map(category => [category.id, category.name]));
-      return catalog.filter(item => enabled.has(item.key)).map(item => {
+      return catalog.map(item => {
         const category = categoryNames.get(item.categoryId) || source.name || 'Other';
         return { ...item, category, rokuCategory: rokuText(category), sourceId: source._id, sourceName: source.name };
       });
@@ -61,15 +59,10 @@ app.get('/api/health', async (_, res) => {
   }
 });
 async function buildXtreamMoviesPayload() {
-  const selectedXtreamMovies = (await getSelectedXtreamItems('movie')).sort((a, b) => Number(b.added || 0) - Number(a.added || 0));
-  return Promise.all(selectedXtreamMovies.map(async item => {
-      let duration = item.duration || '';
-      try {
-        const source = await getXtreamSource(item.sourceId);
-        if (source) duration = (await getXtreamMovieInfo(source, item.id)).duration || duration;
-      } catch (error) { console.warn(`[Xtream] Could not load movie duration for ${item.id}: ${error.message}`); }
-      return { ...directXtreamItem(item), duration, kind: 'movie', contentKind: 'movie', rokuEnabled: true };
-  }));
+  const movies = (await getAllXtreamItems('movie')).sort((a, b) => Number(b.added || 0) - Number(a.added || 0));
+  // The stream catalog already carries duration for most providers. Avoid one
+  // extra provider request per movie now that Roku receives the full catalog.
+  return movies.map(item => ({ ...directXtreamItem(item), duration: item.duration || '', kind: 'movie', contentKind: 'movie', rokuEnabled: true }));
 }
 
 function buildXtreamChannelsPayload(items) {
@@ -395,40 +388,49 @@ app.get('/api/xtream/play/:sourceId/:kind/:id', async (req, res) => {
   } catch (error) { res.status(502).json({ error: error.message }); }
 });
 async function buildXtreamSeriesPayload() {
-  const selected = (await getSelectedXtreamItems('series')).sort((a, b) => Number(b.added || 0) - Number(a.added || 0));
-  const items = [];
-  for (const seriesItem of selected) {
-    try {
-      const source = await getXtreamSource(seriesItem.sourceId);
-      if (!source) continue;
-      const details = await getXtreamSeriesEpisodes(source, seriesItem.id);
-      for (const episode of details.episodes) {
-        const playbackUrl = xtreamPlaybackPath(source._id, 'series', episode.id, episode.extension);
-        const title = episode.title || `${details.title} · ${episode.episodeNumber}`;
-        items.push({
-          id: `xtream:${source._id}:series:${episode.id}`,
-          source: 'xtream', kind: 'episode', contentKind: 'episode',
-          title, rokuTitle: rokuText(title), rokuTextKind: /[A-Za-z]/.test(title) ? 'latin' : 'arabic',
-          seriesTitle: details.title, rokuSeriesTitle: rokuText(details.title),
-          seasonTitle: episode.seasonTitle, rokuSeasonTitle: rokuText(episode.seasonTitle),
-          seasonSort: episode.seasonNumber, episodeNumber: episode.episodeNumber,
-          duration: episode.duration, thumbnail: episode.thumbnail,
-          added: seriesItem.added,
-          url: playbackUrl, playbackUrl, streamFormat: episode.extension === 'mp4' ? 'mp4' : 'hls',
-        });
+  const selected = (await getAllXtreamItems('series')).sort((a, b) => Number(b.added || 0) - Number(a.added || 0));
+  let cursor = 0;
+  const groups = new Array(selected.length);
+  async function worker() {
+    while (cursor < selected.length) {
+      const index = cursor++;
+      const seriesItem = selected[index];
+      const items = [];
+      try {
+        const source = await getXtreamSource(seriesItem.sourceId);
+        if (!source) { groups[index] = items; continue; }
+        const details = await getXtreamSeriesEpisodes(source, seriesItem.id);
+        for (const episode of details.episodes) {
+          const playbackUrl = xtreamPlaybackPath(source._id, 'series', episode.id, episode.extension);
+          const title = episode.title || `${details.title} · ${episode.episodeNumber}`;
+          items.push({
+            id: `xtream:${source._id}:series:${episode.id}`,
+            source: 'xtream', kind: 'episode', contentKind: 'episode',
+            title, rokuTitle: rokuText(title), rokuTextKind: /[A-Za-z]/.test(title) ? 'latin' : 'arabic',
+            seriesTitle: details.title, rokuSeriesTitle: rokuText(details.title),
+            seasonTitle: episode.seasonTitle, rokuSeasonTitle: rokuText(episode.seasonTitle),
+            seasonSort: episode.seasonNumber, episodeNumber: episode.episodeNumber,
+            duration: episode.duration, thumbnail: episode.thumbnail,
+            added: seriesItem.added,
+            url: playbackUrl, playbackUrl, streamFormat: episode.extension === 'mp4' ? 'mp4' : 'hls',
+          });
+        }
+      } catch (error) {
+        console.warn(`[Xtream] Could not expand series ${seriesItem.title}: ${error.message}`);
       }
-    } catch (error) {
-      console.warn(`[Xtream] Could not expand series ${seriesItem.title}: ${error.message}`);
+      groups[index] = items;
     }
   }
-  return items;
+  const concurrency = Math.min(6, Math.max(1, selected.length));
+  await Promise.all(Array.from({ length: concurrency }, worker));
+  return groups.flat();
 }
 app.get('/api/roku/library', async (_, res) => {
   try {
     const [series, movies, channels] = await Promise.all([
       buildXtreamSeriesPayload(),
       buildXtreamMoviesPayload(),
-      getSelectedXtreamItems('channel').then(buildXtreamChannelsPayload),
+      getAllXtreamItems('channel').then(buildXtreamChannelsPayload),
     ]);
     res.json({ items: [...series, ...movies, ...channels] });
   }
@@ -446,7 +448,7 @@ app.get('/api/roku/series', async (_, res) => {
 });
 app.get('/api/roku/channels', async (_, res) => {
   try {
-    const items = buildXtreamChannelsPayload(await getSelectedXtreamItems('channel'));
+    const items = buildXtreamChannelsPayload(await getAllXtreamItems('channel'));
     res.json({ items });
   } catch (error) { res.status(502).json({ error: error.message }); }
 });

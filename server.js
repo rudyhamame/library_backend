@@ -172,9 +172,40 @@ app.get('/api/health', async (_, res) => {
 // series, which can outlive Roku's HTTP request window. The Roku client uses
 // this endpoint only to verify that Render is reachable; each catalog page is
 // fetched separately when the user opens it.
-app.get('/api/roku/bootstrap', (_, res) => {
-  res.set('Cache-Control', 'no-store');
-  res.json({ items: [] });
+app.get('/api/roku/bootstrap', async (_, res) => {
+  try {
+    // Home needs a very small, fast catalog only. Return the newest saved
+    // Roku entries without expanding every series into episodes.
+    const [selectedSeries, selectedMovies] = await Promise.all([
+      getRokuSelectedItems('series'), getRokuSelectedItems('movie'),
+    ]);
+    const newestFirst = (items) => [...items]
+      .sort((a, b) => Number(b.added || 0) - Number(a.added || 0))
+      .slice(0, 3);
+    const series = newestFirst(selectedSeries).map((item) => ({
+      id: `series-search:${item.sourceId}:${item.id}`,
+      title: item.title,
+      rokuTitle: rokuText(item.title),
+      rokuTextKind: /[A-Za-z]/.test(item.title) ? 'latin' : 'arabic',
+      category: item.category,
+      sourceId: String(item.sourceId),
+      seriesId: item.id,
+      thumbnail: item.logo,
+      added: item.added,
+      contentKind: 'series-search',
+    }));
+    const movies = newestFirst(selectedMovies).map((item) => ({
+      ...directXtreamItem(item),
+      thumbnail: item.logo,
+      kind: 'movie',
+      contentKind: 'movie',
+      rokuEnabled: true,
+    }));
+    res.set('Cache-Control', 'no-store');
+    res.json({ items: [...series, ...movies] });
+  } catch (error) {
+    res.status(502).json({ error: error.message });
+  }
 });
 
 app.get('/api/roku/series/categories', async (_, res) => {

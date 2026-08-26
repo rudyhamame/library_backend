@@ -660,7 +660,10 @@ async function getOrStartRokuHls(source, kind, id, extension) {
   const manifest = path.join(directory, 'master.m3u8');
   const inputUrl = xtreamProviderUrl(source, kind, id, extension);
   const args = [
-    '-hide_banner', '-loglevel', 'error', '-i', inputUrl,
+    // Read at playback speed. Without -re the remote VOD is fetched far
+    // faster than Roku can request its first segment, so the HLS cleanup
+    // deletes that segment before the TV receives it.
+    '-hide_banner', '-loglevel', 'error', '-re', '-i', inputUrl,
     '-map', '0:v:0?', '-map', '0:a:0?', '-c', 'copy', '-sn', '-dn',
     '-f', 'hls', '-hls_time', '2', '-hls_list_size', '12',
     '-hls_flags', 'independent_segments+delete_segments',

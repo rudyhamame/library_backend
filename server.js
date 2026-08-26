@@ -3,6 +3,10 @@ import express from 'express';
 import cors from 'cors';
 import { Readable } from 'node:stream';
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { promises as fs } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { shapeArabicForRoku } from './arabic-shaper.js';
 import { createXtreamSource, deleteXtreamSource, getAllXtreamSources, getXtreamSource, getXtreamSources, publicXtreamSource, updateXtreamSelection, updateXtreamSource } from './xtream-store.js';
 import { getXtreamCatalog, getXtreamCategories, getXtreamSeriesEpisodes, validateXtreamConnection, xtreamPlaybackPath, xtreamProviderUrl } from './xtream.js';
@@ -23,6 +27,8 @@ const rokuText = (value) => arabicText.test(String(value || '')) ? shapeArabicFo
 // the user reaches the end of the current series list.
 const rokuInitialSeriesLimit = Math.min(4, Math.max(1, Number.parseInt(process.env.ROKU_INITIAL_SERIES_LIMIT || '4', 10)));
 const xtreamItemsInFlight = new Map();
+const rokuHlsJobs = new Map();
+const rokuHlsRoot = path.join(os.tmpdir(), 'rh-stream-hls');
 
 function rokuPage(req, defaultLimit) {
   const page = Math.max(0, Number.parseInt(req.query.page || '0', 10) || 0);
@@ -127,15 +133,15 @@ function directXtreamItem(item) {
     playbackUrl,
     rokuTitle: rokuText(item.title),
     rokuTextKind: /[A-Za-z]/.test(item.title) ? 'latin' : 'arabic',
-    // The Roku endpoint always returns fragmented MP4, even when a provider
-    // labels an MPEG-TS stream as .mp4.
-    streamFormat: item.kind === 'channel' ? 'hls' : 'mp4',
+    // Movies and episodes are repackaged as ordinary HLS. Roku is much more
+    // reliable with HLS than a live fragmented-MP4 response.
+    streamFormat: 'hls',
   };
 }
 
 function rokuXtreamPlaybackPath(sourceId, kind, id, extension = '') {
   const ext = String(extension || '').replace(/[^a-z0-9]/gi, '').toLowerCase();
-  return `/api/xtream/roku/${encodeURIComponent(sourceId)}/${kind}/${encodeURIComponent(id)}${ext ? `?ext=${encodeURIComponent(ext)}` : ''}`;
+  return `/api/xtream/hls/${encodeURIComponent(sourceId)}/${kind}/${encodeURIComponent(id)}/master.m3u8${ext ? `?ext=${encodeURIComponent(ext)}` : ''}`;
 }
 app.use(cors());
 app.use(express.json());
@@ -623,6 +629,98 @@ app.get('/api/xtream/play/:sourceId/:kind/:id', async (req, res) => {
   } catch (error) { res.status(502).json({ error: error.message }); }
 });
 
+function rokuHlsKey(sourceId, kind, id, extension) {
+  // Segment URLs in an HLS manifest do not retain the manifest query string,
+  // so the identity cannot depend on `extension`.
+  return createHash('sha256').update(`${sourceId}:${kind}:${id}`).digest('hex').slice(0, 24);
+}
+
+async function waitForHlsManifest(filename, timeoutMs = 15_000) {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    try {
+      const stat = await fs.stat(filename);
+      if (stat.size > 0) return true;
+    } catch { /* ffmpeg has not produced the first segment yet */ }
+    await new Promise(resolve => setTimeout(resolve, 180));
+  }
+  return false;
+}
+
+async function getOrStartRokuHls(source, kind, id, extension) {
+  const key = rokuHlsKey(source._id, kind, id, extension);
+  const existing = rokuHlsJobs.get(key);
+  if (existing) {
+    existing.lastAccess = Date.now();
+    return existing;
+  }
+
+  const directory = path.join(rokuHlsRoot, key);
+  await fs.mkdir(directory, { recursive: true });
+  const manifest = path.join(directory, 'master.m3u8');
+  const inputUrl = xtreamProviderUrl(source, kind, id, extension);
+  const args = [
+    '-hide_banner', '-loglevel', 'error', '-i', inputUrl,
+    '-map', '0:v:0?', '-map', '0:a:0?', '-c', 'copy', '-sn', '-dn',
+    '-f', 'hls', '-hls_time', '2', '-hls_list_size', '12',
+    '-hls_flags', 'independent_segments+delete_segments',
+    '-hls_segment_filename', path.join(directory, 'segment-%06d.ts'), manifest,
+  ];
+  const child = spawn('ffmpeg', args, { stdio: ['ignore', 'ignore', 'pipe'] });
+  const job = { key, directory, manifest, child, lastAccess: Date.now(), error: '' };
+  rokuHlsJobs.set(key, job);
+  child.stderr.on('data', chunk => { job.error += chunk.toString(); });
+  child.on('error', error => { job.error += error.message; });
+  child.on('close', code => {
+    job.finished = true;
+    if (code !== 0 && code !== null) console.warn(`[Xtream Roku HLS] ${kind}:${id} exited ${code}: ${job.error.trim().slice(-240)}`);
+  });
+  return job;
+}
+
+// Keep only actively watched HLS pipelines. Render's disk is ephemeral and
+// this avoids retaining a whole film after playback stops.
+setInterval(() => {
+  const expiry = Date.now() - 10 * 60_000;
+  for (const [key, job] of rokuHlsJobs) {
+    if (job.lastAccess >= expiry) continue;
+    if (job.child && !job.child.killed) job.child.kill('SIGKILL');
+    rokuHlsJobs.delete(key);
+    fs.rm(job.directory, { recursive: true, force: true }).catch(() => {});
+  }
+}, 60_000).unref();
+
+app.get('/api/xtream/hls/:sourceId/:kind/:id/master.m3u8', async (req, res) => {
+  try {
+    if (!['movie', 'series'].includes(req.params.kind)) return res.sendStatus(400);
+    const source = await getXtreamSource(req.params.sourceId);
+    if (!source) return res.sendStatus(404);
+    const job = await getOrStartRokuHls(source, req.params.kind, req.params.id, req.query.ext);
+    if (!await waitForHlsManifest(job.manifest)) {
+      return res.status(504).json({ error: job.error.trim().slice(-240) || 'HLS manifest is still being prepared' });
+    }
+    job.lastAccess = Date.now();
+    res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
+    res.setHeader('Cache-Control', 'no-store');
+    res.sendFile(job.manifest);
+  } catch (error) { res.status(502).json({ error: error.message }); }
+});
+
+app.get('/api/xtream/hls/:sourceId/:kind/:id/:segment', async (req, res) => {
+  try {
+    if (!/^segment-\d{6}\.ts$/.test(req.params.segment)) return res.sendStatus(404);
+    const key = rokuHlsKey(req.params.sourceId, req.params.kind, req.params.id, req.query.ext);
+    const job = rokuHlsJobs.get(key);
+    if (!job) return res.sendStatus(404);
+    job.lastAccess = Date.now();
+    const filename = path.join(job.directory, req.params.segment);
+    await fs.access(filename);
+    res.setHeader('Content-Type', 'video/mp2t');
+    res.setHeader('Cache-Control', 'no-store');
+    res.sendFile(filename);
+  } catch { res.sendStatus(404); }
+});
+
 app.get('/api/xtream/roku/:sourceId/:kind/:id', async (req, res) => {
   let child;
   try {
@@ -701,7 +799,7 @@ async function buildXtreamSeriesPayload({ limit, selected: suppliedSelected } = 
             rokuCategory: seriesItem.rokuCategory,
             language: seriesItem.language,
             added: seriesItem.added,
-            url: playbackUrl, playbackUrl, streamFormat: 'mp4',
+            url: playbackUrl, playbackUrl, streamFormat: 'hls',
           });
         }
       } catch (error) {

@@ -28,7 +28,10 @@ export function publicXtreamSource(source) {
     hasCredentials: Boolean(source.username && source.password),
     enabledKeys: Array.isArray(source.enabledKeys) ? source.enabledKeys : [],
     enabledItems: Array.isArray(source.enabledItems) ? source.enabledItems : [],
+    archivedKeys: Array.isArray(source.archivedKeys) ? source.archivedKeys : [],
+    archivedItems: Array.isArray(source.archivedItems) ? source.archivedItems : [],
     selectedCount: Array.isArray(source.enabledKeys) ? source.enabledKeys.length : 0,
+    archivedCount: Array.isArray(source.archivedKeys) ? source.archivedKeys.length : 0,
     updatedAt: source.updatedAt,
   };
 }
@@ -49,7 +52,7 @@ export async function getAllXtreamSources() {
 export async function createXtreamSource({ name, baseUrl, username, password }) {
   const source = {
     _id: randomUUID(), name, baseUrl, username, password,
-    enabledKeys: [], enabledItems: [], createdAt: new Date(), updatedAt: new Date(),
+    enabledKeys: [], enabledItems: [], archivedKeys: [], archivedItems: [], createdAt: new Date(), updatedAt: new Date(),
   };
   await (await sourceCollection()).insertOne(source);
   return publicXtreamSource(source);

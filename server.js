@@ -518,10 +518,55 @@ app.put('/api/xtream/sources/:id/selection', async (req, res) => {
     const source = await getXtreamSource(req.params.id);
     if (!source) return res.sendStatus(404);
     const enabledItems = await resolveXtreamEnabledItems(source, req.body.enabledKeys);
-    const updated = await updateXtreamSelection(req.params.id, enabledItems.map(item => item.key), enabledItems);
+    const enabledKeys = enabledItems.map(item => item.key);
+    const enabledSet = new Set(enabledKeys);
+    const updated = await updateXtreamSource(req.params.id, {
+      enabledKeys,
+      enabledItems,
+      archivedKeys: (source.archivedKeys || []).filter(key => !enabledSet.has(key)),
+      archivedItems: (source.archivedItems || []).filter(item => !enabledSet.has(item.key)),
+    });
     if (!updated) return res.sendStatus(404);
     res.json(updated);
   } catch (error) { res.status(400).json({ error: error.message }); }
+});
+
+app.post('/api/xtream/sources/:id/archive/:key', async (req, res) => {
+  try {
+    const source = await getXtreamSource(req.params.id);
+    if (!source) return res.sendStatus(404);
+    const key = String(req.params.key || '');
+    const enabledItems = Array.isArray(source.enabledItems) ? source.enabledItems : [];
+    const item = enabledItems.find(candidate => candidate.key === key);
+    if (!item) return res.status(404).json({ error: 'Saved Roku item not found' });
+    const archiveItems = [...(Array.isArray(source.archivedItems) ? source.archivedItems : []).filter(candidate => candidate.key !== key), item];
+    const updated = await updateXtreamSource(source._id, {
+      enabledKeys: (source.enabledKeys || []).filter(candidate => candidate !== key),
+      enabledItems: enabledItems.filter(candidate => candidate.key !== key),
+      archivedKeys: archiveItems.map(candidate => candidate.key),
+      archivedItems: archiveItems,
+    });
+    res.json(updated);
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+app.post('/api/xtream/sources/:id/archive/:key/restore', async (req, res) => {
+  try {
+    const source = await getXtreamSource(req.params.id);
+    if (!source) return res.sendStatus(404);
+    const key = String(req.params.key || '');
+    const archivedItems = Array.isArray(source.archivedItems) ? source.archivedItems : [];
+    const item = archivedItems.find(candidate => candidate.key === key);
+    if (!item) return res.status(404).json({ error: 'Archived item not found' });
+    const enabledItems = [...(Array.isArray(source.enabledItems) ? source.enabledItems : []).filter(candidate => candidate.key !== key), item];
+    const updated = await updateXtreamSource(source._id, {
+      enabledKeys: enabledItems.map(candidate => candidate.key),
+      enabledItems,
+      archivedKeys: (source.archivedKeys || []).filter(candidate => candidate !== key),
+      archivedItems: archivedItems.filter(candidate => candidate.key !== key),
+    });
+    res.json(updated);
+  } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 app.get('/api/xtream/play/:sourceId/:kind/:id', async (req, res) => {

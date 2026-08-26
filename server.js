@@ -2,6 +2,7 @@ import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
 import os from 'node:os';
+import { Readable } from 'node:stream';
 import { access, readFile } from 'node:fs/promises';
 import { root as hlsRoot, ensureHls, hlsReady, hlsRunning, registerHls, startHls } from './hls.js';
 import { getPlaylist, getPlaylistStoreStatus, getPlaylistStructure, savePlaylist } from './playlist-store.js';
@@ -548,7 +549,25 @@ app.get('/api/xtream/play/:sourceId/:kind/:id', async (req, res) => {
     const source = await getXtreamSource(req.params.sourceId);
     if (!source) return res.sendStatus(404);
     if (!['channel', 'movie', 'series'].includes(req.params.kind)) return res.sendStatus(400);
-    res.redirect(302, xtreamProviderUrl(source, req.params.kind, req.params.id, req.query.ext));
+    if (req.params.kind === 'channel') return res.redirect(302, xtreamProviderUrl(source, req.params.kind, req.params.id, req.query.ext));
+    const headers = {};
+    if (req.headers.range) headers.range = req.headers.range;
+    headers['user-agent'] = req.headers['user-agent'] || 'RH-Stream/1.0';
+    const upstream = await fetch(xtreamProviderUrl(source, req.params.kind, req.params.id, req.query.ext), { headers });
+    if (!upstream.ok && upstream.status !== 206) {
+      const detail = await upstream.text().catch(() => '');
+      return res.status(upstream.status || 502).json({ error: `Xtream media returned HTTP ${upstream.status}`, detail: detail.slice(0, 160) });
+    }
+    for (const name of ['accept-ranges', 'cache-control', 'content-length', 'content-range', 'content-type', 'etag', 'last-modified']) {
+      const value = upstream.headers.get(name);
+      if (value) res.setHeader(name, value);
+    }
+    res.status(upstream.status);
+    if (!upstream.body) return res.end();
+    Readable.fromWeb(upstream.body).on('error', error => {
+      console.warn(`[Xtream] Media proxy interrupted: ${error.message}`);
+      if (!res.headersSent) res.status(502).end(); else res.destroy(error);
+    }).pipe(res);
   } catch (error) { res.status(502).json({ error: error.message }); }
 });
 app.get('/api/telegram/roku/prepare', async (req, res) => {

@@ -462,10 +462,15 @@ async function buildXtreamSeriesPayload({ limit } = {}) {
 }
 app.get('/api/roku/library', async (_, res) => {
   try {
+    // Compatibility for Roku packages installed before the bootstrap/page
+    // split. Never expand the complete Xtream library here: a provider may
+    // have tens of thousands of series and the Render instance has 256 MB.
+    // Returning the same bounded initial catalog keeps an older package
+    // usable instead of crashing the API process.
     const [series, movies, channels] = await Promise.all([
-      buildXtreamSeriesPayload(),
-      buildXtreamMoviesPayload(),
-      getAllXtreamItems('channel').then(buildXtreamChannelsPayload),
+      buildXtreamSeriesPayload({ limit: rokuInitialSeriesLimit }),
+      buildXtreamMoviesPayload({ limit: rokuInitialMovieLimit }),
+      getAllXtreamItems('channel').then(items => buildXtreamChannelsPayload(items.slice(0, rokuInitialChannelLimit))),
     ]);
     res.json({ items: [...series, ...movies, ...channels] });
   }

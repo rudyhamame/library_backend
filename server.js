@@ -9,7 +9,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { shapeArabicForRoku } from './arabic-shaper.js';
 import { createXtreamSource, deleteXtreamSource, getAllXtreamSources, getXtreamSource, getXtreamSources, publicXtreamSource, updateXtreamSelection, updateXtreamSource } from './xtream-store.js';
-import { getXtreamCatalog, getXtreamCategories, getXtreamSeriesEpisodes, validateXtreamConnection, xtreamPlaybackPath, xtreamProviderUrl } from './xtream.js';
+import { getXtreamCatalog, getXtreamCategories, getXtreamMovieInfo, getXtreamSeriesEpisodes, validateXtreamConnection, xtreamPlaybackPath, xtreamProviderUrl } from './xtream.js';
 import { getPlayback, getPlaybackHistory, savePlayback } from './playback-store.js';
 import { getFavorites, toggleFavorite } from './favorites-store.js';
 
@@ -68,6 +68,18 @@ function detectXtreamLanguage(item, category) {
 function titleLanguageCode(item) {
   const match = String(item?.title || '').match(/^\s*([A-Za-z]{2})\s*(?:[-|:])/);
   return match ? match[1].toUpperCase() : 'OTHER';
+}
+
+function displayDuration(value) {
+  const raw = String(value ?? '').trim();
+  if (!raw) return '';
+  if (/^\d{1,2}:\d{2}(?::\d{2})?$/.test(raw)) return raw.length === 5 ? `00:${raw}` : raw;
+  const seconds = Number(raw);
+  if (!Number.isFinite(seconds) || seconds <= 0) return raw;
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const remaining = Math.floor(seconds % 60);
+  return [hours, minutes, remaining].map(part => String(part).padStart(2, '0')).join(':');
 }
 
 async function getAllXtreamItems(kind) {
@@ -231,9 +243,28 @@ app.get('/api/roku/series/detail', async (req, res) => {
 async function buildXtreamMoviesPayload({ limit, selected } = {}) {
   let movies = (selected || await getRokuSelectedItems('movie')).slice().sort((a, b) => Number(b.added || 0) - Number(a.added || 0));
   if (Number.isFinite(limit) && limit > 0) movies = movies.slice(0, limit);
-  // The stream catalog already carries duration for most providers. Avoid one
-  // extra provider request per movie now that Roku receives the full catalog.
-  return movies.map(item => ({ ...directXtreamItem(item), duration: item.duration || '', kind: 'movie', contentKind: 'movie', rokuEnabled: true }));
+  // Many Xtream VOD catalogs omit duration from get_vod_streams. Ask for
+  // detailed metadata only for the small, explicitly-selected Roku library.
+  let cursor = 0;
+  const results = new Array(movies.length);
+  async function worker() {
+    while (cursor < movies.length) {
+      const index = cursor++;
+      const item = movies[index];
+      let duration = displayDuration(item.duration);
+      if (!duration) {
+        try {
+          const source = await getXtreamSource(item.sourceId);
+          if (source) duration = displayDuration((await getXtreamMovieInfo(source, item.id)).duration);
+        } catch (error) {
+          console.warn(`[Xtream] Could not read movie duration for ${item.id}: ${error.message}`);
+        }
+      }
+      results[index] = { ...directXtreamItem(item), duration, kind: 'movie', contentKind: 'movie', rokuEnabled: true };
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(3, movies.length) }, worker));
+  return results;
 }
 
 function buildXtreamChannelsPayload(items) {
@@ -797,7 +828,7 @@ async function buildXtreamSeriesPayload({ limit, selected: suppliedSelected } = 
             seriesTitle: details.title, rokuSeriesTitle: rokuText(details.title),
             seasonTitle: episode.seasonTitle, rokuSeasonTitle: rokuText(episode.seasonTitle),
             seasonSort: episode.seasonNumber, episodeNumber: episode.episodeNumber,
-            duration: episode.duration, thumbnail: episode.thumbnail,
+            duration: displayDuration(episode.duration), thumbnail: episode.thumbnail,
             category: seriesItem.category,
             rokuCategory: seriesItem.rokuCategory,
             language: seriesItem.language,

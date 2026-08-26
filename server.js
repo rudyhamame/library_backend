@@ -16,6 +16,21 @@ const previewCache = new Map();
 const arabicText = /[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]/;
 const rokuText = (value) => arabicText.test(String(value || '')) ? shapeArabicForRoku(value) : String(value || '');
 
+function detectXtreamLanguage(item, category) {
+  const text = `${category || ''} ${item.title || ''}`;
+  if (arabicText.test(text) || /\b(arabic|arab|ar)\b/i.test(text)) return 'Arabic';
+  const rules = [
+    ['English', /\b(english|eng|en)\b/i], ['French', /\b(french|francais|fr)\b/i],
+    ['Turkish', /\b(turkish|turk|tr)\b/i], ['Spanish', /\b(spanish|espanol|es)\b/i],
+    ['German', /\b(german|deutsch|de)\b/i], ['Italian', /\b(italian|italiano|it)\b/i],
+    ['Portuguese', /\b(portuguese|portugues|pt)\b/i], ['Russian', /\b(russian|ru)\b/i],
+    ['Hindi', /\b(hindi|hi)\b/i], ['Urdu', /\b(urdu|ur)\b/i],
+    ['Persian', /\b(persian|farsi|fa)\b/i], ['Kurdish', /\b(kurdish|kurd|ku)\b/i],
+  ];
+  for (const [language, pattern] of rules) if (pattern.test(text)) return language;
+  return 'Other';
+}
+
 async function getAllXtreamItems(kind) {
   const sources = await getAllXtreamSources();
   const groups = await Promise.all(sources.map(async source => {
@@ -24,7 +39,8 @@ async function getAllXtreamItems(kind) {
       const categoryNames = new Map(categories.map(category => [category.id, category.name]));
       return catalog.map(item => {
         const category = categoryNames.get(item.categoryId) || source.name || 'Other';
-        return { ...item, category, rokuCategory: rokuText(category), sourceId: source._id, sourceName: source.name };
+        const language = detectXtreamLanguage(item, category);
+        return { ...item, category, language, rokuCategory: rokuText(category), sourceId: source._id, sourceName: source.name };
       });
     } catch (error) {
       console.warn(`[Xtream] Could not refresh ${kind} catalog for ${source.name}: ${error.message}`);

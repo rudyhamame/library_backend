@@ -11,12 +11,16 @@ function apiUrl(source, params = {}) {
 
 async function request(source, params) {
   const key = `${source._id}:${JSON.stringify(params)}`;
+  // A series-info response may carry hundreds of episodes and images. Keeping
+  // every expanded series in the five-minute cache is what grows the Render
+  // heap until Node is terminated. Catalog lists remain cached; details do not.
+  const cacheable = params?.action !== 'get_series_info';
   const cached = cache.get(key);
-  if (cached?.expires > Date.now()) return cached.data;
+  if (cacheable && cached?.expires > Date.now()) return cached.data;
   const response = await fetch(apiUrl(source, params), { signal: AbortSignal.timeout(25_000) });
   if (!response.ok) throw new Error(`Xtream server returned HTTP ${response.status}`);
   const data = await response.json();
-  cache.set(key, { data, expires: Date.now() + cacheTtl });
+  if (cacheable) cache.set(key, { data, expires: Date.now() + cacheTtl });
   return data;
 }
 

@@ -20,7 +20,11 @@ const rokuText = (value) => arabicText.test(String(value || '')) ? shapeArabicFo
 // additional catalog pages are loaded separately by the Roku client.
 const rokuInitialMovieLimit = Math.max(20, Number.parseInt(process.env.ROKU_INITIAL_MOVIE_LIMIT || '100', 10));
 const rokuInitialChannelLimit = Math.max(20, Number.parseInt(process.env.ROKU_INITIAL_CHANNEL_LIMIT || '150', 10));
-const rokuInitialSeriesLimit = Math.max(1, Number.parseInt(process.env.ROKU_INITIAL_SERIES_LIMIT || '12', 10));
+// Each series can contain hundreds of episode records. A small page is
+// intentional on Render's 256 MB instance; Roku loads further pages only when
+// the user reaches the end of the current series list.
+const rokuInitialSeriesLimit = Math.min(4, Math.max(1, Number.parseInt(process.env.ROKU_INITIAL_SERIES_LIMIT || '4', 10)));
+const xtreamItemsInFlight = new Map();
 
 function rokuPage(req, defaultLimit) {
   const page = Math.max(0, Number.parseInt(req.query.page || '0', 10) || 0);
@@ -58,22 +62,33 @@ function detectXtreamLanguage(item, category) {
 }
 
 async function getAllXtreamItems(kind) {
-  const sources = await getAllXtreamSources();
-  const groups = await Promise.all(sources.map(async source => {
-    try {
-      const [catalog, categories] = await Promise.all([getXtreamCatalog(source, kind), getXtreamCategories(source, kind)]);
-      const categoryNames = new Map(categories.map(category => [category.id, category.name]));
-      return catalog.map(item => {
-        const category = categoryNames.get(item.categoryId) || source.name || 'Other';
-        const language = detectXtreamLanguage(item, category);
-        return { ...item, category, language, rokuCategory: rokuText(category), sourceId: source._id, sourceName: source.name };
-      });
-    } catch (error) {
-      console.warn(`[Xtream] Could not refresh ${kind} catalog for ${source.name}: ${error.message}`);
-      return [];
-    }
-  }));
-  return groups.flat();
+  // The Roku can issue overlapping page/category requests. Coalesce those
+  // requests so only one full provider catalog is mapped at a time.
+  if (xtreamItemsInFlight.has(kind)) return xtreamItemsInFlight.get(kind);
+  const request = (async () => {
+    const sources = await getAllXtreamSources();
+    const groups = await Promise.all(sources.map(async source => {
+      try {
+        const [catalog, categories] = await Promise.all([getXtreamCatalog(source, kind), getXtreamCategories(source, kind)]);
+        const categoryNames = new Map(categories.map(category => [category.id, category.name]));
+        return catalog.map(item => {
+          const category = categoryNames.get(item.categoryId) || source.name || 'Other';
+          const language = detectXtreamLanguage(item, category);
+          return { ...item, category, language, rokuCategory: rokuText(category), sourceId: source._id, sourceName: source.name };
+        });
+      } catch (error) {
+        console.warn(`[Xtream] Could not refresh ${kind} catalog for ${source.name}: ${error.message}`);
+        return [];
+      }
+    }));
+    return groups.flat();
+  })();
+  xtreamItemsInFlight.set(kind, request);
+  try {
+    return await request;
+  } finally {
+    xtreamItemsInFlight.delete(kind);
+  }
 }
 
 function directXtreamItem(item) {
@@ -505,7 +520,7 @@ app.get('/api/xtream/play/:sourceId/:kind/:id', async (req, res) => {
   } catch (error) { res.status(502).json({ error: error.message }); }
 });
 async function buildXtreamSeriesPayload({ limit, selected: suppliedSelected } = {}) {
-  let selected = suppliedSelected || (await getAllXtreamItems('series')).sort((a, b) => Number(b.added || 0) - Number(a.added || 0));
+  let selected = suppliedSelected || (await getAllXtreamItems('series')).slice().sort((a, b) => Number(b.added || 0) - Number(a.added || 0));
   if (Number.isFinite(limit) && limit > 0) selected = selected.slice(0, limit);
   let cursor = 0;
   const groups = new Array(selected.length);
@@ -531,6 +546,7 @@ async function buildXtreamSeriesPayload({ limit, selected: suppliedSelected } = 
             duration: episode.duration, thumbnail: episode.thumbnail,
             category: seriesItem.category,
             rokuCategory: seriesItem.rokuCategory,
+            language: seriesItem.language,
             added: seriesItem.added,
             url: playbackUrl, playbackUrl, streamFormat: episode.extension === 'mp4' ? 'mp4' : 'hls',
           });
@@ -541,7 +557,9 @@ async function buildXtreamSeriesPayload({ limit, selected: suppliedSelected } = 
       groups[index] = items;
     }
   }
-  const concurrency = Math.min(6, Math.max(1, selected.length));
+  // More than two concurrent get_series_info payloads can exhaust Render's
+  // small heap for long-running series.
+  const concurrency = Math.min(2, Math.max(1, selected.length));
   await Promise.all(Array.from({ length: concurrency }, worker));
   return groups.flat();
 }
@@ -564,6 +582,8 @@ app.get('/api/roku/library', async (_, res) => {
 app.get('/api/roku/series', async (req, res) => {
   try {
     const pageInfo = rokuPage(req, rokuInitialSeriesLimit);
+    pageInfo.limit = Math.min(4, pageInfo.limit);
+    pageInfo.offset = pageInfo.page * pageInfo.limit;
     const category = String(req.query.category || '');
     const selected = (await getAllXtreamItems('series'))
       .filter(item => !category || item.category === category)

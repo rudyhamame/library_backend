@@ -317,7 +317,8 @@ app.get('/api/roku/movies', async (_, res) => {
 app.get('/api/playback/history', async (_, res) => {
   try {
     res.set('Cache-Control', 'no-store');
-    res.json({ items: await getPlaybackHistory() });
+    const items = await getPlaybackHistory();
+    res.json({ items: items.map((item) => ({ ...item, rokuTitle: rokuText(item.title) })) });
   }
   catch (error) { res.status(500).json({ error: error.message }); }
 });

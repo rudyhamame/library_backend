@@ -91,6 +91,29 @@ async function getAllXtreamItems(kind) {
   }
 }
 
+function selectedXtreamItem(source, item) {
+  const category = String(item.category || item.categoryName || source.name || 'Other');
+  return {
+    ...item,
+    id: String(item.id),
+    kind: item.kind,
+    sourceId: source._id,
+    sourceName: source.name,
+    category,
+    language: item.language || detectXtreamLanguage(item, category),
+    rokuCategory: item.rokuCategory || rokuText(category),
+  };
+}
+
+async function getRokuSelectedItems(kind) {
+  // Roku is fed only from the explicit frontend selection. This avoids
+  // downloading and expanding a provider's whole catalog on the TV.
+  const sources = await getAllXtreamSources();
+  return sources.flatMap(source => (Array.isArray(source.enabledItems) ? source.enabledItems : [])
+    .filter(item => item?.kind === kind)
+    .map(item => selectedXtreamItem(source, item)));
+}
+
 function directXtreamItem(item) {
   const playbackUrl = xtreamPlaybackPath(item.sourceId, item.kind, item.id, item.extension);
   return {
@@ -130,7 +153,7 @@ app.get('/api/roku/series/categories', async (_, res) => {
   try {
     const seen = new Set();
     const items = [];
-    for (const series of await getAllXtreamItems('series')) {
+    for (const series of await getRokuSelectedItems('series')) {
       const category = series.category || 'Other';
       if (seen.has(category)) continue;
       seen.add(category);
@@ -153,7 +176,7 @@ app.get('/api/roku/search', async (req, res) => {
     const kind = String(req.query.kind || '');
     const query = String(req.query.q || '').trim().toLocaleLowerCase();
     if ((kind !== 'series' && kind !== 'movie') || !query) return res.status(400).json({ error: 'kind and q are required' });
-    const matches = (await getAllXtreamItems(kind))
+    const matches = (await getRokuSelectedItems(kind))
       .filter(item => item.title.toLocaleLowerCase().includes(query))
       .slice(0, 60);
     if (kind === 'series') {
@@ -183,14 +206,14 @@ app.get('/api/roku/series/detail', async (req, res) => {
     const sourceId = String(req.query.sourceId || '');
     const seriesId = String(req.query.seriesId || '');
     if (!sourceId || !seriesId) return res.status(400).json({ error: 'sourceId and seriesId are required' });
-    const series = (await getAllXtreamItems('series')).find(item => String(item.sourceId) === sourceId && item.id === seriesId);
+    const series = (await getRokuSelectedItems('series')).find(item => String(item.sourceId) === sourceId && item.id === seriesId);
     if (!series) return res.status(404).json({ error: 'Series not found' });
     res.json({ items: await buildXtreamSeriesPayload({ selected: [series] }) });
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
-async function buildXtreamMoviesPayload({ limit } = {}) {
-  let movies = (await getAllXtreamItems('movie')).sort((a, b) => Number(b.added || 0) - Number(a.added || 0));
+async function buildXtreamMoviesPayload({ limit, selected } = {}) {
+  let movies = (selected || await getRokuSelectedItems('movie')).slice().sort((a, b) => Number(b.added || 0) - Number(a.added || 0));
   if (Number.isFinite(limit) && limit > 0) movies = movies.slice(0, limit);
   // The stream catalog already carries duration for most providers. Avoid one
   // extra provider request per movie now that Roku receives the full catalog.
@@ -445,7 +468,13 @@ async function resolveXtreamEnabledItems(source, enabledKeys) {
     const allowed = enabledKeys.map(String).filter(key => /^(channel|movie|series):[^:]+$/.test(key));
     const allowedSet = new Set(allowed);
     const kinds = [...new Set(allowed.map(key => key.split(':', 1)[0]))];
-    const catalogs = await Promise.all(kinds.map(kind => getXtreamCatalog(source, kind)));
+    const [catalogs, categoryGroups] = await Promise.all([
+      Promise.all(kinds.map(kind => getXtreamCatalog(source, kind))),
+      Promise.all(kinds.map(kind => getXtreamCategories(source, kind))),
+    ]);
+    const categoryNamesByKind = new Map(kinds.map((kind, index) => [
+      kind, new Map(categoryGroups[index].map(category => [category.id, category.name])),
+    ]));
     const resolved = catalogs.flat().filter(item => allowedSet.has(item.key));
     const byKey = new Map(resolved.map(item => [item.key, item]));
     return allowed.map(key => byKey.get(key)).filter(Boolean).map(item => ({
@@ -455,7 +484,11 @@ async function resolveXtreamEnabledItems(source, enabledKeys) {
       title: item.title,
       logo: item.logo,
       categoryId: item.categoryId,
+      category: categoryNamesByKind.get(item.kind)?.get(item.categoryId) || source.name || 'Other',
+      language: detectXtreamLanguage(item, categoryNamesByKind.get(item.kind)?.get(item.categoryId) || source.name || 'Other'),
       extension: item.extension,
+      duration: item.duration,
+      added: item.added,
     }));
 }
 
@@ -565,15 +598,15 @@ async function buildXtreamSeriesPayload({ limit, selected: suppliedSelected } = 
 }
 app.get('/api/roku/library', async (_, res) => {
   try {
-    // Compatibility for Roku packages installed before the bootstrap/page
-    // split. Never expand the complete Xtream library here: a provider may
-    // have tens of thousands of series and the Render instance has 256 MB.
-    // Returning the same bounded initial catalog keeps an older package
-    // usable instead of crashing the API process.
+    // Compatibility for older Roku packages. This remains limited to the
+    // saved frontend selection, never the provider's full catalog.
+    const [selectedSeries, selectedMovies, selectedChannels] = await Promise.all([
+      getRokuSelectedItems('series'), getRokuSelectedItems('movie'), getRokuSelectedItems('channel'),
+    ]);
     const [series, movies, channels] = await Promise.all([
-      buildXtreamSeriesPayload({ limit: rokuInitialSeriesLimit }),
-      buildXtreamMoviesPayload({ limit: rokuInitialMovieLimit }),
-      getAllXtreamItems('channel').then(items => buildXtreamChannelsPayload(items.slice(0, rokuInitialChannelLimit))),
+      buildXtreamSeriesPayload({ selected: selectedSeries.slice(0, rokuInitialSeriesLimit) }),
+      buildXtreamMoviesPayload({ selected: selectedMovies.slice(0, rokuInitialMovieLimit) }),
+      Promise.resolve(buildXtreamChannelsPayload(selectedChannels.slice(0, rokuInitialChannelLimit))),
     ]);
     res.json({ items: [...series, ...movies, ...channels] });
   }
@@ -585,7 +618,7 @@ app.get('/api/roku/series', async (req, res) => {
     pageInfo.limit = Math.min(4, pageInfo.limit);
     pageInfo.offset = pageInfo.page * pageInfo.limit;
     const category = String(req.query.category || '');
-    const selected = (await getAllXtreamItems('series'))
+    const selected = (await getRokuSelectedItems('series'))
       .filter(item => !category || item.category === category)
       .sort((a, b) => Number(b.added || 0) - Number(a.added || 0));
     const sourcePage = selected.slice(pageInfo.offset, pageInfo.offset + pageInfo.limit);
@@ -599,7 +632,7 @@ app.get('/api/roku/series', async (req, res) => {
 });
 app.get('/api/roku/channels', async (req, res) => {
   try {
-    res.json(rokuPagePayload(buildXtreamChannelsPayload(await getAllXtreamItems('channel')), rokuPage(req, rokuInitialChannelLimit)));
+    res.json(rokuPagePayload(buildXtreamChannelsPayload(await getRokuSelectedItems('channel')), rokuPage(req, rokuInitialChannelLimit)));
   } catch (error) { res.status(502).json({ error: error.message }); }
 });
 app.listen(port, '0.0.0.0', () => {

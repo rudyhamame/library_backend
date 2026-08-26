@@ -558,10 +558,15 @@ app.get('/api/xtream/play/:sourceId/:kind/:id', async (req, res) => {
       const detail = await upstream.text().catch(() => '');
       return res.status(upstream.status || 502).json({ error: `Xtream media returned HTTP ${upstream.status}`, detail: detail.slice(0, 160) });
     }
-    for (const name of ['accept-ranges', 'cache-control', 'content-length', 'content-range', 'content-type', 'etag', 'last-modified']) {
+    for (const name of ['cache-control', 'content-length', 'content-range', 'content-type', 'etag', 'last-modified']) {
       const value = upstream.headers.get(name);
       if (value) res.setHeader(name, value);
     }
+    // Some Xtream providers return the file's byte interval in Accept-Ranges
+    // (for example "0-2385301832"). That is not valid HTTP: this header must
+    // name the supported range unit. Roku's media parser rejects the malformed
+    // response even though ffmpeg is lenient enough to accept it.
+    res.setHeader('Accept-Ranges', 'bytes');
     res.status(upstream.status);
     if (!upstream.body) return res.end();
     Readable.fromWeb(upstream.body).on('error', error => {

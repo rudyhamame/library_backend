@@ -361,13 +361,15 @@ app.get('/api/favorites', async (_, res) => {
   try { res.set('Cache-Control', 'no-store'); res.json({ items: await getFavorites() }); }
   catch (error) { res.status(500).json({ error: error.message }); }
 });
-app.put('/api/favorites/toggle', async (req, res) => {
+async function toggleFavoriteRequest(req, res) {
   try {
     const id = String(req.query?.id || req.body?.id || '');
     if (!id) return res.status(400).json({ error: 'id is required' });
     res.json(await toggleFavorite({ id, title: req.query?.title || req.body?.title, kind: req.query?.kind || req.body?.kind }));
   } catch (error) { res.status(500).json({ error: error.message }); }
-});
+}
+app.post('/api/favorites/toggle', toggleFavoriteRequest);
+app.put('/api/favorites/toggle', toggleFavoriteRequest);
 app.get('/api/playback/roku/get', async (req, res) => {
   try {
     const itemId = String(req.query?.itemId || '');

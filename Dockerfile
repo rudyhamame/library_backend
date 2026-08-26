@@ -1,7 +1,7 @@
 FROM node:24-bookworm-slim
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates ffmpeg \
+    && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -12,10 +12,7 @@ RUN npm ci --omit=dev && npm cache clean --force
 COPY --chown=node:node . .
 
 ENV NODE_ENV=production
-ENV FFMPEG_PATH=/usr/bin/ffmpeg
-
 USER node
 EXPOSE 8787
 
 CMD ["node", "server.js"]
-

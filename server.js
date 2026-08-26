@@ -22,6 +22,19 @@ const rokuInitialMovieLimit = Math.max(20, Number.parseInt(process.env.ROKU_INIT
 const rokuInitialChannelLimit = Math.max(20, Number.parseInt(process.env.ROKU_INITIAL_CHANNEL_LIMIT || '150', 10));
 const rokuInitialSeriesLimit = Math.max(1, Number.parseInt(process.env.ROKU_INITIAL_SERIES_LIMIT || '12', 10));
 
+function rokuPage(req, defaultLimit) {
+  const page = Math.max(0, Number.parseInt(req.query.page || '0', 10) || 0);
+  const requestedLimit = Number.parseInt(req.query.limit || String(defaultLimit), 10);
+  const limit = Math.min(200, Math.max(1, Number.isFinite(requestedLimit) ? requestedLimit : defaultLimit));
+  return { page, limit, offset: page * limit };
+}
+
+function rokuPagePayload(items, pageInfo) {
+  const total = items.length;
+  const pageItems = items.slice(pageInfo.offset, pageInfo.offset + pageInfo.limit);
+  return { items: pageItems, page: pageInfo.page, limit: pageInfo.limit, total, hasMore: pageInfo.offset + pageItems.length < total };
+}
+
 function detectXtreamLanguage(item, category) {
   const text = `${category || ''} ${item.title || ''}`;
   if (arabicText.test(text) || /\b(arabic|arab|ar)\b/i.test(text)) return 'Arabic';
@@ -108,8 +121,8 @@ function buildXtreamChannelsPayload(items) {
   }));
 }
 
-app.get('/api/roku/movies', async (_, res) => {
-  try { res.json({ items: await buildXtreamMoviesPayload({ limit: rokuInitialMovieLimit }) }); }
+app.get('/api/roku/movies', async (req, res) => {
+  try { res.json(rokuPagePayload(await buildXtreamMoviesPayload(), rokuPage(req, rokuInitialMovieLimit))); }
   catch (error) { res.status(500).json({ error: error.message }); }
 });
 app.get('/api/playback/history', async (_, res) => {
@@ -421,8 +434,8 @@ app.get('/api/xtream/play/:sourceId/:kind/:id', async (req, res) => {
     }).pipe(res);
   } catch (error) { res.status(502).json({ error: error.message }); }
 });
-async function buildXtreamSeriesPayload({ limit } = {}) {
-  let selected = (await getAllXtreamItems('series')).sort((a, b) => Number(b.added || 0) - Number(a.added || 0));
+async function buildXtreamSeriesPayload({ limit, selected: suppliedSelected } = {}) {
+  let selected = suppliedSelected || (await getAllXtreamItems('series')).sort((a, b) => Number(b.added || 0) - Number(a.added || 0));
   if (Number.isFinite(limit) && limit > 0) selected = selected.slice(0, limit);
   let cursor = 0;
   const groups = new Array(selected.length);
@@ -476,20 +489,22 @@ app.get('/api/roku/library', async (_, res) => {
   }
   catch (error) { res.status(502).json({ error: error.message }); }
 });
-app.get('/api/roku/series', async (_, res) => {
+app.get('/api/roku/series', async (req, res) => {
   try {
-    const items = await buildXtreamSeriesPayload({ limit: rokuInitialSeriesLimit });
-    console.log(`[Roku] Series catalog ready: ${items.length} Xtream episodes`);
-    res.json({ items });
+    const pageInfo = rokuPage(req, rokuInitialSeriesLimit);
+    const selected = (await getAllXtreamItems('series')).sort((a, b) => Number(b.added || 0) - Number(a.added || 0));
+    const sourcePage = selected.slice(pageInfo.offset, pageInfo.offset + pageInfo.limit);
+    const items = await buildXtreamSeriesPayload({ selected: sourcePage });
+    console.log(`[Roku] Series page ${pageInfo.page} ready: ${items.length} Xtream episodes`);
+    res.json({ items, page: pageInfo.page, limit: pageInfo.limit, total: selected.length, hasMore: pageInfo.offset + sourcePage.length < selected.length });
   } catch (error) {
     console.error('[Roku] Series catalog failed:', error.message);
     res.status(502).json({ error: error.message });
   }
 });
-app.get('/api/roku/channels', async (_, res) => {
+app.get('/api/roku/channels', async (req, res) => {
   try {
-    const items = buildXtreamChannelsPayload((await getAllXtreamItems('channel')).slice(0, rokuInitialChannelLimit));
-    res.json({ items });
+    res.json(rokuPagePayload(buildXtreamChannelsPayload(await getAllXtreamItems('channel')), rokuPage(req, rokuInitialChannelLimit)));
   } catch (error) { res.status(502).json({ error: error.message }); }
 });
 app.listen(port, '0.0.0.0', () => {

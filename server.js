@@ -370,6 +370,7 @@ async function toggleFavoriteRequest(req, res) {
 }
 app.post('/api/favorites/toggle', toggleFavoriteRequest);
 app.put('/api/favorites/toggle', toggleFavoriteRequest);
+app.get('/api/favorites/toggle', toggleFavoriteRequest);
 app.get('/api/playback/roku/get', async (req, res) => {
   try {
     const itemId = String(req.query?.itemId || '');

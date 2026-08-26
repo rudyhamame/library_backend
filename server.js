@@ -639,8 +639,12 @@ app.get('/api/xtream/roku/:sourceId/:kind/:id', async (req, res) => {
       '-hide_banner', '-loglevel', 'error',
       '-i', inputUrl,
       '-map', '0:v:0?', '-map', '0:a:0?',
-      '-c', 'copy', '-sn', '-dn',
+      // Xtream's transport streams carry AAC in ADTS packets. MP4 does not
+      // accept that packet format as-is: without this conversion ffmpeg emits
+      // just the initial 6 KB header, exits, and Roku stays at 100% forever.
+      '-c', 'copy', '-bsf:a', 'aac_adtstoasc', '-sn', '-dn',
       '-movflags', 'frag_keyframe+empty_moov+default_base_moof',
+      '-frag_duration', '2000000', '-flush_packets', '1',
       '-f', 'mp4', 'pipe:1',
     ];
     child = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'] });

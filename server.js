@@ -104,6 +104,27 @@ app.get('/api/roku/bootstrap', (_, res) => {
   res.json({ items: [] });
 });
 
+app.get('/api/roku/series/categories', async (_, res) => {
+  try {
+    const seen = new Set();
+    const items = [];
+    for (const series of await getAllXtreamItems('series')) {
+      const category = series.category || 'Other';
+      if (seen.has(category)) continue;
+      seen.add(category);
+      items.push({
+        id: `series-category:${series.sourceId}:${category}`,
+        title: category,
+        rokuTitle: series.rokuCategory || rokuText(category),
+        category,
+        contentKind: 'series-category',
+      });
+    }
+    items.sort((a, b) => a.title.localeCompare(b.title));
+    res.json({ items });
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
 async function buildXtreamMoviesPayload({ limit } = {}) {
   let movies = (await getAllXtreamItems('movie')).sort((a, b) => Number(b.added || 0) - Number(a.added || 0));
   if (Number.isFinite(limit) && limit > 0) movies = movies.slice(0, limit);
@@ -459,6 +480,8 @@ async function buildXtreamSeriesPayload({ limit, selected: suppliedSelected } = 
             seasonTitle: episode.seasonTitle, rokuSeasonTitle: rokuText(episode.seasonTitle),
             seasonSort: episode.seasonNumber, episodeNumber: episode.episodeNumber,
             duration: episode.duration, thumbnail: episode.thumbnail,
+            category: seriesItem.category,
+            rokuCategory: seriesItem.rokuCategory,
             added: seriesItem.added,
             url: playbackUrl, playbackUrl, streamFormat: episode.extension === 'mp4' ? 'mp4' : 'hls',
           });
@@ -492,7 +515,10 @@ app.get('/api/roku/library', async (_, res) => {
 app.get('/api/roku/series', async (req, res) => {
   try {
     const pageInfo = rokuPage(req, rokuInitialSeriesLimit);
-    const selected = (await getAllXtreamItems('series')).sort((a, b) => Number(b.added || 0) - Number(a.added || 0));
+    const category = String(req.query.category || '');
+    const selected = (await getAllXtreamItems('series'))
+      .filter(item => !category || item.category === category)
+      .sort((a, b) => Number(b.added || 0) - Number(a.added || 0));
     const sourcePage = selected.slice(pageInfo.offset, pageInfo.offset + pageInfo.limit);
     const items = await buildXtreamSeriesPayload({ selected: sourcePage });
     console.log(`[Roku] Series page ${pageInfo.page} ready: ${items.length} Xtream episodes`);

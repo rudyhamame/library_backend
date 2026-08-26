@@ -499,7 +499,9 @@ app.get('/api/xtream/sources/:id/enabled', async (req, res) => {
     const enabledKeys = Array.isArray(source.enabledKeys) ? source.enabledKeys : [];
     let enabledItems = Array.isArray(source.enabledItems) ? source.enabledItems : [];
     const itemKeys = new Set(enabledItems.map(item => item.key));
-    const needsBackfill = enabledItems.length !== enabledKeys.length || enabledKeys.some(key => !itemKeys.has(key));
+    const needsBackfill = enabledItems.length !== enabledKeys.length
+      || enabledKeys.some(key => !itemKeys.has(key))
+      || enabledItems.some(item => !item.category || !item.language);
     if (needsBackfill && enabledKeys.length) {
       enabledItems = await resolveXtreamEnabledItems(source, enabledKeys);
       const updated = await updateXtreamSelection(source._id, enabledItems.map(item => item.key), enabledItems);

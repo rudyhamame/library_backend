@@ -74,6 +74,17 @@ app.get('/api/health', async (_, res) => {
     res.status(503).json({ ok: false, source: 'catalog', storage: { type: 'mongodb', error: error.message } });
   }
 });
+
+// Roku must not try to build the full Xtream catalog during application
+// startup. A complete series catalog requires one provider request per
+// series, which can outlive Roku's HTTP request window. The Roku client uses
+// this endpoint only to verify that Render is reachable; each catalog page is
+// fetched separately when the user opens it.
+app.get('/api/roku/bootstrap', (_, res) => {
+  res.set('Cache-Control', 'no-store');
+  res.json({ items: [] });
+});
+
 async function buildXtreamMoviesPayload() {
   const movies = (await getAllXtreamItems('movie')).sort((a, b) => Number(b.added || 0) - Number(a.added || 0));
   // The stream catalog already carries duration for most providers. Avoid one

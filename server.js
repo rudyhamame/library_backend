@@ -484,11 +484,48 @@ app.get('/api/xtream/catalog', async (req, res) => {
   } catch (error) { res.status(502).json({ error: error.message }); }
 });
 
+async function resolveXtreamEnabledItems(source, enabledKeys) {
+    const allowed = enabledKeys.map(String).filter(key => /^(channel|movie|series):[^:]+$/.test(key));
+    const allowedSet = new Set(allowed);
+    const kinds = [...new Set(allowed.map(key => key.split(':', 1)[0]))];
+    const catalogs = await Promise.all(kinds.map(kind => getXtreamCatalog(source, kind)));
+    const resolved = catalogs.flat().filter(item => allowedSet.has(item.key));
+    const byKey = new Map(resolved.map(item => [item.key, item]));
+    return allowed.map(key => byKey.get(key)).filter(Boolean).map(item => ({
+      key: item.key,
+      id: item.id,
+      kind: item.kind,
+      title: item.title,
+      logo: item.logo,
+      categoryId: item.categoryId,
+      extension: item.extension,
+    }));
+}
+
+app.get('/api/xtream/sources/:id/enabled', async (req, res) => {
+  try {
+    const source = await getXtreamSource(req.params.id);
+    if (!source) return res.sendStatus(404);
+    const enabledKeys = Array.isArray(source.enabledKeys) ? source.enabledKeys : [];
+    let enabledItems = Array.isArray(source.enabledItems) ? source.enabledItems : [];
+    const itemKeys = new Set(enabledItems.map(item => item.key));
+    const needsBackfill = enabledItems.length !== enabledKeys.length || enabledKeys.some(key => !itemKeys.has(key));
+    if (needsBackfill && enabledKeys.length) {
+      enabledItems = await resolveXtreamEnabledItems(source, enabledKeys);
+      const updated = await updateXtreamSelection(source._id, enabledItems.map(item => item.key), enabledItems);
+      return res.json({ source: updated, items: updated.enabledItems });
+    }
+    res.json({ source: publicXtreamSource(source), items: enabledItems });
+  } catch (error) { res.status(502).json({ error: error.message }); }
+});
+
 app.put('/api/xtream/sources/:id/selection', async (req, res) => {
   try {
     if (!Array.isArray(req.body?.enabledKeys)) return res.status(400).json({ error: 'enabledKeys must be an array' });
-    const allowed = req.body.enabledKeys.map(String).filter(key => /^(channel|movie|series):[^:]+$/.test(key));
-    const updated = await updateXtreamSelection(req.params.id, allowed);
+    const source = await getXtreamSource(req.params.id);
+    if (!source) return res.sendStatus(404);
+    const enabledItems = await resolveXtreamEnabledItems(source, req.body.enabledKeys);
+    const updated = await updateXtreamSelection(req.params.id, enabledItems.map(item => item.key), enabledItems);
     if (!updated) return res.sendStatus(404);
     res.json(updated);
   } catch (error) { res.status(400).json({ error: error.message }); }

@@ -27,6 +27,7 @@ export function publicXtreamSource(source) {
     endpoint: source.baseUrl,
     hasCredentials: Boolean(source.username && source.password),
     enabledKeys: Array.isArray(source.enabledKeys) ? source.enabledKeys : [],
+    enabledItems: Array.isArray(source.enabledItems) ? source.enabledItems : [],
     selectedCount: Array.isArray(source.enabledKeys) ? source.enabledKeys.length : 0,
     updatedAt: source.updatedAt,
   };
@@ -48,7 +49,7 @@ export async function getAllXtreamSources() {
 export async function createXtreamSource({ name, baseUrl, username, password }) {
   const source = {
     _id: randomUUID(), name, baseUrl, username, password,
-    enabledKeys: [], createdAt: new Date(), updatedAt: new Date(),
+    enabledKeys: [], enabledItems: [], createdAt: new Date(), updatedAt: new Date(),
   };
   await (await sourceCollection()).insertOne(source);
   return publicXtreamSource(source);
@@ -63,8 +64,11 @@ export async function updateXtreamSource(id, changes) {
   return publicXtreamSource(result?.value || result);
 }
 
-export async function updateXtreamSelection(id, enabledKeys) {
-  return updateXtreamSource(id, { enabledKeys: [...new Set(enabledKeys.map(String))] });
+export async function updateXtreamSelection(id, enabledKeys, enabledItems = []) {
+  return updateXtreamSource(id, {
+    enabledKeys: [...new Set(enabledKeys.map(String))],
+    enabledItems,
+  });
 }
 
 export async function deleteXtreamSource(id) {

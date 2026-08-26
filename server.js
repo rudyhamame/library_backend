@@ -463,9 +463,24 @@ app.get('/api/xtream/catalog', async (req, res) => {
     const aliases = { live: 'channel', channel: 'channel', movie: 'movie', vod: 'movie', series: 'series' };
     const kind = aliases[String(req.query.kind || '')];
     if (!kind) return res.status(400).json({ error: 'kind must be channel, movie, or series' });
-    const [items, categories] = await Promise.all([getXtreamCatalog(source, kind), getXtreamCategories(source, kind)]);
+    const [allItems, categories] = await Promise.all([getXtreamCatalog(source, kind), getXtreamCategories(source, kind)]);
     const enabled = new Set(source.enabledKeys || []);
-    res.json({ source: publicXtreamSource(source), categories, items: items.map(item => ({ ...item, enabled: enabled.has(item.key) })) });
+    const query = String(req.query.q || '').trim().toLocaleLowerCase();
+    const category = String(req.query.category || 'all');
+    const pageSize = Math.min(200, Math.max(10, Number.parseInt(req.query.limit, 10) || 50));
+    const requestedPage = Math.max(1, Number.parseInt(req.query.page, 10) || 1);
+    const filtered = allItems.filter(item =>
+      (category === 'all' || item.categoryId === category)
+      && (!query || item.title.toLocaleLowerCase().includes(query))
+    );
+    const pageCount = Math.max(1, Math.ceil(filtered.length / pageSize));
+    const page = Math.min(requestedPage, pageCount);
+    const start = (page - 1) * pageSize;
+    res.json({
+      source: publicXtreamSource(source), categories,
+      items: filtered.slice(start, start + pageSize).map(item => ({ ...item, enabled: enabled.has(item.key) })),
+      pagination: { page, pageSize, pageCount, total: filtered.length },
+    });
   } catch (error) { res.status(502).json({ error: error.message }); }
 });
 

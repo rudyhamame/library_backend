@@ -795,7 +795,10 @@ setInterval(() => {
 
 app.get('/api/xtream/hls/:sourceId/:kind/:id/master.m3u8', async (req, res) => {
   try {
-    if (!['movie', 'series'].includes(req.params.kind)) return res.sendStatus(400);
+    // Channels use the same backend HLS pipeline as VOD. Redirecting Roku to
+    // the provider's live manifest exposed malformed headers and provider
+    // segment URLs directly to the TV.
+    if (!['channel', 'movie', 'series'].includes(req.params.kind)) return res.sendStatus(400);
     const source = await getXtreamSource(req.params.sourceId);
     if (!source) return res.sendStatus(404);
     const job = await getOrStartRokuHls(source, req.params.kind, req.params.id, req.query.ext);

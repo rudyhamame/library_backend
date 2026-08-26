@@ -15,6 +15,12 @@ let dashboardCache = { expires: 0, data: null };
 const previewCache = new Map();
 const arabicText = /[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]/;
 const rokuText = (value) => arabicText.test(String(value || '')) ? shapeArabicForRoku(value) : String(value || '');
+// Roku cannot reliably receive a JSON document containing a provider's entire
+// catalog (this source alone has 44,995 series). Keep the initial screen fast;
+// additional catalog pages are loaded separately by the Roku client.
+const rokuInitialMovieLimit = Math.max(20, Number.parseInt(process.env.ROKU_INITIAL_MOVIE_LIMIT || '100', 10));
+const rokuInitialChannelLimit = Math.max(20, Number.parseInt(process.env.ROKU_INITIAL_CHANNEL_LIMIT || '150', 10));
+const rokuInitialSeriesLimit = Math.max(1, Number.parseInt(process.env.ROKU_INITIAL_SERIES_LIMIT || '12', 10));
 
 function detectXtreamLanguage(item, category) {
   const text = `${category || ''} ${item.title || ''}`;
@@ -85,8 +91,9 @@ app.get('/api/roku/bootstrap', (_, res) => {
   res.json({ items: [] });
 });
 
-async function buildXtreamMoviesPayload() {
-  const movies = (await getAllXtreamItems('movie')).sort((a, b) => Number(b.added || 0) - Number(a.added || 0));
+async function buildXtreamMoviesPayload({ limit } = {}) {
+  let movies = (await getAllXtreamItems('movie')).sort((a, b) => Number(b.added || 0) - Number(a.added || 0));
+  if (Number.isFinite(limit) && limit > 0) movies = movies.slice(0, limit);
   // The stream catalog already carries duration for most providers. Avoid one
   // extra provider request per movie now that Roku receives the full catalog.
   return movies.map(item => ({ ...directXtreamItem(item), duration: item.duration || '', kind: 'movie', contentKind: 'movie', rokuEnabled: true }));
@@ -102,7 +109,7 @@ function buildXtreamChannelsPayload(items) {
 }
 
 app.get('/api/roku/movies', async (_, res) => {
-  try { res.json({ items: await buildXtreamMoviesPayload() }); }
+  try { res.json({ items: await buildXtreamMoviesPayload({ limit: rokuInitialMovieLimit }) }); }
   catch (error) { res.status(500).json({ error: error.message }); }
 });
 app.get('/api/playback/history', async (_, res) => {
@@ -414,8 +421,9 @@ app.get('/api/xtream/play/:sourceId/:kind/:id', async (req, res) => {
     }).pipe(res);
   } catch (error) { res.status(502).json({ error: error.message }); }
 });
-async function buildXtreamSeriesPayload() {
-  const selected = (await getAllXtreamItems('series')).sort((a, b) => Number(b.added || 0) - Number(a.added || 0));
+async function buildXtreamSeriesPayload({ limit } = {}) {
+  let selected = (await getAllXtreamItems('series')).sort((a, b) => Number(b.added || 0) - Number(a.added || 0));
+  if (Number.isFinite(limit) && limit > 0) selected = selected.slice(0, limit);
   let cursor = 0;
   const groups = new Array(selected.length);
   async function worker() {
@@ -465,7 +473,7 @@ app.get('/api/roku/library', async (_, res) => {
 });
 app.get('/api/roku/series', async (_, res) => {
   try {
-    const items = await buildXtreamSeriesPayload();
+    const items = await buildXtreamSeriesPayload({ limit: rokuInitialSeriesLimit });
     console.log(`[Roku] Series catalog ready: ${items.length} Xtream episodes`);
     res.json({ items });
   } catch (error) {
@@ -475,7 +483,7 @@ app.get('/api/roku/series', async (_, res) => {
 });
 app.get('/api/roku/channels', async (_, res) => {
   try {
-    const items = buildXtreamChannelsPayload(await getAllXtreamItems('channel'));
+    const items = buildXtreamChannelsPayload((await getAllXtreamItems('channel')).slice(0, rokuInitialChannelLimit));
     res.json({ items });
   } catch (error) { res.status(502).json({ error: error.message }); }
 });

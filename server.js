@@ -958,7 +958,19 @@ app.get('/api/xtream/hls/:sourceId/:kind/:id/master.m3u8', async (req, res) => {
     job.lastAccess = Date.now();
     res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
     res.setHeader('Cache-Control', 'no-store');
-    res.sendFile(job.manifest);
+    // Roku uses the device token on the manifest request, but relative HLS
+    // segment URLs do not inherit that query string. Carry the token onto
+    // each segment URL so the authenticated /api/xtream middleware accepts
+    // the subsequent video requests instead of returning a JSON 401 body.
+    let manifestText = await fs.readFile(job.manifest, 'utf8');
+    const deviceToken = String(req.query.deviceToken || '').trim();
+    if (deviceToken) {
+      const tokenQuery = `deviceToken=${encodeURIComponent(deviceToken)}`;
+      manifestText = manifestText.split('\n').map(line => (
+        /^segment-\d{6}\.ts$/.test(line.trim()) ? `${line}?${tokenQuery}` : line
+      )).join('\n');
+    }
+    res.send(manifestText);
   } catch (error) { res.status(502).json({ error: error.message }); }
 });
 

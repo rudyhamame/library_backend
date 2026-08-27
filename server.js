@@ -182,7 +182,7 @@ function directXtreamItem(item) {
   // relying on HLS segment URL handling on the device.
   const useDirectMp4 = extension === 'mp4' && (item.kind === 'movie' || item.kind === 'series');
   let playbackUrl = rokuXtreamPlaybackPath(item.sourceId, item.kind, item.id, extension);
-  if (useDirectMp4) playbackUrl = xtreamPlaybackPath(item.sourceId, item.kind, item.id, extension)
+  if (useDirectMp4) playbackUrl = rokuDirectMp4PlaybackPath(item.sourceId, item.kind, item.id, extension);
   return {
     ...item,
     source: 'xtream',
@@ -200,6 +200,11 @@ function directXtreamItem(item) {
 function rokuXtreamPlaybackPath(sourceId, kind, id, extension = '') {
   const ext = String(extension || '').replace(/[^a-z0-9]/gi, '').toLowerCase();
   return `/api/xtream/hls/${encodeURIComponent(sourceId)}/${kind}/${encodeURIComponent(id)}/master.m3u8${ext ? `?ext=${encodeURIComponent(ext)}` : ''}`;
+}
+
+function rokuDirectMp4PlaybackPath(sourceId, kind, id, extension = '') {
+  const ext = String(extension || '').replace(/[^a-z0-9]/gi, '').toLowerCase();
+  return `/api/xtream/roku/${encodeURIComponent(sourceId)}/${kind}/${encodeURIComponent(id)}${ext ? `?ext=${encodeURIComponent(ext)}` : ''}`;
 }
 
 app.use(cors());

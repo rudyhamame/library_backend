@@ -130,7 +130,10 @@ async function getAllXtreamItems(kind) {
 }
 
 function selectedXtreamItem(source, item) {
-  const category = String(item.category || item.categoryName || source.name || 'Other');
+  const suppliedCategory = String(item.category || item.categoryName || '').trim();
+  // "test" is the source display name, not a media category. Never expose it
+  // as a Roku filter when an old saved item is missing category metadata.
+  const category = /^test$/i.test(suppliedCategory) || !suppliedCategory ? 'Other' : suppliedCategory;
   return {
     ...item,
     id: String(item.id),
@@ -147,20 +150,30 @@ async function getRokuSelectedItems(kind) {
   // Roku is fed only from the explicit frontend selection. This avoids
   // downloading and expanding a provider's whole catalog on the TV.
   const sources = await getAllXtreamSources();
-  return sources.flatMap(source => (Array.isArray(source.enabledItems) ? source.enabledItems : [])
-    .filter(item => item?.kind === kind)
-    .map(item => selectedXtreamItem(source, item)));
+  const groups = await Promise.all(sources.map(async source => {
+    let categoryNames = new Map();
+    try {
+      categoryNames = new Map((await getXtreamCategories(source, kind)).map(category => [String(category.id), category.name]));
+    } catch (error) {
+      console.warn(`[Xtream] Could not refresh ${kind} categories for Roku: ${error.message}`);
+    }
+    return (Array.isArray(source.enabledItems) ? source.enabledItems : [])
+      .filter(item => item?.kind === kind)
+      .map(item => selectedXtreamItem(source, {
+        ...item,
+        category: categoryNames.get(String(item.categoryId || '')) || item.category,
+      }));
+  }));
+  return groups.flat();
 }
 
 function directXtreamItem(item) {
   const extension = String(item.extension || '').toLowerCase();
-  // This provider labels movie transport streams as video/mp4. Send movies
-  // through the fast fragmented-MP4 remux; actual MP4 series episodes can use
-  // the ranged proxy directly, while live channels remain HLS.
-  const useRemux = item.kind === 'movie';
+  // This provider labels movie transport streams as video/mp4. Roku rejects
+  // the fragmented-MP4 remux as malformed (-5), while the appendable HLS
+  // pipeline produces its first playable segment in about six seconds.
   const useDirectMp4 = item.kind === 'series' && extension === 'mp4';
   let playbackUrl = rokuXtreamPlaybackPath(item.sourceId, item.kind, item.id, extension);
-  if (useRemux) playbackUrl = rokuXtreamRemuxPath(item.sourceId, item.kind, item.id, extension)
   if (useDirectMp4) playbackUrl = xtreamPlaybackPath(item.sourceId, item.kind, item.id, extension)
   return {
     ...item,
@@ -172,7 +185,7 @@ function directXtreamItem(item) {
     rokuTextKind: /[A-Za-z]/.test(item.title) ? 'latin' : 'arabic',
     // Valid MP4 files support immediate ranged playback and avoid waiting for
     // an ffmpeg HLS cold start. Live/non-MP4 sources retain the HLS pipeline.
-    streamFormat: useDirectMp4 || useRemux ? 'mp4' : 'hls',
+    streamFormat: useDirectMp4 ? 'mp4' : 'hls',
   };
 }
 
@@ -181,10 +194,6 @@ function rokuXtreamPlaybackPath(sourceId, kind, id, extension = '') {
   return `/api/xtream/hls/${encodeURIComponent(sourceId)}/${kind}/${encodeURIComponent(id)}/master.m3u8${ext ? `?ext=${encodeURIComponent(ext)}` : ''}`;
 }
 
-function rokuXtreamRemuxPath(sourceId, kind, id, extension = '') {
-  const ext = String(extension || '').replace(/[^a-z0-9]/gi, '').toLowerCase();
-  return `/api/xtream/roku/${encodeURIComponent(sourceId)}/${kind}/${encodeURIComponent(id)}${ext ? `?ext=${encodeURIComponent(ext)}` : ''}`;
-}
 app.use(cors());
 app.use(express.json());
 
@@ -826,6 +835,18 @@ async function getOrStartRokuHls(source, kind, id, extension) {
     return existing;
   }
 
+  // Xtream accounts commonly allow only one live connection. Stop the prior
+  // channel immediately when another channel is opened; otherwise the
+  // provider responds with a tiny valid-but-completely-black placeholder.
+  if (kind === 'channel') {
+    for (const [otherKey, otherJob] of rokuHlsJobs) {
+      if (otherKey === key || otherJob.kind !== 'channel' || otherJob.sourceId !== String(source._id)) continue;
+      if (otherJob.child && !otherJob.child.killed) otherJob.child.kill('SIGKILL');
+      rokuHlsJobs.delete(otherKey);
+      fs.rm(otherJob.directory, { recursive: true, force: true }).catch(() => {});
+    }
+  }
+
   const directory = path.join(rokuHlsRoot, key);
   await fs.mkdir(directory, { recursive: true });
   const manifest = path.join(directory, 'master.m3u8');
@@ -843,7 +864,7 @@ async function getOrStartRokuHls(source, kind, id, extension) {
     '-hls_segment_filename', path.join(directory, 'segment-%06d.ts'), manifest,
   ];
   const child = spawn('ffmpeg', args, { stdio: ['ignore', 'ignore', 'pipe'] });
-  const job = { key, directory, manifest, child, lastAccess: Date.now(), error: '' };
+  const job = { key, sourceId: String(source._id), kind, directory, manifest, child, lastAccess: Date.now(), error: '' };
   rokuHlsJobs.set(key, job);
   child.stderr.on('data', chunk => { job.error += chunk.toString(); });
   child.on('error', error => { job.error += error.message; });
@@ -857,14 +878,14 @@ async function getOrStartRokuHls(source, kind, id, extension) {
 // Keep only actively watched HLS pipelines. Render's disk is ephemeral and
 // this avoids retaining a whole film after playback stops.
 setInterval(() => {
-  const expiry = Date.now() - 10 * 60_000;
+  const expiry = Date.now() - 45_000;
   for (const [key, job] of rokuHlsJobs) {
     if (job.lastAccess >= expiry) continue;
     if (job.child && !job.child.killed) job.child.kill('SIGKILL');
     rokuHlsJobs.delete(key);
     fs.rm(job.directory, { recursive: true, force: true }).catch(() => {});
   }
-}, 60_000).unref();
+}, 5_000).unref();
 
 app.get('/api/xtream/hls/:sourceId/:kind/:id/master.m3u8', async (req, res) => {
   try {

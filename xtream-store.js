@@ -36,45 +36,46 @@ export function publicXtreamSource(source) {
   };
 }
 
-export async function getXtreamSources() {
-  const sources = await (await sourceCollection()).find({}).sort({ name: 1, updatedAt: -1 }).toArray();
+export async function getXtreamSources(ownerId) {
+  const filter = ownerId ? { ownerId } : {};
+  const sources = await (await sourceCollection()).find(filter).sort({ name: 1, updatedAt: -1 }).toArray();
   return sources.map(publicXtreamSource);
 }
 
-export async function getXtreamSource(id) {
-  return (await sourceCollection()).findOne({ _id: id });
+export async function getXtreamSource(id, ownerId) {
+  return (await sourceCollection()).findOne({ _id: id, ...(ownerId ? { ownerId } : {}) });
 }
 
-export async function getAllXtreamSources() {
-  return (await sourceCollection()).find({}).sort({ name: 1, updatedAt: -1 }).toArray();
+export async function getAllXtreamSources(ownerId) {
+  return (await sourceCollection()).find(ownerId ? { ownerId } : {}).sort({ name: 1, updatedAt: -1 }).toArray();
 }
 
-export async function createXtreamSource({ name, baseUrl, username, password }) {
+export async function createXtreamSource({ name, baseUrl, username, password, ownerId }) {
   const source = {
-    _id: randomUUID(), name, baseUrl, username, password,
+    _id: randomUUID(), name, baseUrl, username, password, ownerId,
     enabledKeys: [], enabledItems: [], archivedKeys: [], archivedItems: [], createdAt: new Date(), updatedAt: new Date(),
   };
   await (await sourceCollection()).insertOne(source);
   return publicXtreamSource(source);
 }
 
-export async function updateXtreamSource(id, changes) {
+export async function updateXtreamSource(id, changes, ownerId) {
   const result = await (await sourceCollection()).findOneAndUpdate(
-    { _id: id },
+    { _id: id, ...(ownerId ? { ownerId } : {}) },
     { $set: { ...changes, updatedAt: new Date() } },
     { returnDocument: 'after' },
   );
   return publicXtreamSource(result?.value || result);
 }
 
-export async function updateXtreamSelection(id, enabledKeys, enabledItems = []) {
+export async function updateXtreamSelection(id, enabledKeys, enabledItems = [], ownerId) {
   return updateXtreamSource(id, {
     enabledKeys: [...new Set(enabledKeys.map(String))],
     enabledItems,
-  });
+  }, ownerId);
 }
 
-export async function deleteXtreamSource(id) {
-  const result = await (await sourceCollection()).deleteOne({ _id: id });
+export async function deleteXtreamSource(id, ownerId) {
+  const result = await (await sourceCollection()).deleteOne({ _id: id, ...(ownerId ? { ownerId } : {}) });
   return result.deletedCount === 1;
 }

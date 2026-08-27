@@ -12,6 +12,7 @@ import { createXtreamSource, deleteXtreamSource, getAllXtreamSources, getXtreamS
 import { getXtreamCatalog, getXtreamCategories, getXtreamMovieInfo, getXtreamSeriesEpisodes, validateXtreamConnection, xtreamPlaybackPath, xtreamProviderUrl } from './xtream.js';
 import { getPlayback, getPlaybackHistory, savePlayback } from './playback-store.js';
 import { getFavorites, toggleFavorite } from './favorites-store.js';
+import { createDeviceSession, getPairingInfo, loginDeviceSession, resolveDeviceToken, setupDeviceSession } from './device-sessions.js';
 
 const app = express();
 const port = process.env.PORT || 8787;
@@ -31,6 +32,12 @@ const rokuMoviePageLimit = 10;
 const xtreamItemsInFlight = new Map();
 const rokuHlsJobs = new Map();
 const rokuHlsRoot = path.join(os.tmpdir(), 'rh-stream-hls');
+const frontendUrl = process.env.FRONTEND_URL || 'https://rh-stream-frontend.onrender.com';
+
+function requestOwner(req) {
+  const token = String(req.get('x-device-token') || req.query.deviceToken || '');
+  return resolveDeviceToken(token)?.ownerId || null;
+}
 
 function cityIsoMinute(timeZone) {
   const values = Object.fromEntries(new Intl.DateTimeFormat('en-CA', {
@@ -146,10 +153,11 @@ function selectedXtreamItem(source, item) {
   };
 }
 
-async function getRokuSelectedItems(kind) {
+async function getRokuSelectedItems(kind, ownerId = null) {
   // Roku is fed only from the explicit frontend selection. This avoids
   // downloading and expanding a provider's whole catalog on the TV.
-  const sources = await getAllXtreamSources();
+  if (!ownerId) return [];
+  const sources = await getAllXtreamSources(ownerId);
   const groups = await Promise.all(sources.map(async source => {
     let categoryNames = new Map();
     try {
@@ -197,6 +205,48 @@ function rokuXtreamPlaybackPath(sourceId, kind, id, extension = '') {
 app.use(cors());
 app.use(express.json());
 
+// Pairing is intentionally short-lived and device scoped. The Roku displays
+// the pair URL as a QR code; the browser claims it and then uses the returned
+// token on every manager request.
+app.post('/api/roku/device-session', (req, res) => {
+  const deviceId = String(req.body?.deviceId || '').trim();
+  if (!deviceId) return res.status(400).json({ error: 'deviceId is required' });
+  res.json(createDeviceSession(deviceId, frontendUrl));
+});
+app.get('/api/roku/device-session', (req, res) => {
+  const deviceId = String(req.query.deviceId || '').trim();
+  if (!deviceId) return res.status(400).json({ error: 'deviceId is required' });
+  res.json(createDeviceSession(deviceId, frontendUrl));
+});
+app.get('/api/roku/device-session/status', async (req, res) => {
+  try {
+    const session = await getPairingInfo(req.query.code);
+    if (!session) return res.status(404).json({ error: 'Pairing code expired' });
+    res.json(session);
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+app.post('/api/device-session/info', async (req, res) => {
+  try {
+    const session = await getPairingInfo(req.body?.code);
+    if (!session) return res.status(404).json({ error: 'Pairing code expired or invalid' });
+    res.json(session);
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+app.post('/api/device-session/setup', async (req, res) => {
+  try {
+    const result = await setupDeviceSession(req.body?.code, req.body?.password);
+    if (result.error) return res.status(result.error.includes('expired') ? 404 : 400).json(result);
+    res.json(result);
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+app.post('/api/device-session/login', async (req, res) => {
+  try {
+    const result = await loginDeviceSession(req.body?.code, req.body?.password);
+    if (result.error) return res.status(result.error.includes('expired') ? 404 : 401).json(result);
+    res.json(result);
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
 app.get('/api/health', async (_, res) => {
   try {
     const xtreamSources = await getXtreamSources();
@@ -206,17 +256,23 @@ app.get('/api/health', async (_, res) => {
   }
 });
 
+app.use('/api/xtream', (req, res, next) => {
+  if (req.path === '/logo') return next();
+  if (!requestOwner(req)) return res.status(401).json({ error: 'Pair this browser with a Roku device first' });
+  next();
+});
+
 // Roku must not try to build the full Xtream catalog during application
 // startup. A complete series catalog requires one provider request per
 // series, which can outlive Roku's HTTP request window. The Roku client uses
 // this endpoint only to verify that Render is reachable; each catalog page is
 // fetched separately when the user opens it.
-app.get('/api/roku/bootstrap', async (_, res) => {
+app.get('/api/roku/bootstrap', async (req, res) => {
   try {
     // Home needs a very small, fast catalog only. Return the newest saved
     // Roku entries without expanding every series into episodes.
     const [selectedSeries, selectedMovies] = await Promise.all([
-      getRokuSelectedItems('series'), getRokuSelectedItems('movie'),
+      getRokuSelectedItems('series', requestOwner(req)), getRokuSelectedItems('movie', requestOwner(req)),
     ]);
     const newestFirst = (items) => [...items]
       .sort((a, b) => Number(b.added || 0) - Number(a.added || 0))
@@ -247,11 +303,11 @@ app.get('/api/roku/bootstrap', async (_, res) => {
   }
 });
 
-app.get('/api/roku/series/categories', async (_, res) => {
+app.get('/api/roku/series/categories', async (req, res) => {
   try {
     const seen = new Set();
     const items = [];
-    for (const series of await getRokuSelectedItems('series')) {
+    for (const series of await getRokuSelectedItems('series', requestOwner(req))) {
       const category = series.category || 'Other';
       if (seen.has(category)) continue;
       seen.add(category);
@@ -274,7 +330,7 @@ app.get('/api/roku/search', async (req, res) => {
     const kind = String(req.query.kind || '');
     const query = String(req.query.q || '').trim().toLocaleLowerCase();
     if ((kind !== 'series' && kind !== 'movie') || !query) return res.status(400).json({ error: 'kind and q are required' });
-    const matches = (await getRokuSelectedItems(kind))
+    const matches = (await getRokuSelectedItems(kind, requestOwner(req)))
       .filter(item => item.title.toLocaleLowerCase().includes(query))
       .slice(0, 60);
     if (kind === 'series') {
@@ -304,7 +360,7 @@ app.get('/api/roku/series/detail', async (req, res) => {
     const sourceId = String(req.query.sourceId || '');
     const seriesId = String(req.query.seriesId || '');
     if (!sourceId || !seriesId) return res.status(400).json({ error: 'sourceId and seriesId are required' });
-    const series = (await getRokuSelectedItems('series')).find(item => String(item.sourceId) === sourceId && item.id === seriesId);
+    const series = (await getRokuSelectedItems('series', requestOwner(req))).find(item => String(item.sourceId) === sourceId && item.id === seriesId);
     if (!series) return res.status(404).json({ error: 'Series not found' });
     res.json({ items: await buildXtreamSeriesPayload({ selected: [series] }) });
   } catch (error) { res.status(500).json({ error: error.message }); }
@@ -352,7 +408,7 @@ app.get('/api/roku/movies', async (req, res) => {
     // Roku movie pages are deliberately fixed at ten items per request.
     pageInfo.limit = rokuMoviePageLimit;
     pageInfo.offset = pageInfo.page * pageInfo.limit;
-    const selected = (await getRokuSelectedItems('movie'))
+    const selected = (await getRokuSelectedItems('movie', requestOwner(req)))
       .slice()
       .sort((a, b) => Number(b.added || 0) - Number(a.added || 0));
     const sourcePage = selected.slice(pageInfo.offset, pageInfo.offset + pageInfo.limit);
@@ -546,8 +602,8 @@ function parseXtreamInput(body, existing = null) {
   return { name, baseUrl: `${url.protocol}//${url.host}${pathname}`, username, password };
 }
 
-app.get('/api/xtream/sources', async (_, res) => {
-  try { res.json({ items: await getXtreamSources() }); }
+app.get('/api/xtream/sources', async (req, res) => {
+  try { res.json({ items: await getXtreamSources(requestOwner(req)) }); }
   catch (error) { res.status(500).json({ error: error.message }); }
 });
 
@@ -579,30 +635,30 @@ app.post('/api/xtream/sources', async (req, res) => {
   try {
     const source = parseXtreamInput(req.body);
     await validateXtreamConnection({ ...source, _id: 'validation' });
-    res.status(201).json(await createXtreamSource(source));
+    res.status(201).json(await createXtreamSource({ ...source, ownerId: requestOwner(req) }));
   } catch (error) { res.status(400).json({ error: error.message }); }
 });
 
 app.put('/api/xtream/sources/:id', async (req, res) => {
   try {
-    const existing = await getXtreamSource(req.params.id);
+    const existing = await getXtreamSource(req.params.id, requestOwner(req));
     if (!existing) return res.sendStatus(404);
     const changes = parseXtreamInput(req.body, existing);
     if (changes.baseUrl) await validateXtreamConnection({ ...existing, ...changes });
-    res.json(await updateXtreamSource(req.params.id, changes));
+    res.json(await updateXtreamSource(req.params.id, changes, requestOwner(req)));
   } catch (error) { res.status(400).json({ error: error.message }); }
 });
 
 app.delete('/api/xtream/sources/:id', async (req, res) => {
   try {
-    if (!await deleteXtreamSource(req.params.id)) return res.sendStatus(404);
+    if (!await deleteXtreamSource(req.params.id, requestOwner(req))) return res.sendStatus(404);
     res.sendStatus(204);
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 app.get('/api/xtream/catalog', async (req, res) => {
   try {
-    const source = await getXtreamSource(String(req.query.sourceId || ''));
+    const source = await getXtreamSource(String(req.query.sourceId || ''), requestOwner(req));
     if (!source) return res.status(404).json({ error: 'Xtream source not found' });
     const aliases = { live: 'channel', channel: 'channel', movie: 'movie', vod: 'movie', series: 'series' };
     const kind = aliases[String(req.query.kind || '')];
@@ -696,7 +752,7 @@ function suppliedXtreamEnabledItems(source, enabledKeys, suppliedItems) {
 
 app.get('/api/xtream/sources/:id/enabled', async (req, res) => {
   try {
-    const source = await getXtreamSource(req.params.id);
+    const source = await getXtreamSource(req.params.id, requestOwner(req));
     if (!source) return res.sendStatus(404);
     const enabledKeys = Array.isArray(source.enabledKeys) ? source.enabledKeys : [];
     let enabledItems = Array.isArray(source.enabledItems) ? source.enabledItems : [];
@@ -706,7 +762,7 @@ app.get('/api/xtream/sources/:id/enabled', async (req, res) => {
       || enabledItems.some(item => !item.category || !item.language);
     if (needsBackfill && enabledKeys.length) {
       enabledItems = await resolveXtreamEnabledItems(source, enabledKeys);
-      const updated = await updateXtreamSelection(source._id, enabledItems.map(item => item.key), enabledItems);
+      const updated = await updateXtreamSelection(source._id, enabledItems.map(item => item.key), enabledItems, requestOwner(req));
       return res.json({ source: updated, items: updated.enabledItems });
     }
     res.json({ source: publicXtreamSource(source), items: enabledItems });
@@ -716,7 +772,7 @@ app.get('/api/xtream/sources/:id/enabled', async (req, res) => {
 app.put('/api/xtream/sources/:id/selection', async (req, res) => {
   try {
     if (!Array.isArray(req.body?.enabledKeys)) return res.status(400).json({ error: 'enabledKeys must be an array' });
-    const source = await getXtreamSource(req.params.id);
+    const source = await getXtreamSource(req.params.id, requestOwner(req));
     if (!source) return res.sendStatus(404);
     // The manager already has the selected catalog rows. Persist them directly
     // instead of downloading every Xtream list again merely to resolve keys.
@@ -733,7 +789,7 @@ app.put('/api/xtream/sources/:id/selection', async (req, res) => {
       enabledItems,
       archivedKeys: (source.archivedKeys || []).filter(key => !enabledSet.has(key)),
       archivedItems: (source.archivedItems || []).filter(item => !enabledSet.has(item.key)),
-    });
+    }, requestOwner(req));
     if (!updated) return res.sendStatus(404);
     res.json(updated);
   } catch (error) { res.status(400).json({ error: error.message }); }
@@ -741,7 +797,7 @@ app.put('/api/xtream/sources/:id/selection', async (req, res) => {
 
 app.post('/api/xtream/sources/:id/archive/:key', async (req, res) => {
   try {
-    const source = await getXtreamSource(req.params.id);
+    const source = await getXtreamSource(req.params.id, requestOwner(req));
     if (!source) return res.sendStatus(404);
     const key = String(req.params.key || '');
     const enabledItems = Array.isArray(source.enabledItems) ? source.enabledItems : [];
@@ -753,14 +809,14 @@ app.post('/api/xtream/sources/:id/archive/:key', async (req, res) => {
       enabledItems: enabledItems.filter(candidate => candidate.key !== key),
       archivedKeys: archiveItems.map(candidate => candidate.key),
       archivedItems: archiveItems,
-    });
+    }, requestOwner(req));
     res.json(updated);
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 app.post('/api/xtream/sources/:id/archive/:key/restore', async (req, res) => {
   try {
-    const source = await getXtreamSource(req.params.id);
+    const source = await getXtreamSource(req.params.id, requestOwner(req));
     if (!source) return res.sendStatus(404);
     const key = String(req.params.key || '');
     const archivedItems = Array.isArray(source.archivedItems) ? source.archivedItems : [];
@@ -772,7 +828,7 @@ app.post('/api/xtream/sources/:id/archive/:key/restore', async (req, res) => {
       enabledItems,
       archivedKeys: (source.archivedKeys || []).filter(candidate => candidate !== key),
       archivedItems: archivedItems.filter(candidate => candidate.key !== key),
-    });
+    }, requestOwner(req));
     res.json(updated);
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
@@ -1018,12 +1074,12 @@ async function buildXtreamSeriesPayload({ limit, selected: suppliedSelected } = 
   await Promise.all(Array.from({ length: concurrency }, worker));
   return groups.flat();
 }
-app.get('/api/roku/library', async (_, res) => {
+app.get('/api/roku/library', async (req, res) => {
   try {
     // Compatibility for older Roku packages. This remains limited to the
     // saved frontend selection, never the provider's full catalog.
     const [selectedSeries, selectedMovies, selectedChannels] = await Promise.all([
-      getRokuSelectedItems('series'), getRokuSelectedItems('movie'), getRokuSelectedItems('channel'),
+      getRokuSelectedItems('series', requestOwner(req)), getRokuSelectedItems('movie', requestOwner(req)), getRokuSelectedItems('channel', requestOwner(req)),
     ]);
     const [series, movies, channels] = await Promise.all([
       buildXtreamSeriesPayload({ selected: selectedSeries.slice(0, rokuInitialSeriesLimit) }),
@@ -1040,21 +1096,33 @@ app.get('/api/roku/series', async (req, res) => {
     pageInfo.limit = Math.min(4, pageInfo.limit);
     pageInfo.offset = pageInfo.page * pageInfo.limit;
     const category = String(req.query.category || '');
-    const selected = (await getRokuSelectedItems('series'))
+    const selected = (await getRokuSelectedItems('series', requestOwner(req)))
       .filter(item => !category || item.category === category)
       .sort((a, b) => Number(b.added || 0) - Number(a.added || 0));
     const sourcePage = selected.slice(pageInfo.offset, pageInfo.offset + pageInfo.limit);
-    const items = await buildXtreamSeriesPayload({ selected: sourcePage });
-    console.log(`[Roku] Series page ${pageInfo.page} ready: ${items.length} Xtream episodes`);
+    const items = sourcePage.map(item => ({
+      id: `series-search:${item.sourceId}:${item.id}`,
+      title: item.title,
+      rokuTitle: rokuText(item.title),
+      rokuTextKind: /[A-Za-z]/.test(item.title) ? 'latin' : 'arabic',
+      category: item.category,
+      language: item.language,
+      sourceId: String(item.sourceId),
+      seriesId: item.id,
+      thumbnail: item.logo,
+      added: item.added,
+      contentKind: 'series-search',
+    }));
+    console.log(`[Roku] Series summary page ${pageInfo.page} ready: ${items.length} series`);
     res.json({ items, page: pageInfo.page, limit: pageInfo.limit, total: selected.length, hasMore: pageInfo.offset + sourcePage.length < selected.length });
   } catch (error) {
     console.error('[Roku] Series catalog failed:', error.message);
     res.status(502).json({ error: error.message });
   }
 });
-app.get('/api/roku/channels', async (_, res) => {
+app.get('/api/roku/channels', async (req, res) => {
   try {
-    const items = buildXtreamChannelsPayload(await getRokuSelectedItems('channel'));
+    const items = buildXtreamChannelsPayload(await getRokuSelectedItems('channel', requestOwner(req)));
     res.json({ items, page: 0, limit: items.length, total: items.length, hasMore: false });
   } catch (error) { res.status(502).json({ error: error.message }); }
 });

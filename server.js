@@ -154,10 +154,14 @@ async function getRokuSelectedItems(kind) {
 
 function directXtreamItem(item) {
   const extension = String(item.extension || '').toLowerCase();
-  const useDirectMp4 = item.kind !== 'channel' && extension === 'mp4';
-  const playbackUrl = useDirectMp4
-    ? xtreamPlaybackPath(item.sourceId, item.kind, item.id, extension)
-    : rokuXtreamPlaybackPath(item.sourceId, item.kind, item.id, extension);
+  // This provider labels movie transport streams as video/mp4. Send movies
+  // through the fast fragmented-MP4 remux; actual MP4 series episodes can use
+  // the ranged proxy directly, while live channels remain HLS.
+  const useRemux = item.kind === 'movie';
+  const useDirectMp4 = item.kind === 'series' && extension === 'mp4';
+  let playbackUrl = rokuXtreamPlaybackPath(item.sourceId, item.kind, item.id, extension);
+  if (useRemux) playbackUrl = rokuXtreamRemuxPath(item.sourceId, item.kind, item.id, extension)
+  if (useDirectMp4) playbackUrl = xtreamPlaybackPath(item.sourceId, item.kind, item.id, extension)
   return {
     ...item,
     source: 'xtream',
@@ -168,13 +172,18 @@ function directXtreamItem(item) {
     rokuTextKind: /[A-Za-z]/.test(item.title) ? 'latin' : 'arabic',
     // Valid MP4 files support immediate ranged playback and avoid waiting for
     // an ffmpeg HLS cold start. Live/non-MP4 sources retain the HLS pipeline.
-    streamFormat: useDirectMp4 ? 'mp4' : 'hls',
+    streamFormat: useDirectMp4 || useRemux ? 'mp4' : 'hls',
   };
 }
 
 function rokuXtreamPlaybackPath(sourceId, kind, id, extension = '') {
   const ext = String(extension || '').replace(/[^a-z0-9]/gi, '').toLowerCase();
   return `/api/xtream/hls/${encodeURIComponent(sourceId)}/${kind}/${encodeURIComponent(id)}/master.m3u8${ext ? `?ext=${encodeURIComponent(ext)}` : ''}`;
+}
+
+function rokuXtreamRemuxPath(sourceId, kind, id, extension = '') {
+  const ext = String(extension || '').replace(/[^a-z0-9]/gi, '').toLowerCase();
+  return `/api/xtream/roku/${encodeURIComponent(sourceId)}/${kind}/${encodeURIComponent(id)}${ext ? `?ext=${encodeURIComponent(ext)}` : ''}`;
 }
 app.use(cors());
 app.use(express.json());

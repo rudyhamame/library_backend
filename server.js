@@ -177,10 +177,10 @@ async function getRokuSelectedItems(kind, ownerId = null) {
 
 function directXtreamItem(item) {
   const extension = String(item.extension || '').toLowerCase();
-  // This provider labels movie transport streams as video/mp4. Roku rejects
-  // the fragmented-MP4 remux as malformed (-5), while the appendable HLS
-  // pipeline produces its first playable segment in about six seconds.
-  const useDirectMp4 = item.kind === 'series' && extension === 'mp4';
+  // Use Roku's direct MP4 proxy when the provider explicitly supplies an MP4
+  // stream. This keeps VOD playback to one authenticated request instead of
+  // relying on HLS segment URL handling on the device.
+  const useDirectMp4 = extension === 'mp4' && (item.kind === 'movie' || item.kind === 'series');
   let playbackUrl = rokuXtreamPlaybackPath(item.sourceId, item.kind, item.id, extension);
   if (useDirectMp4) playbackUrl = xtreamPlaybackPath(item.sourceId, item.kind, item.id, extension)
   return {

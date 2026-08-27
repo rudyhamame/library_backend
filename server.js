@@ -996,6 +996,8 @@ app.get('/api/xtream/hls/:sourceId/:kind/:id/:segment', async (req, res) => {
 
 app.get('/api/xtream/roku/:sourceId/:kind/:id', async (req, res) => {
   let child;
+  let outputStarted = false;
+  let startupTimer;
   try {
     const source = await getXtreamSource(req.params.sourceId);
     if (!source) return res.sendStatus(404);
@@ -1023,21 +1025,49 @@ app.get('/api/xtream/roku/:sourceId/:kind/:id', async (req, res) => {
     child.stderr.on('data', chunk => { errorText += chunk.toString(); });
     child.on('error', error => {
       console.error('[Xtream Roku remux] failed to start:', error.message);
+      clearTimeout(startupTimer);
       if (!res.headersSent) res.status(502).json({ error: 'Could not start Roku media remux' });
       else res.destroy(error);
     });
     child.on('close', code => {
-      if (code !== 0 && code !== null) console.warn(`[Xtream Roku remux] ${req.params.kind}:${req.params.id} exited ${code}: ${errorText.trim().slice(-240)}`);
-      if (!res.writableEnded) res.end();
+      clearTimeout(startupTimer);
+      const safeErrorText = errorText.replaceAll(inputUrl, '[provider URL]');
+      if (code !== 0 && code !== null) console.warn(`[Xtream Roku remux] ${req.params.kind}:${req.params.id} exited ${code}: ${safeErrorText.trim().slice(-240)}`);
+      if (outputStarted) {
+        if (!res.writableEnded) res.end();
+        return;
+      }
+      // Do not advertise an empty ffmpeg result as HTTP 200 video/mp4. Roku
+      // interprets that response as malformed media (-5), hiding the actual
+      // provider failure. Keep headers pending until media bytes exist.
+      if (!res.headersSent) {
+        const upstreamStatus = errorText.match(/Server returned (\d{3})/i)?.[1];
+        const error = upstreamStatus
+          ? `Movie source is unavailable (upstream HTTP ${upstreamStatus})`
+          : 'Movie source did not return playable media';
+        res.status(502).json({ error });
+      }
     });
     res.on('close', () => { if (child && !child.killed) child.kill('SIGKILL'); });
 
-    res.status(200);
-    res.setHeader('Content-Type', 'video/mp4');
-    res.setHeader('Cache-Control', 'no-store');
-    res.setHeader('Accept-Ranges', 'none');
-    child.stdout.pipe(res);
+    child.stdout.once('data', chunk => {
+      if (res.writableEnded || res.destroyed) return;
+      outputStarted = true;
+      clearTimeout(startupTimer);
+      res.status(200);
+      res.setHeader('Content-Type', 'video/mp4');
+      res.setHeader('Cache-Control', 'no-store');
+      res.setHeader('Accept-Ranges', 'none');
+      res.write(chunk);
+      child.stdout.pipe(res);
+    });
+    startupTimer = setTimeout(() => {
+      if (outputStarted || res.headersSent) return;
+      if (child && !child.killed) child.kill('SIGKILL');
+      res.status(504).json({ error: 'Movie source timed out before returning media' });
+    }, 20_000);
   } catch (error) {
+    clearTimeout(startupTimer);
     if (child && !child.killed) child.kill('SIGKILL');
     if (!res.headersSent) res.status(502).json({ error: error.message });
     else res.destroy(error);

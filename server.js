@@ -496,6 +496,30 @@ app.get('/api/xtream/sources', async (_, res) => {
   catch (error) { res.status(500).json({ error: error.message }); }
 });
 
+// Provider channel logos are often published over HTTP.  The Render frontend
+// is HTTPS, so browsers block those images as mixed content.  Serve the small
+// logo through this HTTPS backend endpoint instead.
+app.get('/api/xtream/logo', async (req, res) => {
+  try {
+    const supplied = String(req.query.url || '').trim();
+    const target = new URL(supplied);
+    if (!['http:', 'https:'].includes(target.protocol)) throw new Error('Unsupported logo URL');
+    if (['localhost', '127.0.0.1', '0.0.0.0', '::1'].includes(target.hostname)) throw new Error('Unsupported logo host');
+
+    const response = await fetch(target, { signal: AbortSignal.timeout(10_000), redirect: 'error' });
+    if (!response.ok) return res.sendStatus(response.status === 404 ? 404 : 502);
+    const contentType = response.headers.get('content-type') || 'image/jpeg';
+    if (!contentType.toLowerCase().startsWith('image/')) return res.status(415).send('Logo is not an image');
+    const bytes = Buffer.from(await response.arrayBuffer());
+    if (bytes.length > 5 * 1024 * 1024) return res.status(413).send('Logo is too large');
+    res.set('Content-Type', contentType.split(';', 1)[0]);
+    res.set('Cache-Control', 'public, max-age=86400, s-maxage=86400');
+    res.send(bytes);
+  } catch (error) {
+    res.status(400).send(error.message || 'Invalid logo URL');
+  }
+});
+
 app.post('/api/xtream/sources', async (req, res) => {
   try {
     const source = parseXtreamInput(req.body);
@@ -532,20 +556,21 @@ app.get('/api/xtream/catalog', async (req, res) => {
     const enabled = new Set(source.enabledKeys || []);
     const query = String(req.query.q || '').trim().toLocaleLowerCase();
     const category = String(req.query.category || 'all');
-    const language = String(req.query.language || 'all').toUpperCase();
+    const titleLanguage = String(req.query.titleLanguage || req.query.language || 'all').toUpperCase();
     const pageSize = Math.min(200, Math.max(10, Number.parseInt(req.query.limit, 10) || 50));
     const requestedPage = Math.max(1, Number.parseInt(req.query.page, 10) || 1);
     const categoryNames = new Map(categories.map(item => [item.id, item.name]));
     const catalog = allItems.map(item => ({
       ...item,
       languageCode: titleLanguageCode(item),
+      titleLanguage: titleLanguageCode(item),
     }));
     const languagePriority = { AR: 0, EN: 1 };
     const languages = [...new Set(catalog.map(item => item.languageCode))]
       .sort((a, b) => (languagePriority[a] ?? 10) - (languagePriority[b] ?? 10) || a.localeCompare(b));
     const filtered = catalog.filter(item =>
       (category === 'all' || item.categoryId === category)
-      && (language === 'ALL' || item.languageCode === language)
+      && (titleLanguage === 'ALL' || item.titleLanguage === titleLanguage)
       && (!query || item.title.toLocaleLowerCase().includes(query))
     );
     const pageCount = Math.max(1, Math.ceil(filtered.length / pageSize));
@@ -760,13 +785,14 @@ async function getOrStartRokuHls(source, kind, id, extension) {
   const manifest = path.join(directory, 'master.m3u8');
   const inputUrl = xtreamProviderUrl(source, kind, id, extension);
   const args = [
-    // Read at playback speed. Without -re the remote VOD is fetched far
-    // faster than Roku can request its first segment, so the HLS cleanup
-    // deletes that segment before the TV receives it.
-    '-hide_banner', '-loglevel', 'error', '-re', '-i', inputUrl,
+    // This is VOD, not a live stream. Generate segments ahead of playback so
+    // Roku can seek to a distant position (for example 30 minutes) before
+    // that position has played. The old rolling playlist kept only 12
+    // segments and made older positions impossible to reach.
+    '-hide_banner', '-loglevel', 'error', '-i', inputUrl,
     '-map', '0:v:0?', '-map', '0:a:0?', '-c', 'copy', '-sn', '-dn',
-    '-f', 'hls', '-hls_time', '2', '-hls_list_size', '12',
-    '-hls_flags', 'independent_segments+delete_segments',
+    '-f', 'hls', '-hls_time', '2', '-hls_list_size', '0',
+    '-hls_playlist_type', 'vod', '-hls_flags', 'independent_segments',
     '-hls_segment_filename', path.join(directory, 'segment-%06d.ts'), manifest,
   ];
   const child = spawn('ffmpeg', args, { stdio: ['ignore', 'ignore', 'pipe'] });

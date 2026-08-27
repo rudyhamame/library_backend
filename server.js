@@ -177,12 +177,12 @@ async function getRokuSelectedItems(kind, ownerId = null) {
 
 function directXtreamItem(item) {
   const extension = String(item.extension || '').toLowerCase();
-  // Use Roku's direct MP4 proxy when the provider explicitly supplies an MP4
-  // stream. This keeps VOD playback to one authenticated request instead of
-  // relying on HLS segment URL handling on the device.
+  // Movies and series episodes must use the same ranged MP4 proxy. Keeping a
+  // movie-only ffmpeg path here made two otherwise identical VOD items behave
+  // differently on Roku and introduced avoidable container/startup failures.
   const useDirectMp4 = extension === 'mp4' && (item.kind === 'movie' || item.kind === 'series');
   let playbackUrl = rokuXtreamPlaybackPath(item.sourceId, item.kind, item.id, extension);
-  if (useDirectMp4) playbackUrl = rokuDirectMp4PlaybackPath(item.sourceId, item.kind, item.id, extension);
+  if (useDirectMp4) playbackUrl = xtreamPlaybackPath(item.sourceId, item.kind, item.id, extension);
   return {
     ...item,
     source: 'xtream',

@@ -16,6 +16,7 @@ import { getFavorites, toggleFavorite } from './favorites-store.js';
 const app = express();
 const port = process.env.PORT || 8787;
 let dashboardCache = { expires: 0, data: null };
+const dashboardTimeZones = { toronto: 'America/Toronto', latakia: 'Asia/Damascus' };
 const previewCache = new Map();
 const arabicText = /[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]/;
 const rokuText = (value) => arabicText.test(String(value || '')) ? shapeArabicForRoku(value) : String(value || '');
@@ -26,9 +27,25 @@ const rokuText = (value) => arabicText.test(String(value || '')) ? shapeArabicFo
 // intentional on Render's 256 MB instance; Roku loads further pages only when
 // the user reaches the end of the current series list.
 const rokuInitialSeriesLimit = Math.min(4, Math.max(1, Number.parseInt(process.env.ROKU_INITIAL_SERIES_LIMIT || '4', 10)));
+const rokuMoviePageLimit = 10;
 const xtreamItemsInFlight = new Map();
 const rokuHlsJobs = new Map();
 const rokuHlsRoot = path.join(os.tmpdir(), 'rh-stream-hls');
+
+function cityIsoMinute(timeZone) {
+  const values = Object.fromEntries(new Intl.DateTimeFormat('en-CA', {
+    timeZone, year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+  }).formatToParts(new Date()).filter(part => part.type !== 'literal').map(part => [part.type, part.value]));
+  return `${values.year}-${values.month}-${values.day}T${values.hour}:${values.minute}`;
+}
+
+function freshDashboardTimes(data) {
+  return { ...data, cities: (data?.cities || []).map(city => ({
+    ...city,
+    time: cityIsoMinute(dashboardTimeZones[city.id] || 'UTC'),
+  })) };
+}
 
 function rokuPage(req, defaultLimit) {
   const page = Math.max(0, Number.parseInt(req.query.page || '0', 10) || 0);
@@ -136,7 +153,11 @@ async function getRokuSelectedItems(kind) {
 }
 
 function directXtreamItem(item) {
-  const playbackUrl = rokuXtreamPlaybackPath(item.sourceId, item.kind, item.id, item.extension);
+  const extension = String(item.extension || '').toLowerCase();
+  const useDirectMp4 = item.kind !== 'channel' && extension === 'mp4';
+  const playbackUrl = useDirectMp4
+    ? xtreamPlaybackPath(item.sourceId, item.kind, item.id, extension)
+    : rokuXtreamPlaybackPath(item.sourceId, item.kind, item.id, extension);
   return {
     ...item,
     source: 'xtream',
@@ -145,9 +166,9 @@ function directXtreamItem(item) {
     playbackUrl,
     rokuTitle: rokuText(item.title),
     rokuTextKind: /[A-Za-z]/.test(item.title) ? 'latin' : 'arabic',
-    // Movies and episodes are repackaged as ordinary HLS. Roku is much more
-    // reliable with HLS than a live fragmented-MP4 response.
-    streamFormat: 'hls',
+    // Valid MP4 files support immediate ranged playback and avoid waiting for
+    // an ffmpeg HLS cold start. Live/non-MP4 sources retain the HLS pipeline.
+    streamFormat: useDirectMp4 ? 'mp4' : 'hls',
   };
 }
 
@@ -307,10 +328,24 @@ function buildXtreamChannelsPayload(items) {
   }));
 }
 
-app.get('/api/roku/movies', async (_, res) => {
+app.get('/api/roku/movies', async (req, res) => {
   try {
-    const items = await buildXtreamMoviesPayload();
-    res.json({ items, page: 0, limit: items.length, total: items.length, hasMore: false });
+    const pageInfo = rokuPage(req, rokuMoviePageLimit);
+    // Roku movie pages are deliberately fixed at ten items per request.
+    pageInfo.limit = rokuMoviePageLimit;
+    pageInfo.offset = pageInfo.page * pageInfo.limit;
+    const selected = (await getRokuSelectedItems('movie'))
+      .slice()
+      .sort((a, b) => Number(b.added || 0) - Number(a.added || 0));
+    const sourcePage = selected.slice(pageInfo.offset, pageInfo.offset + pageInfo.limit);
+    const items = await buildXtreamMoviesPayload({ selected: sourcePage });
+    res.json({
+      items,
+      page: pageInfo.page,
+      limit: pageInfo.limit,
+      total: selected.length,
+      hasMore: pageInfo.offset + sourcePage.length < selected.length,
+    });
   }
   catch (error) { res.status(500).json({ error: error.message }); }
 });
@@ -456,7 +491,9 @@ app.put('/api/playback', async (req, res) => {
 });
 app.get('/api/roku/dashboard', async (_, res) => {
   try {
-    if (dashboardCache.expires > Date.now()) return res.json(dashboardCache.data);
+    // Weather is cached, but clock values must be generated for every request
+    // so the minute display never remains frozen for the cache lifetime.
+    if (dashboardCache.expires > Date.now()) return res.json(freshDashboardTimes(dashboardCache.data));
     const locations = [
       { id: 'toronto', label: 'TORONTO, CANADA', latitude: 43.6532, longitude: -79.3832, timezone: 'America/Toronto' },
       { id: 'latakia', label: 'LATAKIA, SYRIA', latitude: 35.5317, longitude: 35.7917, timezone: 'Asia/Damascus' },
@@ -472,7 +509,7 @@ app.get('/api/roku/dashboard', async (_, res) => {
       return { id: location.id, label: location.label, time: data.current?.time || '', temperature: data.current?.temperature_2m, weatherCode: data.current?.weather_code };
     }));
     dashboardCache = { expires: Date.now() + 120_000, data: { backend: 'online', cities } };
-    res.json(dashboardCache.data);
+    res.json(freshDashboardTimes(dashboardCache.data));
   } catch (error) { res.status(502).json({ backend: 'online', error: error.message }); }
 });
 function parseXtreamInput(body, existing = null) {
@@ -785,14 +822,15 @@ async function getOrStartRokuHls(source, kind, id, extension) {
   const manifest = path.join(directory, 'master.m3u8');
   const inputUrl = xtreamProviderUrl(source, kind, id, extension);
   const args = [
-    // This is VOD, not a live stream. Generate segments ahead of playback so
-    // Roku can seek to a distant position (for example 30 minutes) before
-    // that position has played. The old rolling playlist kept only 12
-    // segments and made older positions impossible to reach.
+    // Keep every generated segment, but advertise the playlist as EVENT while
+    // ffmpeg is still appending to it. Marking a growing playlist as VOD made
+    // Roku treat the first short manifest as immutable: playback consumed
+    // those initial segments, stalled near 13%, and never requested the
+    // expanded manifest. ffmpeg adds ENDLIST when a finite source completes.
     '-hide_banner', '-loglevel', 'error', '-i', inputUrl,
     '-map', '0:v:0?', '-map', '0:a:0?', '-c', 'copy', '-sn', '-dn',
     '-f', 'hls', '-hls_time', '2', '-hls_list_size', '0',
-    '-hls_playlist_type', 'vod', '-hls_flags', 'independent_segments',
+    '-hls_playlist_type', 'event', '-hls_flags', 'independent_segments+temp_file',
     '-hls_segment_filename', path.join(directory, 'segment-%06d.ts'), manifest,
   ];
   const child = spawn('ffmpeg', args, { stdio: ['ignore', 'ignore', 'pipe'] });
@@ -917,7 +955,11 @@ async function buildXtreamSeriesPayload({ limit, selected: suppliedSelected } = 
         if (!source) { groups[index] = items; continue; }
         const details = await getXtreamSeriesEpisodes(source, seriesItem.id);
         for (const episode of details.episodes) {
-          const playbackUrl = rokuXtreamPlaybackPath(source._id, 'series', episode.id, episode.extension);
+          const extension = String(episode.extension || '').toLowerCase();
+          const useDirectMp4 = extension === 'mp4';
+          const playbackUrl = useDirectMp4
+            ? xtreamPlaybackPath(source._id, 'series', episode.id, extension)
+            : rokuXtreamPlaybackPath(source._id, 'series', episode.id, extension);
           const title = episode.title || `${details.title} · ${episode.episodeNumber}`;
           items.push({
             id: `xtream:${source._id}:series:${episode.id}`,
@@ -931,7 +973,7 @@ async function buildXtreamSeriesPayload({ limit, selected: suppliedSelected } = 
             rokuCategory: seriesItem.rokuCategory,
             language: seriesItem.language,
             added: seriesItem.added,
-            url: playbackUrl, playbackUrl, streamFormat: 'hls',
+            url: playbackUrl, playbackUrl, streamFormat: useDirectMp4 ? 'mp4' : 'hls',
           });
         }
       } catch (error) {

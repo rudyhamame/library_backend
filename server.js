@@ -228,14 +228,14 @@ app.post('/api/device-session/info', async (req, res) => {
 });
 app.post('/api/device-session/setup', async (req, res) => {
   try {
-    const result = await setupDeviceSession(req.body?.code, req.body?.username, req.body?.password);
+    const result = await setupDeviceSession(req.body?.code, req.body?.email, req.body?.password);
     if (result.error) return res.status(result.error.includes('expired') ? 404 : 400).json(result);
     res.json(result);
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 app.post('/api/device-session/login', async (req, res) => {
   try {
-    const result = await loginDeviceSession(req.body?.code, req.body?.username, req.body?.password);
+    const result = await loginDeviceSession(req.body?.code, req.body?.email, req.body?.password);
     if (result.error) return res.status(result.error.includes('expired') ? 404 : 401).json(result);
     res.json(result);
   } catch (error) { res.status(500).json({ error: error.message }); }

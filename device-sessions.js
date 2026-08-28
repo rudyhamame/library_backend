@@ -51,8 +51,8 @@ function verifyPassword(password, stored) {
 }
 
 function validPassword(password) { return typeof password === 'string' && password.length >= 8 && password.length <= 256; }
-function normalizeUsername(username) { return String(username || '').trim().toLowerCase(); }
-function validUsername(username) { return /^[a-z0-9][a-z0-9_.-]{2,31}$/.test(username); }
+function normalizeEmail(email) { return String(email || '').trim().toLowerCase(); }
+function validEmail(email) { return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) && email.length <= 254; }
 
 export function createDeviceSession(deviceId, frontendUrl) {
   purge();
@@ -77,35 +77,35 @@ export function getDeviceSession(code) { purge(); return sessions.get(String(cod
 export async function getPairingInfo(code, token = '') {
   const session = getDeviceSession(code);
   if (!session) return null;
-  const profile = await (await profiles()).findOne({ ownerId: session.ownerId }, { projection: { username: 1 } });
+  const profile = await (await profiles()).findOne({ ownerId: session.ownerId }, { projection: { email: 1 } });
   const authenticated = resolveDeviceToken(token)?.ownerId === session.ownerId;
-  return { expiresAt: session.expiresAt, needsSignup: !profile?.username, purpose: profile?.username ? 'manage-library' : 'activate-device', authenticated };
+  return { expiresAt: session.expiresAt, needsSignup: !profile?.email, purpose: profile?.email ? 'manage-library' : 'activate-device', authenticated };
 }
 
-async function consumePairing(code, username, password, setup) {
+async function consumePairing(code, email, password, setup) {
   const session = getDeviceSession(code);
   if (!session) return { error: 'Pairing code expired or invalid' };
-  const normalizedUsername = normalizeUsername(username);
-  if (!validUsername(normalizedUsername)) return { error: 'Username must be 3–32 characters and use only letters, numbers, dots, hyphens, or underscores' };
+  const normalizedEmail = normalizeEmail(email);
+  if (!validEmail(normalizedEmail)) return { error: 'Enter a valid email address' };
   if (!validPassword(password)) return { error: 'Password must contain at least 8 characters' };
   const collection = await profiles();
   const profile = await collection.findOne({ ownerId: session.ownerId });
   if (setup) {
-    if (profile?.username) return { error: 'This Roku is already activated. Sign in instead.' };
+    if (profile?.email) return { error: 'This Roku is already activated. Sign in instead.' };
     await collection.updateOne(
       { ownerId: session.ownerId },
-      { $setOnInsert: { ownerId: session.ownerId, deviceId: session.deviceId, createdAt: new Date() }, $set: { username: normalizedUsername, passwordHash: hashPassword(password), updatedAt: new Date() } },
+      { $setOnInsert: { ownerId: session.ownerId, deviceId: session.deviceId, createdAt: new Date() }, $set: { email: normalizedEmail, passwordHash: hashPassword(password), updatedAt: new Date() } },
       { upsert: true },
     );
-  } else if (!profile?.username || profile.username !== normalizedUsername || !verifyPassword(password, profile.passwordHash)) {
-    return { error: 'Incorrect username or password' };
+  } else if (!profile?.email || profile.email !== normalizedEmail || !verifyPassword(password, profile.passwordHash)) {
+    return { error: 'Incorrect email or password' };
   }
   session.approvedAt = Date.now();
   return { token: issueToken(session, 'browser'), deviceId: session.deviceId };
 }
 
-export function setupDeviceSession(code, username, password) { return consumePairing(code, username, password, true); }
-export function loginDeviceSession(code, username, password) { return consumePairing(code, username, password, false); }
+export function setupDeviceSession(code, email, password) { return consumePairing(code, email, password, true); }
+export function loginDeviceSession(code, email, password) { return consumePairing(code, email, password, false); }
 
 export function getRokuDeviceSessionStatus(code) {
   const session = getDeviceSession(code);

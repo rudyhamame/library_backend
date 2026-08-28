@@ -7,8 +7,10 @@ const tokenTtlMs = 365 * 24 * 60 * 60 * 1000;
 const mongoUri = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017';
 const databaseName = process.env.MONGODB_DB || 'rh_stream';
 const collectionName = process.env.MONGODB_DEVICE_COLLECTION || 'device_profiles';
+const accountCollectionName = process.env.MONGODB_ACCOUNT_COLLECTION || 'accounts';
 const signingSecret = process.env.DEVICE_AUTH_SECRET || 'local-development-secret-change-before-production';
 let profilesPromise;
+let accountsPromise;
 
 async function profiles() {
   if (!profilesPromise) {
@@ -23,6 +25,19 @@ async function profiles() {
   return profilesPromise;
 }
 
+async function accounts() {
+  if (!accountsPromise) {
+    accountsPromise = new MongoClient(mongoUri, { serverSelectionTimeoutMS: 5000 }).connect()
+      .then(async client => {
+        const collection = client.db(databaseName).collection(accountCollectionName);
+        await collection.createIndex({ email: 1 }, { unique: true });
+        return collection;
+      })
+      .catch(error => { accountsPromise = undefined; throw error; });
+  }
+  return accountsPromise;
+}
+
 function purge() {
   const now = Date.now();
   for (const [code, session] of sessions) if (session.expiresAt < now) sessions.delete(code);
@@ -33,7 +48,7 @@ function encode(value) { return Buffer.from(value).toString('base64url'); }
 function sign(value) { return createHmac('sha256', signingSecret).update(value).digest('base64url'); }
 
 function issueToken(session, type) {
-  const payload = encode(JSON.stringify({ ownerId: session.ownerId, deviceId: session.deviceId, type, exp: Date.now() + tokenTtlMs }));
+  const payload = encode(JSON.stringify({ ownerId: session.ownerId, deviceId: session.deviceId, accountId: session.accountId || null, type, exp: Date.now() + tokenTtlMs }));
   return `${payload}.${sign(payload)}`;
 }
 
@@ -77,9 +92,9 @@ export function getDeviceSession(code) { purge(); return sessions.get(String(cod
 export async function getPairingInfo(code, token = '') {
   const session = getDeviceSession(code);
   if (!session) return null;
-  const profile = await (await profiles()).findOne({ ownerId: session.ownerId }, { projection: { email: 1 } });
+  const profile = await (await profiles()).findOne({ ownerId: session.ownerId }, { projection: { accountId: 1 } });
   const authenticated = resolveDeviceToken(token)?.ownerId === session.ownerId;
-  return { expiresAt: session.expiresAt, needsSignup: !profile?.email, purpose: profile?.email ? 'manage-library' : 'activate-device', authenticated };
+  return { expiresAt: session.expiresAt, needsSignup: !profile?.accountId, purpose: profile?.accountId ? 'manage-library' : 'activate-device', authenticated };
 }
 
 async function consumePairing(code, email, password, setup) {
@@ -88,18 +103,31 @@ async function consumePairing(code, email, password, setup) {
   const normalizedEmail = normalizeEmail(email);
   if (!validEmail(normalizedEmail)) return { error: 'Enter a valid email address' };
   if (!validPassword(password)) return { error: 'Password must contain at least 8 characters' };
-  const collection = await profiles();
-  const profile = await collection.findOne({ ownerId: session.ownerId });
+  const deviceCollection = await profiles();
+  const accountCollection = await accounts();
+  const profile = await deviceCollection.findOne({ ownerId: session.ownerId });
+  let account;
   if (setup) {
-    if (profile?.email) return { error: 'This Roku is already activated. Sign in instead.' };
-    await collection.updateOne(
-      { ownerId: session.ownerId },
-      { $setOnInsert: { ownerId: session.ownerId, deviceId: session.deviceId, createdAt: new Date() }, $set: { email: normalizedEmail, passwordHash: hashPassword(password), updatedAt: new Date() } },
-      { upsert: true },
-    );
-  } else if (!profile?.email || profile.email !== normalizedEmail || !verifyPassword(password, profile.passwordHash)) {
-    return { error: 'Incorrect email or password' };
+    if (profile?.accountId) return { error: 'This Roku is already activated. Sign in instead.' };
+    if (await accountCollection.findOne({ email: normalizedEmail }, { projection: { _id: 1 } })) return { error: 'An account with this email already exists. Sign in instead.' };
+    const created = await accountCollection.insertOne({ email: normalizedEmail, passwordHash: hashPassword(password), createdAt: new Date(), updatedAt: new Date() });
+    account = { _id: created.insertedId };
+  } else {
+    account = await accountCollection.findOne({ email: normalizedEmail });
+    // A profile created by the earlier device-password implementation can be
+    // adopted on its first successful sign-in without losing its library.
+    if (!account && profile?.email === normalizedEmail && verifyPassword(password, profile.passwordHash)) {
+      const created = await accountCollection.insertOne({ email: normalizedEmail, passwordHash: profile.passwordHash, createdAt: profile.createdAt || new Date(), updatedAt: new Date() });
+      account = { _id: created.insertedId };
+    }
+    if (!account || !verifyPassword(password, account.passwordHash)) return { error: 'Incorrect email or password' };
   }
+  session.accountId = String(account._id);
+  await deviceCollection.updateOne(
+    { ownerId: session.ownerId },
+    { $setOnInsert: { ownerId: session.ownerId, deviceId: session.deviceId, createdAt: new Date() }, $set: { accountId: account._id, linkedAt: new Date(), updatedAt: new Date() } },
+    { upsert: true },
+  );
   session.approvedAt = Date.now();
   return { token: issueToken(session, 'browser'), deviceId: session.deviceId };
 }

@@ -51,6 +51,8 @@ function verifyPassword(password, stored) {
 }
 
 function validPassword(password) { return typeof password === 'string' && password.length >= 8 && password.length <= 256; }
+function normalizeUsername(username) { return String(username || '').trim().toLowerCase(); }
+function validUsername(username) { return /^[a-z0-9][a-z0-9_.-]{2,31}$/.test(username); }
 
 export function createDeviceSession(deviceId, frontendUrl) {
   purge();
@@ -65,42 +67,52 @@ export function createDeviceSession(deviceId, frontendUrl) {
   const pairUrl = `${String(frontendUrl).replace(/\/$/, '')}/?pair=${encodeURIComponent(session.code)}`;
   return {
     code: session.code, deviceId: session.deviceId, expiresAt: session.expiresAt,
-    token: issueToken(session, 'roku'), pairUrl,
+    pairUrl,
     qrImageUrl: `https://quickchart.io/qr?size=190&text=${encodeURIComponent(pairUrl)}`,
   };
 }
 
 export function getDeviceSession(code) { purge(); return sessions.get(String(code || '')); }
 
-export async function getPairingInfo(code) {
+export async function getPairingInfo(code, token = '') {
   const session = getDeviceSession(code);
   if (!session) return null;
-  const profile = await (await profiles()).findOne({ ownerId: session.ownerId }, { projection: { passwordHash: 1 } });
-  return { expiresAt: session.expiresAt, needsPassword: !profile?.passwordHash };
+  const profile = await (await profiles()).findOne({ ownerId: session.ownerId }, { projection: { username: 1 } });
+  const authenticated = resolveDeviceToken(token)?.ownerId === session.ownerId;
+  return { expiresAt: session.expiresAt, needsSignup: !profile?.username, purpose: profile?.username ? 'manage-library' : 'activate-device', authenticated };
 }
 
-async function consumePairing(code, password, setup) {
+async function consumePairing(code, username, password, setup) {
   const session = getDeviceSession(code);
   if (!session) return { error: 'Pairing code expired or invalid' };
+  const normalizedUsername = normalizeUsername(username);
+  if (!validUsername(normalizedUsername)) return { error: 'Username must be 3–32 characters and use only letters, numbers, dots, hyphens, or underscores' };
   if (!validPassword(password)) return { error: 'Password must contain at least 8 characters' };
   const collection = await profiles();
   const profile = await collection.findOne({ ownerId: session.ownerId });
   if (setup) {
-    if (profile?.passwordHash) return { error: 'This device already has a password. Sign in instead.' };
+    if (profile?.username) return { error: 'This Roku is already activated. Sign in instead.' };
     await collection.updateOne(
       { ownerId: session.ownerId },
-      { $setOnInsert: { ownerId: session.ownerId, deviceId: session.deviceId, createdAt: new Date() }, $set: { passwordHash: hashPassword(password), updatedAt: new Date() } },
+      { $setOnInsert: { ownerId: session.ownerId, deviceId: session.deviceId, createdAt: new Date() }, $set: { username: normalizedUsername, passwordHash: hashPassword(password), updatedAt: new Date() } },
       { upsert: true },
     );
-  } else if (!profile?.passwordHash || !verifyPassword(password, profile.passwordHash)) {
-    return { error: 'Incorrect device password' };
+  } else if (!profile?.username || profile.username !== normalizedUsername || !verifyPassword(password, profile.passwordHash)) {
+    return { error: 'Incorrect username or password' };
   }
-  sessions.delete(session.code);
+  session.approvedAt = Date.now();
   return { token: issueToken(session, 'browser'), deviceId: session.deviceId };
 }
 
-export function setupDeviceSession(code, password) { return consumePairing(code, password, true); }
-export function loginDeviceSession(code, password) { return consumePairing(code, password, false); }
+export function setupDeviceSession(code, username, password) { return consumePairing(code, username, password, true); }
+export function loginDeviceSession(code, username, password) { return consumePairing(code, username, password, false); }
+
+export function getRokuDeviceSessionStatus(code) {
+  const session = getDeviceSession(code);
+  if (!session) return null;
+  if (!session.approvedAt) return { status: 'pending', expiresAt: session.expiresAt };
+  return { status: 'approved', expiresAt: session.expiresAt, token: issueToken(session, 'roku') };
+}
 
 export function resolveDeviceToken(token) {
   const [payload, signature] = String(token || '').split('.');

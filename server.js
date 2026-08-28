@@ -12,7 +12,7 @@ import { createXtreamSource, deleteXtreamSource, getAllXtreamSources, getXtreamS
 import { getXtreamCatalog, getXtreamCategories, getXtreamMovieInfo, getXtreamSeriesEpisodes, validateXtreamConnection, xtreamProviderUrl } from './xtream.js';
 import { getPlayback, getPlaybackHistory, savePlayback } from './playback-store.js';
 import { getFavorites, toggleFavorite } from './favorites-store.js';
-import { createDeviceSession, getPairingInfo, loginDeviceSession, resolveDeviceToken, setupDeviceSession } from './device-sessions.js';
+import { createDeviceSession, getPairingInfo, getRokuDeviceSessionStatus, loginDeviceSession, resolveDeviceToken, setupDeviceSession } from './device-sessions.js';
 
 const app = express();
 const port = process.env.PORT || 8787;
@@ -200,9 +200,8 @@ function rokuXtreamPlaybackPath(sourceId, kind, id, extension = '') {
 app.use(cors());
 app.use(express.json());
 
-// Pairing is intentionally short-lived and device scoped. The Roku displays
-// the pair URL as a QR code; the browser claims it and then uses the returned
-// token on every manager request.
+// The Roku displays a short-lived QR/device code. The phone signs up or signs
+// in, then the Roku polls for approval and receives its token automatically.
 app.post('/api/roku/device-session', (req, res) => {
   const deviceId = String(req.body?.deviceId || '').trim();
   if (!deviceId) return res.status(400).json({ error: 'deviceId is required' });
@@ -215,28 +214,28 @@ app.get('/api/roku/device-session', (req, res) => {
 });
 app.get('/api/roku/device-session/status', async (req, res) => {
   try {
-    const session = await getPairingInfo(req.query.code);
+    const session = getRokuDeviceSessionStatus(req.query.code);
     if (!session) return res.status(404).json({ error: 'Pairing code expired' });
     res.json(session);
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 app.post('/api/device-session/info', async (req, res) => {
   try {
-    const session = await getPairingInfo(req.body?.code);
+    const session = await getPairingInfo(req.body?.code, req.get('x-device-token'));
     if (!session) return res.status(404).json({ error: 'Pairing code expired or invalid' });
     res.json(session);
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 app.post('/api/device-session/setup', async (req, res) => {
   try {
-    const result = await setupDeviceSession(req.body?.code, req.body?.password);
+    const result = await setupDeviceSession(req.body?.code, req.body?.username, req.body?.password);
     if (result.error) return res.status(result.error.includes('expired') ? 404 : 400).json(result);
     res.json(result);
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 app.post('/api/device-session/login', async (req, res) => {
   try {
-    const result = await loginDeviceSession(req.body?.code, req.body?.password);
+    const result = await loginDeviceSession(req.body?.code, req.body?.username, req.body?.password);
     if (result.error) return res.status(result.error.includes('expired') ? 404 : 401).json(result);
     res.json(result);
   } catch (error) { res.status(500).json({ error: error.message }); }

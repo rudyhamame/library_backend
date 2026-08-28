@@ -12,7 +12,7 @@ import { createXtreamSource, deleteXtreamSource, getAllXtreamSources, getXtreamS
 import { getXtreamCatalog, getXtreamCategories, getXtreamMovieInfo, getXtreamSeriesEpisodes, validateXtreamConnection, xtreamProviderUrl } from './xtream.js';
 import { getPlayback, getPlaybackHistory, savePlayback } from './playback-store.js';
 import { getFavorites, toggleFavorite } from './favorites-store.js';
-import { changeAccountPassword, createDeviceSession, getLinkedDevices, getPairingInfo, getRokuDeviceSessionStatus, loginAccount, loginDeviceSession, resolveDeviceToken, setupDeviceSession } from './device-sessions.js';
+import { changeAccountPassword, createDeviceSession, getLinkedDevices, getPairingInfo, getRokuDeviceSessionStatus, loginAccount, loginDeviceSession, resolveDeviceToken, setupDeviceSession, unlinkAccountDevice } from './device-sessions.js';
 
 const app = express();
 const port = process.env.PORT || 8787;
@@ -251,6 +251,15 @@ app.get('/api/account/devices', async (req, res) => {
     const accountId = requestAccount(req);
     if (!accountId) return res.status(401).json({ error: 'Sign in to view linked devices' });
     res.json({ items: await getLinkedDevices(accountId) });
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+app.delete('/api/account/devices/:deviceId', async (req, res) => {
+  try {
+    const accountId = requestAccount(req);
+    if (!accountId) return res.status(401).json({ error: 'Sign in to unlink a Roku device' });
+    const result = await unlinkAccountDevice(accountId, req.params.deviceId);
+    if (result.error) return res.status(404).json(result);
+    res.json(result);
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 app.post('/api/account/login', async (req, res) => {

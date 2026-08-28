@@ -156,6 +156,15 @@ export async function getLinkedDevices(accountId) {
   }));
 }
 
+export async function unlinkAccountDevice(accountId, deviceId) {
+  if (!ObjectId.isValid(accountId) || !deviceId) return { error: 'Invalid device' };
+  const result = await (await profiles()).updateOne(
+    { accountId: new ObjectId(accountId), deviceId: String(deviceId) },
+    { $unset: { accountId: '' }, $set: { updatedAt: new Date() } },
+  );
+  return result.modifiedCount ? { ok: true } : { error: 'Linked Roku device not found' };
+}
+
 export async function loginAccount(email, password, deviceId = '') {
   const normalizedEmail = normalizeEmail(email);
   if (!validEmail(normalizedEmail) || !validPassword(password)) return { error: 'Incorrect email or password' };

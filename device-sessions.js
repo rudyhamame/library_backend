@@ -171,6 +171,16 @@ export async function loginAccount(email, password, deviceId = '') {
   return { token: issueToken(session, 'browser'), devices };
 }
 
+export async function changeAccountPassword(accountId, currentPassword, newPassword) {
+  if (!ObjectId.isValid(accountId)) return { error: 'Sign in to change your password' };
+  if (!validPassword(currentPassword) || !validPassword(newPassword)) return { error: 'Passwords must contain at least 8 characters' };
+  const collection = await accounts();
+  const account = await collection.findOne({ _id: new ObjectId(accountId) });
+  if (!account || !verifyPassword(currentPassword, account.passwordHash)) return { error: 'Current password is incorrect' };
+  await collection.updateOne({ _id: account._id }, { $set: { passwordHash: hashPassword(newPassword), updatedAt: new Date() } });
+  return { ok: true };
+}
+
 export function resolveDeviceToken(token) {
   const [payload, signature] = String(token || '').split('.');
   if (!payload || !signature) return null;

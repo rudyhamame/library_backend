@@ -156,6 +156,21 @@ export async function getLinkedDevices(accountId) {
   }));
 }
 
+export async function loginAccount(email, password, deviceId = '') {
+  const normalizedEmail = normalizeEmail(email);
+  if (!validEmail(normalizedEmail) || !validPassword(password)) return { error: 'Incorrect email or password' };
+  const account = await (await accounts()).findOne({ email: normalizedEmail });
+  if (!account || !verifyPassword(password, account.passwordHash)) return { error: 'Incorrect email or password' };
+  const linked = await (await profiles()).find({ accountId: account._id }).toArray();
+  if (!linked.length) return { error: 'No Roku devices are linked to this account' };
+  const devices = linked.map(device => ({ id: String(device._id), deviceId: device.deviceId, label: `Roku ${String(device.deviceId || '').replace(/^roku-/, '').slice(-8).toUpperCase()}` }));
+  if (!deviceId && linked.length > 1) return { devices };
+  const selected = linked.find(device => deviceId && device.deviceId === deviceId) || (linked.length === 1 ? linked[0] : null);
+  if (!selected) return { error: 'Select a linked Roku device' };
+  const session = { ownerId: selected.ownerId, deviceId: selected.deviceId, accountId: String(account._id) };
+  return { token: issueToken(session, 'browser'), devices };
+}
+
 export function resolveDeviceToken(token) {
   const [payload, signature] = String(token || '').split('.');
   if (!payload || !signature) return null;

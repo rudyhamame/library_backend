@@ -1,5 +1,5 @@
 import { createHash, createHmac, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
-import { MongoClient } from 'mongodb';
+import { MongoClient, ObjectId } from 'mongodb';
 
 const sessions = new Map();
 const pairingTtlMs = 15 * 60 * 1000;
@@ -140,6 +140,20 @@ export function getRokuDeviceSessionStatus(code) {
   if (!session) return null;
   if (!session.approvedAt) return { status: 'pending', expiresAt: session.expiresAt };
   return { status: 'approved', expiresAt: session.expiresAt, token: issueToken(session, 'roku') };
+}
+
+export async function getLinkedDevices(accountId) {
+  if (!ObjectId.isValid(accountId)) return [];
+  const rows = await (await profiles()).find(
+    { accountId: new ObjectId(accountId) },
+    { projection: { deviceId: 1, linkedAt: 1, updatedAt: 1 } },
+  ).sort({ linkedAt: 1 }).toArray();
+  return rows.map(device => ({
+    id: String(device._id),
+    deviceId: device.deviceId,
+    linkedAt: device.linkedAt || device.updatedAt || null,
+    label: `Roku ${String(device.deviceId || '').replace(/^roku-/, '').slice(-8).toUpperCase()}`,
+  }));
 }
 
 export function resolveDeviceToken(token) {

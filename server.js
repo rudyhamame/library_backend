@@ -1195,8 +1195,12 @@ async function getOrStartRokuHls(source, kind, id, extension, requestedStart = 0
   const key = rokuHlsKey(source._id, kind, id, extension, startSeconds);
   const existing = mediaJobs.get(key);
   if (existing) {
+    if (existing.finished || existing.child?.exitCode !== null) {
+      await mediaJobs.remove(key, 'restart-failed');
+    } else {
     mediaJobs.touch(existing, identity.viewerId);
     return existing;
+    }
   }
 
   // A device is limited to one active playback job. Release its previous
@@ -1245,7 +1249,7 @@ async function getOrStartRokuHls(source, kind, id, extension, requestedStart = 0
     // Keep a live, rolling manifest. Do not mark it VOD or EVENT: VOD made Roku
     // freeze the first short manifest, while EVENT retains an unbounded history.
     // Keep ffmpeg near playback speed so it cannot run far ahead of Roku.
-                  '-re', '-i', inputUrl,
+                  '-re', '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '5', '-i', inputUrl,
     '-map', '0:v:0?', '-map', '0:a:0?', ...hlsCodecArgs(decision), '-sn', '-dn',
                   '-f', 'hls', '-hls_time', '2', '-hls_list_size', '30', '-hls_delete_threshold', '6',
                   '-hls_flags', 'independent_segments+temp_file+delete_segments',
@@ -1271,7 +1275,11 @@ async function getOrStartRokuHls(source, kind, id, extension, requestedStart = 0
       const registered = mediaJobs.get(key);
       if (registered) registered.finished = true;
       const safeError = created.error.replaceAll(inputUrl, '[provider URL]');
-      if (code !== 0 && code !== null) console.warn(`[Media HLS] ${kind}:${id} exited ${code}: ${safeError.trim().slice(-240)}`);
+      if (code !== 0 && code !== null) {
+        console.warn(`[Media HLS] ${kind}:${id} exited ${code}: ${safeError.trim().slice(-240)}`);
+        const active = mediaJobs.get(key);
+        if (active?.child === child) mediaJobs.remove(key, 'ffmpeg-error').catch(() => {});
+      }
     });
     return created;
   });

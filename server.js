@@ -45,6 +45,8 @@ const previewCacheMaxEntries = Math.max(2, Number.parseInt(process.env.PREVIEW_C
 const previewCacheMaxBytes = Math.max(2, Number.parseInt(process.env.PREVIEW_CACHE_MAX_MB || '12', 10) || 12) * 1024 * 1024;
 const previewCacheTtlMs = Math.max(60_000, Number.parseInt(process.env.PREVIEW_CACHE_TTL_MS || '3600000', 10) || 3_600_000);
 const mediaStreamIdleTimeoutMs = Math.max(10_000, Number.parseInt(process.env.MEDIA_STREAM_IDLE_TIMEOUT_MS || '45000', 10) || 45_000);
+const libraryRevisions = new Map();
+const libraryRevisionWaiters = new Map();
 let previewCacheBytes = 0;
 let activeDirectStreams = 0;
 let shuttingDown = false;
@@ -57,6 +59,41 @@ const sourceType = source => source?.type === 'm3u' ? 'm3u' : 'xtream';
 const getSourceCatalog = (source, kind) => sourceType(source) === 'm3u' ? getM3uCatalog(source, kind) : getXtreamCatalog(source, kind);
 const getSourceCategories = (source, kind) => sourceType(source) === 'm3u' ? getM3uCategories(source, kind) : getXtreamCategories(source, kind);
 const sourceProviderUrl = (source, kind, id, extension = '') => sourceType(source) === 'm3u' ? m3uProviderUrl(source, kind, id) : xtreamProviderUrl(source, kind, id, extension);
+
+function libraryRevision(ownerId) {
+  return libraryRevisions.get(String(ownerId || '')) || 1;
+}
+
+function bumpLibraryRevision(ownerId) {
+  const key = String(ownerId || '');
+  if (!key) return;
+  const revision = libraryRevision(key) + 1;
+  libraryRevisions.set(key, revision);
+  const waiters = libraryRevisionWaiters.get(key);
+  if (!waiters) return;
+  libraryRevisionWaiters.delete(key);
+  for (const waiter of waiters) waiter(revision);
+}
+
+function waitForLibraryRevision(ownerId, since, timeoutMs = 25_000) {
+  const key = String(ownerId || '');
+  const current = libraryRevision(key);
+  if (current !== since) return Promise.resolve(current);
+  return new Promise(resolve => {
+    const waiters = libraryRevisionWaiters.get(key) || new Set();
+    let timer;
+    const finish = revision => {
+      clearTimeout(timer);
+      waiters.delete(finish);
+      if (!waiters.size) libraryRevisionWaiters.delete(key);
+      resolve(revision);
+    };
+    waiters.add(finish);
+    libraryRevisionWaiters.set(key, waiters);
+    timer = setTimeout(() => finish(libraryRevision(key)), timeoutMs);
+    timer.unref?.();
+  });
+}
 
 function mediaIdentity(req) {
   const token = String(req.get('x-device-token') || req.query.deviceToken || '');
@@ -536,12 +573,23 @@ app.get('/api/library/categories', async (req, res) => {
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
+app.get(['/api/library/revision', '/api/roku/library/revision'], async (req, res) => {
+  try {
+    const ownerId = requestOwner(req);
+    if (!ownerId) return res.status(401).json({ error: 'Authentication required' });
+    const since = Number.parseInt(String(req.query.since || '0'), 10) || 0;
+    res.set('Cache-Control', 'no-store');
+    res.json({ revision: await waitForLibraryRevision(ownerId, since) });
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
 app.post('/api/library/categories', async (req, res) => {
   try {
     const ownerId = requestOwner(req);
     const result = await createLibraryCategory(ownerId, await getLibrarySelectedItems(ownerId), {
       kind: String(req.body?.kind || ''), name: req.body?.name,
     });
+    bumpLibraryRevision(ownerId);
     res.status(201).json(result);
   } catch (error) { res.status(400).json({ error: error.message }); }
 });
@@ -551,6 +599,7 @@ app.patch('/api/library/categories/:id', async (req, res) => {
     const ownerId = requestOwner(req);
     const result = await renameLibraryCategory(ownerId, await getLibrarySelectedItems(ownerId), req.params.id, req.body?.name);
     if (!result) return res.sendStatus(404);
+    bumpLibraryRevision(ownerId);
     res.json(result);
   } catch (error) { res.status(400).json({ error: error.message }); }
 });
@@ -561,6 +610,7 @@ app.put('/api/library/categories/:id/items', async (req, res) => {
     const ownerId = requestOwner(req);
     const result = await replaceLibraryCategoryItems(ownerId, await getLibrarySelectedItems(ownerId), req.params.id, req.body.itemKeys);
     if (!result) return res.sendStatus(404);
+    bumpLibraryRevision(ownerId);
     res.json(result);
   } catch (error) { res.status(400).json({ error: error.message }); }
 });
@@ -570,6 +620,7 @@ app.delete('/api/library/categories/:id', async (req, res) => {
     const ownerId = requestOwner(req);
     const result = await deleteLibraryCategory(ownerId, await getLibrarySelectedItems(ownerId), req.params.id);
     if (!result) return res.sendStatus(404);
+    bumpLibraryRevision(ownerId);
     res.json(result);
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
@@ -1016,7 +1067,9 @@ app.put('/api/xtream/sources/:id', async (req, res) => {
 
 app.delete('/api/xtream/sources/:id', async (req, res) => {
   try {
-    if (!await deleteXtreamSource(req.params.id, requestOwner(req))) return res.sendStatus(404);
+    const ownerId = requestOwner(req);
+    if (!await deleteXtreamSource(req.params.id, ownerId)) return res.sendStatus(404);
+    bumpLibraryRevision(ownerId);
     res.sendStatus(204);
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
@@ -1168,8 +1221,9 @@ app.get('/api/xtream/sources/:id/enabled', async (req, res) => {
 
 app.put('/api/xtream/sources/:id/selection', async (req, res) => {
   try {
+    const ownerId = requestOwner(req);
     if (!Array.isArray(req.body?.enabledKeys)) return res.status(400).json({ error: 'enabledKeys must be an array' });
-    const source = await getXtreamSource(req.params.id, requestOwner(req));
+    const source = await getXtreamSource(req.params.id, ownerId);
     if (!source) return res.sendStatus(404);
     // The manager already has the selected catalog rows. Persist them directly
     // instead of downloading every Xtream list again merely to resolve keys.
@@ -1194,15 +1248,17 @@ app.put('/api/xtream/sources/:id/selection', async (req, res) => {
       enabledItems,
       archivedKeys: (source.archivedKeys || []).filter(key => !enabledSet.has(key)),
       archivedItems: (source.archivedItems || []).filter(item => !enabledSet.has(item.key)),
-    }, requestOwner(req));
+    }, ownerId);
     if (!updated) return res.sendStatus(404);
+    bumpLibraryRevision(ownerId);
     res.json(updated);
   } catch (error) { res.status(400).json({ error: error.message }); }
 });
 
 app.post('/api/xtream/sources/:id/archive/:key', async (req, res) => {
   try {
-    const source = await getXtreamSource(req.params.id, requestOwner(req));
+    const ownerId = requestOwner(req);
+    const source = await getXtreamSource(req.params.id, ownerId);
     if (!source) return res.sendStatus(404);
     const key = String(req.params.key || '');
     const enabledItems = Array.isArray(source.enabledItems) ? source.enabledItems : [];
@@ -1214,14 +1270,16 @@ app.post('/api/xtream/sources/:id/archive/:key', async (req, res) => {
       enabledItems: enabledItems.filter(candidate => candidate.key !== key),
       archivedKeys: archiveItems.map(candidate => candidate.key),
       archivedItems: archiveItems,
-    }, requestOwner(req));
+    }, ownerId);
+    bumpLibraryRevision(ownerId);
     res.json(updated);
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 app.post('/api/xtream/sources/:id/archive/:key/restore', async (req, res) => {
   try {
-    const source = await getXtreamSource(req.params.id, requestOwner(req));
+    const ownerId = requestOwner(req);
+    const source = await getXtreamSource(req.params.id, ownerId);
     if (!source) return res.sendStatus(404);
     const key = String(req.params.key || '');
     const archivedItems = Array.isArray(source.archivedItems) ? source.archivedItems : [];
@@ -1233,7 +1291,8 @@ app.post('/api/xtream/sources/:id/archive/:key/restore', async (req, res) => {
       enabledItems,
       archivedKeys: (source.archivedKeys || []).filter(candidate => candidate !== key),
       archivedItems: archivedItems.filter(candidate => candidate.key !== key),
-    }, requestOwner(req));
+    }, ownerId);
+    bumpLibraryRevision(ownerId);
     res.json(updated);
   } catch (error) { res.status(500).json({ error: error.message }); }
 });

@@ -79,7 +79,15 @@ export function createDeviceSession(deviceId, frontendUrl) {
     expiresAt: Date.now() + pairingTtlMs,
   };
   sessions.set(session.code, session);
-  const pairUrl = `${String(frontendUrl).replace(/\/$/, '')}/?pair=${encodeURIComponent(session.code)}`;
+  // The QR payload is deliberately limited to the short-lived pairing code.
+  // Build a clean URL instead of appending to frontendUrl, so credentials or
+  // unrelated query parameters can never be copied into the QR contents.
+  const pairUrlObject = new URL(String(frontendUrl));
+  pairUrlObject.search = '';
+  pairUrlObject.hash = '';
+  pairUrlObject.pathname = `${pairUrlObject.pathname.replace(/\/$/, '')}/`;
+  pairUrlObject.searchParams.set('pair', session.code);
+  const pairUrl = pairUrlObject.toString();
   return {
     code: session.code, deviceId: session.deviceId, expiresAt: session.expiresAt,
     pairUrl,
@@ -94,7 +102,7 @@ export async function getPairingInfo(code, token = '') {
   if (!session) return null;
   const profile = await (await profiles()).findOne({ ownerId: session.ownerId }, { projection: { accountId: 1 } });
   const authenticated = resolveDeviceToken(token)?.ownerId === session.ownerId;
-  return { expiresAt: session.expiresAt, needsSignup: !profile?.accountId, purpose: profile?.accountId ? 'manage-library' : 'activate-device', authenticated };
+  return { deviceId: session.deviceId, expiresAt: session.expiresAt, needsSignup: !profile?.accountId, purpose: profile?.accountId ? 'manage-library' : 'activate-device', authenticated };
 }
 
 async function consumePairing(code, email, password, setup) {

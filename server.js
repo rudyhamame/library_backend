@@ -224,6 +224,16 @@ app.get('/api/roku/device-session/status', async (req, res) => {
     res.json(session);
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
+app.post('/api/roku/device-session/unlink', async (req, res) => {
+  try {
+    const token = String(req.get('x-device-token') || req.query.deviceToken || '');
+    const session = resolveDeviceToken(token);
+    if (!session?.accountId || !session?.deviceId) return res.status(401).json({ error: 'Linked Roku authorization is required' });
+    const result = await unlinkAccountDevice(session.accountId, session.deviceId);
+    if (result.error) return res.status(404).json(result);
+    res.json({ ok: true });
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
 app.post('/api/device-session/info', async (req, res) => {
   try {
     const session = await getPairingInfo(req.body?.code, req.get('x-device-token'));

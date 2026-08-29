@@ -1,5 +1,6 @@
 import { createHash, createHmac, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 import { MongoClient, ObjectId } from 'mongodb';
+import { moveXtreamSources } from './xtream-store.js';
 
 const sessions = new Map();
 const pairingTtlMs = 15 * 60 * 1000;
@@ -166,6 +167,7 @@ async function consumePairing(code, email, password, setup) {
     { $setOnInsert: { ownerId: session.ownerId, deviceId: session.deviceId, createdAt: new Date() }, $set: { accountId: account._id, linkedAt: new Date(), updatedAt: new Date() } },
     { upsert: true },
   );
+  await moveXtreamSources(accountOwnerId(account._id), session.ownerId);
   session.approvedAt = Date.now();
   return { token: issueToken(session, 'browser'), deviceId: session.deviceId };
 }

@@ -80,3 +80,8 @@ export async function deleteXtreamSource(id, ownerId) {
   const result = await (await sourceCollection()).deleteOne({ _id: id, ...(ownerId ? { ownerId } : {}) });
   return result.deletedCount === 1;
 }
+
+export async function moveXtreamSources(fromOwnerId, toOwnerId) {
+  if (!fromOwnerId || !toOwnerId || fromOwnerId === toOwnerId) return;
+  await (await sourceCollection()).updateMany({ ownerId: fromOwnerId }, { $set: { ownerId: toOwnerId, updatedAt: new Date() } });
+}

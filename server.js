@@ -150,7 +150,6 @@ async function enforceHlsFileBound(job) {
 function requestOwner(req) {
   const token = String(req.get('x-device-token') || req.query.deviceToken || '');
   const session = resolveDeviceToken(token);
-  if (session?.ownerId) recordDeviceHeartbeat(session.deviceId).catch(() => {});
   return session?.ownerId || null;
 }
 
@@ -376,6 +375,14 @@ app.get('/api/account/devices', async (req, res) => {
     const accountId = requestAccount(req);
     if (!accountId) return res.status(401).json({ error: 'Sign in to view linked devices' });
     res.json({ items: await getLinkedDevices(accountId) });
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+app.post('/api/roku/heartbeat', async (req, res) => {
+  try {
+    const session = resolveDeviceToken(String(req.get('x-device-token') || req.query.deviceToken || ''));
+    if (!session?.deviceId) return res.status(401).json({ error: 'Valid Roku device authorization is required' });
+    await recordDeviceHeartbeat(session.deviceId);
+    res.json({ ok: true });
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 app.delete('/api/account/devices/:deviceId', async (req, res) => {

@@ -14,7 +14,7 @@ let profilesPromise;
 let accountsPromise;
 const heartbeatCache = new Map();
 const heartbeatIntervalMs = 30_000;
-const runningWindowMs = 150_000;
+const runningWindowMs = 90_000;
 
 async function profiles() {
   if (!profilesPromise) {

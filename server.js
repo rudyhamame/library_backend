@@ -951,6 +951,16 @@ app.get('/api/xtream/catalog', async (req, res) => {
   } catch (error) { res.status(502).json({ error: error.message }); }
 });
 
+app.get('/api/xtream/movie/:sourceId/:id/duration', async (req, res) => {
+  try {
+    const source = await getXtreamSource(req.params.sourceId, requestOwner(req));
+    if (!source) return res.sendStatus(404);
+    const info = await getXtreamMovieInfo(source, req.params.id);
+    res.set('Cache-Control', 'private, max-age=300');
+    res.json({ seconds: info.seconds, duration: info.duration });
+  } catch (error) { res.status(502).json({ error: error.message }); }
+});
+
 async function resolveXtreamEnabledItems(source, enabledKeys) {
     const allowed = enabledKeys.map(String).filter(key => /^(channel|movie|series):[^:]+$/.test(key));
     const allowedSet = new Set(allowed);

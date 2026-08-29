@@ -16,7 +16,7 @@ import { MediaCapacityError, MediaJobManager, defaultMediaLimits, memoryPressure
 import { HlsStrategy, PlaybackStrategy, choosePlaybackStrategy, determineHlsStrategy, hlsCodecArgs } from './playback-strategy.js';
 import { getPlayback, getPlaybackHistory, savePlayback } from './playback-store.js';
 import { getFavorites, toggleFavorite } from './favorites-store.js';
-import { changeAccountPassword, createDeviceSession, getLinkedDevices, getPairingInfo, getRokuDeviceSessionStatus, loginAccount, loginDeviceSession, recordDeviceHeartbeat, resolveDeviceToken, setupDeviceSession, unlinkAccountDevice } from './device-sessions.js';
+import { changeAccountPassword, claimAutomaticPairing, createDeviceSession, getLinkedDevices, getPairingInfo, getRokuDeviceSessionStatus, loginAccount, loginDeviceSession, recordDeviceHeartbeat, resolveDeviceToken, setupDeviceSession, unlinkAccountDevice } from './device-sessions.js';
 
 const app = express();
 const port = process.env.PORT || 8787;
@@ -321,15 +321,21 @@ app.use(express.json());
 
 // The Roku displays a short-lived QR/device code. The phone signs up or signs
 // in, then the Roku polls for approval and receives its token automatically.
-app.post('/api/roku/device-session', (req, res) => {
-  const deviceId = String(req.body?.deviceId || '').trim();
-  if (!deviceId) return res.status(400).json({ error: 'deviceId is required' });
-  res.json(createDeviceSession(deviceId, frontendUrl));
+app.post('/api/roku/device-session', async (req, res) => {
+  try {
+    const deviceId = String(req.body?.deviceId || '').trim();
+    if (!deviceId) return res.status(400).json({ error: 'deviceId is required' });
+    const token = String(req.get('x-device-token') || req.query.deviceToken || '');
+    res.json(await createDeviceSession(deviceId, frontendUrl, token));
+  } catch (error) { res.status(500).json({ error: error.message }); }
 });
-app.get('/api/roku/device-session', (req, res) => {
-  const deviceId = String(req.query.deviceId || '').trim();
-  if (!deviceId) return res.status(400).json({ error: 'deviceId is required' });
-  res.json(createDeviceSession(deviceId, frontendUrl));
+app.get('/api/roku/device-session', async (req, res) => {
+  try {
+    const deviceId = String(req.query.deviceId || '').trim();
+    if (!deviceId) return res.status(400).json({ error: 'deviceId is required' });
+    const token = String(req.get('x-device-token') || req.query.deviceToken || '');
+    res.json(await createDeviceSession(deviceId, frontendUrl, token));
+  } catch (error) { res.status(500).json({ error: error.message }); }
 });
 app.get('/api/roku/device-session/status', async (req, res) => {
   try {
@@ -353,6 +359,13 @@ app.post('/api/device-session/info', async (req, res) => {
     const session = await getPairingInfo(req.body?.code, req.get('x-device-token'));
     if (!session) return res.status(404).json({ error: 'Pairing code expired or invalid' });
     res.json(session);
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+app.post('/api/device-session/claim', (req, res) => {
+  try {
+    const result = claimAutomaticPairing(req.body?.code);
+    if (result.error) return res.status(result.error.includes('expired') ? 404 : 401).json(result);
+    res.json(result);
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 app.post('/api/device-session/setup', async (req, res) => {

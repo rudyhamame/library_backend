@@ -76,7 +76,7 @@ function validPassword(password) { return typeof password === 'string' && passwo
 function normalizeEmail(email) { return String(email || '').trim().toLowerCase(); }
 function validEmail(email) { return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) && email.length <= 254; }
 
-export function createDeviceSession(deviceId, frontendUrl) {
+export async function createDeviceSession(deviceId, frontendUrl, deviceToken = '') {
   purge(true);
   const normalizedDeviceId = String(deviceId);
   const session = {
@@ -85,6 +85,17 @@ export function createDeviceSession(deviceId, frontendUrl) {
     ownerId: ownerIdFor(normalizedDeviceId),
     expiresAt: Date.now() + pairingTtlMs,
   };
+  // A previously activated Roku may authorize a short-lived automatic browser
+  // login. Validate its local Roku token against the still-linked DB profile;
+  // neither the token nor account credentials are ever placed in the QR URL.
+  const authorization = resolveDeviceToken(deviceToken);
+  if (authorization?.type === 'roku' && authorization.deviceId === normalizedDeviceId && authorization.ownerId === session.ownerId && ObjectId.isValid(authorization.accountId)) {
+    const profile = await (await profiles()).findOne({ ownerId: session.ownerId, deviceId: normalizedDeviceId, accountId: new ObjectId(authorization.accountId) }, { projection: { accountId: 1 } });
+    if (profile?.accountId) {
+      session.accountId = String(profile.accountId);
+      session.autoLogin = true;
+    }
+  }
   sessions.set(session.code, session);
   // The QR payload is deliberately limited to the short-lived pairing code.
   // Build a clean URL instead of appending to frontendUrl, so credentials or
@@ -109,7 +120,16 @@ export async function getPairingInfo(code, token = '') {
   if (!session) return null;
   const profile = await (await profiles()).findOne({ ownerId: session.ownerId }, { projection: { accountId: 1 } });
   const authenticated = resolveDeviceToken(token)?.ownerId === session.ownerId;
-  return { deviceId: session.deviceId, expiresAt: session.expiresAt, needsSignup: !profile?.accountId, purpose: profile?.accountId ? 'manage-library' : 'activate-device', authenticated };
+  return { deviceId: session.deviceId, expiresAt: session.expiresAt, needsSignup: !profile?.accountId, purpose: profile?.accountId ? 'manage-library' : 'activate-device', authenticated, canAutoLogin: Boolean(session.autoLogin && session.accountId && !session.claimedAt) };
+}
+
+export function claimAutomaticPairing(code) {
+  const session = getDeviceSession(code);
+  if (!session) return { error: 'Pairing code expired or invalid' };
+  if (!session.autoLogin || !session.accountId) return { error: 'Sign in once before automatic QR login is available' };
+  if (session.claimedAt) return { error: 'This automatic login link has already been used' };
+  session.claimedAt = Date.now();
+  return { token: issueToken(session, 'browser'), deviceId: session.deviceId };
 }
 
 async function consumePairing(code, email, password, setup) {

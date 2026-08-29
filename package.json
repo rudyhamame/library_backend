@@ -5,7 +5,9 @@
   "scripts": {
     "dev": "node server.js",
     "start": "node server.js",
-    "start:production": "node server.js"
+    "start:production": "node server.js",
+    "test": "node --test test/*.test.js",
+    "test:media-leak": "node scripts/media-leak-test.js"
   },
   "dependencies": {
     "cors": "^2.8.5",

@@ -24,6 +24,7 @@ export function publicXtreamSource(source) {
   return {
     id: source._id,
     name: source.name,
+    type: source.type || 'xtream',
     endpoint: source.baseUrl,
     hasCredentials: Boolean(source.username && source.password),
     enabledKeys: Array.isArray(source.enabledKeys) ? source.enabledKeys : [],
@@ -50,9 +51,9 @@ export async function getAllXtreamSources(ownerId) {
   return (await sourceCollection()).find(ownerId ? { ownerId } : {}).sort({ name: 1, updatedAt: -1 }).toArray();
 }
 
-export async function createXtreamSource({ name, baseUrl, username, password, ownerId }) {
+export async function createXtreamSource({ name, type = 'xtream', baseUrl, username = '', password = '', ownerId }) {
   const source = {
-    _id: randomUUID(), name, baseUrl, username, password, ownerId,
+    _id: randomUUID(), name, type, baseUrl, username, password, ownerId,
     enabledKeys: [], enabledItems: [], archivedKeys: [], archivedItems: [], createdAt: new Date(), updatedAt: new Date(),
   };
   await (await sourceCollection()).insertOne(source);

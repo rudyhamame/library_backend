@@ -3,6 +3,7 @@ import { MongoClient, ObjectId } from 'mongodb';
 
 const sessions = new Map();
 const pairingTtlMs = 15 * 60 * 1000;
+const maxPairingSessions = Math.max(50, Number.parseInt(process.env.MAX_PAIRING_SESSIONS || '500', 10) || 500);
 const tokenTtlMs = 365 * 24 * 60 * 60 * 1000;
 const mongoUri = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017';
 const databaseName = process.env.MONGODB_DB || 'rh_stream';
@@ -38,9 +39,11 @@ async function accounts() {
   return accountsPromise;
 }
 
-function purge() {
+function purge(reserveSlot = false) {
   const now = Date.now();
   for (const [code, session] of sessions) if (session.expiresAt < now) sessions.delete(code);
+  const target = reserveSlot ? maxPairingSessions - 1 : maxPairingSessions;
+  while (sessions.size > target) sessions.delete(sessions.keys().next().value);
 }
 
 function ownerIdFor(deviceId) { return createHash('sha256').update(String(deviceId)).digest('hex'); }
@@ -70,7 +73,7 @@ function normalizeEmail(email) { return String(email || '').trim().toLowerCase()
 function validEmail(email) { return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) && email.length <= 254; }
 
 export function createDeviceSession(deviceId, frontendUrl) {
-  purge();
+  purge(true);
   const normalizedDeviceId = String(deviceId);
   const session = {
     code: randomBytes(18).toString('base64url'),

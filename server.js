@@ -1,15 +1,19 @@
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
-import { Readable } from 'node:stream';
+import { Readable, Transform } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import { spawn } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, timingSafeEqual } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { shapeArabicForRoku } from './arabic-shaper.js';
 import { createXtreamSource, deleteXtreamSource, getAllXtreamSources, getXtreamSource, getXtreamSources, publicXtreamSource, updateXtreamSelection, updateXtreamSource } from './xtream-store.js';
-import { getXtreamCatalog, getXtreamCategories, getXtreamMovieInfo, getXtreamSeriesEpisodes, validateXtreamConnection, xtreamProviderUrl } from './xtream.js';
+import { evictXtreamCache, getXtreamCatalog, getXtreamCategories, getXtreamMovieInfo, getXtreamSeriesEpisodes, validateXtreamConnection, xtreamCacheStats, xtreamProviderUrl } from './xtream.js';
+import { evictM3uCache, getM3uCatalog, getM3uCategories, m3uCacheStats, m3uProviderUrl, validateM3uConnection } from './m3u.js';
+import { MediaCapacityError, MediaJobManager, defaultMediaLimits, memoryPressure } from './media-job-manager.js';
+import { PlaybackStrategy, choosePlaybackStrategy } from './playback-strategy.js';
 import { getPlayback, getPlaybackHistory, savePlayback } from './playback-store.js';
 import { getFavorites, toggleFavorite } from './favorites-store.js';
 import { changeAccountPassword, createDeviceSession, getLinkedDevices, getPairingInfo, getRokuDeviceSessionStatus, loginAccount, loginDeviceSession, resolveDeviceToken, setupDeviceSession, unlinkAccountDevice } from './device-sessions.js';
@@ -30,9 +34,118 @@ const rokuText = (value) => arabicText.test(String(value || '')) ? shapeArabicFo
 const rokuInitialSeriesLimit = Math.min(4, Math.max(1, Number.parseInt(process.env.ROKU_INITIAL_SERIES_LIMIT || '4', 10)));
 const rokuMoviePageLimit = 10;
 const xtreamItemsInFlight = new Map();
-const rokuHlsJobs = new Map();
 const rokuHlsRoot = path.join(os.tmpdir(), 'rh-stream-hls');
 const frontendUrl = process.env.FRONTEND_URL || 'https://rh-stream-frontend.onrender.com';
+const mediaLimits = defaultMediaLimits();
+const debugMediaLogging = String(process.env.DEBUG_MEDIA_LOGGING || 'false').toLowerCase() === 'true';
+const mediaJobs = new MediaJobManager({ limits: mediaLimits, debug: debugMediaLogging });
+const hlsMaxSegments = Math.max(12, Number.parseInt(process.env.HLS_MAX_SEGMENTS || '36', 10) || 36);
+const previewCacheMaxEntries = Math.max(2, Number.parseInt(process.env.PREVIEW_CACHE_MAX_ENTRIES || '12', 10) || 12);
+const previewCacheMaxBytes = Math.max(2, Number.parseInt(process.env.PREVIEW_CACHE_MAX_MB || '12', 10) || 12) * 1024 * 1024;
+const previewCacheTtlMs = Math.max(60_000, Number.parseInt(process.env.PREVIEW_CACHE_TTL_MS || '3600000', 10) || 3_600_000);
+const mediaStreamIdleTimeoutMs = Math.max(10_000, Number.parseInt(process.env.MEDIA_STREAM_IDLE_TIMEOUT_MS || '45000', 10) || 45_000);
+let previewCacheBytes = 0;
+let activeDirectStreams = 0;
+let shuttingDown = false;
+let mediaRequestSequence = 0;
+
+const sourceType = source => source?.type === 'm3u' ? 'm3u' : 'xtream';
+const getSourceCatalog = (source, kind) => sourceType(source) === 'm3u' ? getM3uCatalog(source, kind) : getXtreamCatalog(source, kind);
+const getSourceCategories = (source, kind) => sourceType(source) === 'm3u' ? getM3uCategories(source, kind) : getXtreamCategories(source, kind);
+const sourceProviderUrl = (source, kind, id, extension = '') => sourceType(source) === 'm3u' ? m3uProviderUrl(source, kind, id) : xtreamProviderUrl(source, kind, id, extension);
+
+function mediaIdentity(req) {
+  const token = String(req.get('x-device-token') || req.query.deviceToken || '');
+  const session = resolveDeviceToken(token);
+  return {
+    userId: String(session?.ownerId || ''),
+    deviceId: String(session?.deviceId || ''),
+    viewerId: String(session?.deviceId || session?.ownerId || req.ip || 'anonymous'),
+  };
+}
+
+function appendTail(current, chunk, maxBytes = 8_000) {
+  return `${current}${chunk}`.slice(-maxBytes);
+}
+
+function capacityResponse(res, error) {
+  if (!(error instanceof MediaCapacityError)) return false;
+  res.setHeader('Retry-After', String(error.retryAfterSeconds));
+  res.status(error.statusCode).json({ error: error.message, code: 'MEDIA_CAPACITY_FULL' });
+  return true;
+}
+
+function terminateChild(child, graceMs = 1_500) {
+  if (!child || child.exitCode !== null) return Promise.resolve();
+  return new Promise(resolve => {
+    let finished = false;
+    let forceTimer;
+    const done = () => { if (finished) return; finished = true; clearTimeout(forceTimer); resolve(); };
+    child.once('close', done);
+    child.kill('SIGTERM');
+    forceTimer = setTimeout(() => {
+      if (!finished && child.exitCode === null) child.kill('SIGKILL');
+      done();
+    }, graceMs);
+    forceTimer.unref?.();
+  });
+}
+
+function evictPreviewCache(now = Date.now(), aggressive = false) {
+  for (const [key, entry] of previewCache) {
+    if (entry.expires > now) continue;
+    previewCache.delete(key);
+    previewCacheBytes -= entry.bytes;
+  }
+  while (previewCache.size > previewCacheMaxEntries || previewCacheBytes > previewCacheMaxBytes) {
+    const key = previewCache.keys().next().value;
+    const entry = previewCache.get(key);
+    previewCache.delete(key);
+    previewCacheBytes -= entry?.bytes || 0;
+  }
+  if (aggressive) {
+    while (previewCache.size > 2) {
+      const key = previewCache.keys().next().value;
+      const entry = previewCache.get(key);
+      previewCache.delete(key);
+      previewCacheBytes -= entry?.bytes || 0;
+    }
+  }
+}
+
+function cachePreview(key, frame) {
+  const prior = previewCache.get(key);
+  if (prior) previewCacheBytes -= prior.bytes;
+  previewCache.delete(key);
+  previewCache.set(key, { frame, bytes: frame.length, expires: Date.now() + previewCacheTtlMs });
+  previewCacheBytes += frame.length;
+  evictPreviewCache();
+}
+
+async function hlsDiskUsageBytes() {
+  let total = 0;
+  try {
+    for (const directory of await fs.readdir(rokuHlsRoot, { withFileTypes: true })) {
+      if (!directory.isDirectory()) continue;
+      for (const file of await fs.readdir(path.join(rokuHlsRoot, directory.name), { withFileTypes: true })) {
+        if (!file.isFile()) continue;
+        total += (await fs.stat(path.join(rokuHlsRoot, directory.name, file.name))).size;
+      }
+    }
+  } catch { /* The HLS root may not exist during startup or shutdown. */ }
+  return total;
+}
+
+async function enforceHlsFileBound(job) {
+  if (!job?.directory) return;
+  try {
+    const segments = (await fs.readdir(job.directory))
+      .filter(name => /^segment-\d{6}\.ts$/.test(name))
+      .sort();
+    const obsolete = segments.slice(0, Math.max(0, segments.length - hlsMaxSegments));
+    await Promise.allSettled(obsolete.map(name => fs.rm(path.join(job.directory, name), { force: true })));
+  } catch { /* Job cleanup may race this safety sweep. */ }
+}
 
 function requestOwner(req) {
   const token = String(req.get('x-device-token') || req.query.deviceToken || '');
@@ -119,7 +232,7 @@ async function getAllXtreamItems(kind) {
     const sources = await getAllXtreamSources();
     const groups = await Promise.all(sources.map(async source => {
       try {
-        const [catalog, categories] = await Promise.all([getXtreamCatalog(source, kind), getXtreamCategories(source, kind)]);
+        const [catalog, categories] = await Promise.all([getSourceCatalog(source, kind), getSourceCategories(source, kind)]);
         const categoryNames = new Map(categories.map(category => [category.id, category.name]));
         return catalog.map(item => {
           const category = categoryNames.get(item.categoryId) || source.name || 'Other';
@@ -166,7 +279,7 @@ async function getRokuSelectedItems(kind, ownerId = null) {
   const groups = await Promise.all(sources.map(async source => {
     let categoryNames = new Map();
     try {
-      categoryNames = new Map((await getXtreamCategories(source, kind)).map(category => [String(category.id), category.name]));
+      categoryNames = new Map((await getSourceCategories(source, kind)).map(category => [String(category.id), category.name]));
     } catch (error) {
       console.warn(`[Xtream] Could not refresh ${kind} categories for Roku: ${error.message}`);
     }
@@ -295,6 +408,50 @@ app.get('/api/health', async (_, res) => {
   } catch (error) {
     res.status(503).json({ ok: false, source: 'catalog', storage: { type: 'mongodb', error: error.message } });
   }
+});
+
+function diagnosticsAuthorized(req) {
+  const expected = String(process.env.INTERNAL_DIAGNOSTICS_TOKEN || '');
+  if (!expected) return false;
+  const supplied = String(req.get('x-internal-token') || req.get('authorization')?.replace(/^Bearer\s+/i, '') || '');
+  const left = Buffer.from(supplied);
+  const right = Buffer.from(expected);
+  return left.length === right.length && timingSafeEqual(left, right);
+}
+
+async function mediaHealthSnapshot() {
+  const memory = process.memoryUsage();
+  const counts = mediaJobs.counts();
+  return {
+    uptime: Math.floor(process.uptime()),
+    rssMB: Number((memory.rss / 1024 / 1024).toFixed(1)),
+    heapUsedMB: Number((memory.heapUsed / 1024 / 1024).toFixed(1)),
+    externalMB: Number((memory.external / 1024 / 1024).toFixed(1)),
+    arrayBuffersMB: Number((memory.arrayBuffers / 1024 / 1024).toFixed(1)),
+    freeSystemMemoryMB: Number((os.freemem() / 1024 / 1024).toFixed(1)),
+    loadAverage: os.loadavg().map(value => Number(value.toFixed(2))),
+    cpuCount: os.availableParallelism?.() || os.cpus().length,
+    activeDirectStreams,
+    activeRemuxJobs: counts.remux,
+    activeTranscodes: counts.transcode,
+    queuedJobs: counts.queued,
+    hlsDiskUsageMB: Number(((await hlsDiskUsageBytes()) / 1024 / 1024).toFixed(1)),
+    cacheEntryCounts: {
+      xtream: xtreamCacheStats().entries,
+      xtreamRequestsInFlight: xtreamCacheStats().inFlight,
+      m3u: m3uCacheStats().entries,
+      m3uRequestsInFlight: m3uCacheStats().inFlight,
+      previews: previewCache.size,
+      previewMB: Number((previewCacheBytes / 1024 / 1024).toFixed(1)),
+      catalogRequestsInFlight: xtreamItemsInFlight.size,
+    },
+  };
+}
+
+app.get('/internal/media-health', async (req, res) => {
+  if (!diagnosticsAuthorized(req)) return res.sendStatus(404);
+  res.set('Cache-Control', 'no-store');
+  res.json(await mediaHealthSnapshot());
 });
 
 app.use('/api/xtream', (req, res, next) => {
@@ -485,8 +642,13 @@ function parseXtreamPlaybackItem(itemId) {
   };
 }
 
-function capturePreview(inputUrl, position) {
-  return new Promise((resolve, reject) => {
+async function capturePreview(inputUrl, position, key, identity) {
+  const { job } = await mediaJobs.getOrCreate({
+    key,
+    mode: choosePlaybackStrategy({ purpose: 'preview' }) === PlaybackStrategy.TRANSCODE ? 'transcode' : 'remux',
+    persistent: false,
+    ...identity,
+  }, async () => {
     const args = [
       '-hide_banner', '-loglevel', 'error',
       '-ss', String(Math.max(0, position)), '-i', inputUrl,
@@ -495,26 +657,36 @@ function capturePreview(inputUrl, position) {
       '-q:v', '3', '-f', 'image2pipe', '-vcodec', 'mjpeg', 'pipe:1',
     ];
     const child = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'] });
-    const chunks = [];
-    let total = 0;
-    let errorText = '';
-    const timeout = setTimeout(() => child.kill('SIGKILL'), 25_000);
-    child.stdout.on('data', chunk => {
-      total += chunk.length;
-      if (total <= 5 * 1024 * 1024) chunks.push(chunk);
-      else child.kill('SIGKILL');
+    const created = { child, error: '', stop: () => terminateChild(child) };
+    created.result = new Promise((resolve, reject) => {
+      const chunks = [];
+      let total = 0;
+      const timeout = setTimeout(() => child.kill('SIGKILL'), 25_000);
+      timeout.unref?.();
+      child.stdout.on('data', chunk => {
+        total += chunk.length;
+        if (total <= 5 * 1024 * 1024) chunks.push(chunk);
+        else child.kill('SIGKILL');
+      });
+      child.stderr.on('data', chunk => { created.error = appendTail(created.error, chunk); });
+      child.once('error', reject);
+      child.once('close', code => {
+        clearTimeout(timeout);
+        created.finished = true;
+        if (code === 0 && total > 0 && total <= 5 * 1024 * 1024) resolve(Buffer.concat(chunks));
+        else reject(new Error(created.error.trim().slice(-300) || `ffmpeg exited with ${code}`));
+      });
     });
-    child.stderr.on('data', chunk => { errorText += chunk.toString(); });
-    child.on('error', reject);
-    child.on('close', code => {
-      clearTimeout(timeout);
-      if (code === 0 && total > 0 && total <= 5 * 1024 * 1024) resolve(Buffer.concat(chunks));
-      else reject(new Error(errorText.trim().slice(-300) || `ffmpeg exited with ${code}`));
-    });
+    return created;
   });
+  try { return await job.result; }
+  finally { await mediaJobs.remove(key, 'preview-complete'); }
 }
 
 app.get('/api/playback/preview', async (req, res) => {
+  let previewJobKey = '';
+  const cancelPreview = () => { if (previewJobKey) mediaJobs.remove(previewJobKey, 'client-disconnect').catch(() => {}); };
+  res.once('close', cancelPreview);
   try {
     const itemId = String(req.query?.itemId || '');
     if (!itemId) return res.status(400).json({ error: 'itemId is required' });
@@ -526,18 +698,19 @@ app.get('/api/playback/preview', async (req, res) => {
     if (!source) return res.sendStatus(404);
     const position = Math.max(0, Math.floor(Number(playback.position) || 0));
     const cacheKey = `${itemId}:${position}`;
-    let frame = previewCache.get(cacheKey);
+    evictPreviewCache();
+    let frame = previewCache.get(cacheKey)?.frame;
     if (!frame) {
-      frame = await capturePreview(xtreamProviderUrl(source, target.kind, target.id, target.extension), position);
-      previewCache.set(cacheKey, frame);
-      while (previewCache.size > 30) previewCache.delete(previewCache.keys().next().value);
+      previewJobKey = `preview:${createHash('sha256').update(cacheKey).digest('hex').slice(0, 24)}`;
+      frame = await capturePreview(await sourceProviderUrl(source, target.kind, target.id, target.extension), position, previewJobKey, mediaIdentity(req));
+      cachePreview(cacheKey, frame);
     }
     res.set({ 'Content-Type': 'image/jpeg', 'Cache-Control': 'private, max-age=86400', 'Content-Length': String(frame.length) });
     res.end(frame);
   } catch (error) {
     console.warn(`[Playback preview] ${error.message}`);
-    res.status(502).json({ error: 'Could not capture the saved playback frame' });
-  }
+    if (!res.headersSent && !res.destroyed && !capacityResponse(res, error)) res.status(502).json({ error: 'Could not capture the saved playback frame' });
+  } finally { res.off('close', cancelPreview); }
 });
 app.get('/api/favorites', async (_, res) => {
   try { res.set('Cache-Control', 'no-store'); res.json({ items: await getFavorites() }); }
@@ -627,20 +800,22 @@ app.get('/api/roku/dashboard', async (_, res) => {
     res.json(freshDashboardTimes(dashboardCache.data));
   } catch (error) { res.status(502).json({ backend: 'online', error: error.message }); }
 });
-function parseXtreamInput(body, existing = null) {
+function parsePlaylistInput(body, existing = null) {
   const name = String(body?.name || existing?.name || '').trim();
+  const type = body?.type === 'm3u' ? 'm3u' : body?.type === 'xtream' ? 'xtream' : sourceType(existing);
   const supplied = String(body?.url || '').trim();
   if (!name) throw new Error('Source name is required');
   if (!supplied && existing) return { name };
-  if (!supplied) throw new Error('Paste the Xtream get.php URL');
+  if (!supplied) throw new Error(`Paste the ${type === 'm3u' ? 'M3U playlist' : 'Xtream server'} URL`);
   let url;
-  try { url = new URL(supplied); } catch { throw new Error('Enter a valid Xtream URL'); }
-  if (!['http:', 'https:'].includes(url.protocol)) throw new Error('Xtream URL must use HTTP or HTTPS');
-  const username = String(url.searchParams.get('username') || body?.username || '').trim();
-  const password = String(url.searchParams.get('password') || body?.password || '').trim();
-  if (!username || !password) throw new Error('The Xtream URL must include username and password');
+  try { url = new URL(supplied); } catch { throw new Error('Enter a valid playlist URL'); }
+  if (!['http:', 'https:'].includes(url.protocol)) throw new Error('Playlist URL must use HTTP or HTTPS');
+  if (type === 'm3u') return { name, type, baseUrl: url.toString(), username: '', password: '' };
+  const username = String(body?.username || url.searchParams.get('username') || existing?.username || '').trim();
+  const password = String(body?.password || url.searchParams.get('password') || existing?.password || '').trim();
+  if (!username || !password) throw new Error('Xtream username and password are required');
   const pathname = url.pathname.replace(/\/(?:get|player_api)\.php\/?$/i, '').replace(/\/$/, '');
-  return { name, baseUrl: `${url.protocol}//${url.host}${pathname}`, username, password };
+  return { name, type, baseUrl: `${url.protocol}//${url.host}${pathname}`, username, password };
 }
 
 app.get('/api/xtream/sources', async (req, res) => {
@@ -652,30 +827,48 @@ app.get('/api/xtream/sources', async (req, res) => {
 // is HTTPS, so browsers block those images as mixed content.  Serve the small
 // logo through this HTTPS backend endpoint instead.
 app.get('/api/xtream/logo', async (req, res) => {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(new Error('Logo request timed out')), 10_000);
+  timeout.unref?.();
+  const abort = () => controller.abort(new Error('Logo client disconnected'));
+  res.once('close', abort);
   try {
     const supplied = String(req.query.url || '').trim();
     const target = new URL(supplied);
     if (!['http:', 'https:'].includes(target.protocol)) throw new Error('Unsupported logo URL');
     if (['localhost', '127.0.0.1', '0.0.0.0', '::1'].includes(target.hostname)) throw new Error('Unsupported logo host');
 
-    const response = await fetch(target, { signal: AbortSignal.timeout(10_000), redirect: 'error' });
+    const response = await fetch(target, { signal: controller.signal, redirect: 'error' });
     if (!response.ok) return res.sendStatus(response.status === 404 ? 404 : 502);
     const contentType = response.headers.get('content-type') || 'image/jpeg';
     if (!contentType.toLowerCase().startsWith('image/')) return res.status(415).send('Logo is not an image');
-    const bytes = Buffer.from(await response.arrayBuffer());
-    if (bytes.length > 5 * 1024 * 1024) return res.status(413).send('Logo is too large');
+    const maxBytes = 5 * 1024 * 1024;
+    const contentLength = Number(response.headers.get('content-length') || 0);
+    if (contentLength > maxBytes) { await response.body?.cancel(); return res.status(413).send('Logo is too large'); }
+    let bytes = 0;
+    const limiter = new Transform({
+      transform(chunk, _encoding, callback) {
+        bytes += chunk.length;
+        callback(bytes <= maxBytes ? null : new Error('Logo is too large'), chunk);
+      },
+    });
     res.set('Content-Type', contentType.split(';', 1)[0]);
     res.set('Cache-Control', 'public, max-age=86400, s-maxage=86400');
-    res.send(bytes);
+    if (!response.body) return res.end();
+    await pipeline(Readable.fromWeb(response.body), limiter, res);
   } catch (error) {
-    res.status(400).send(error.message || 'Invalid logo URL');
+    if (!res.headersSent && !res.destroyed) res.status(error.message === 'Logo is too large' ? 413 : 400).send(error.message || 'Invalid logo URL');
+  } finally {
+    clearTimeout(timeout);
+    res.off('close', abort);
   }
 });
 
 app.post('/api/xtream/sources', async (req, res) => {
   try {
-    const source = parseXtreamInput(req.body);
-    await validateXtreamConnection({ ...source, _id: 'validation' });
+    const source = parsePlaylistInput(req.body);
+    if (source.type === 'm3u') await validateM3uConnection({ ...source, _id: 'validation' });
+    else await validateXtreamConnection({ ...source, _id: 'validation' });
     res.status(201).json(await createXtreamSource({ ...source, ownerId: requestOwner(req) }));
   } catch (error) { res.status(400).json({ error: error.message }); }
 });
@@ -684,8 +877,12 @@ app.put('/api/xtream/sources/:id', async (req, res) => {
   try {
     const existing = await getXtreamSource(req.params.id, requestOwner(req));
     if (!existing) return res.sendStatus(404);
-    const changes = parseXtreamInput(req.body, existing);
-    if (changes.baseUrl) await validateXtreamConnection({ ...existing, ...changes });
+    const changes = parsePlaylistInput(req.body, existing);
+    if (changes.baseUrl) {
+      const candidate = { ...existing, ...changes };
+      if (sourceType(candidate) === 'm3u') await validateM3uConnection(candidate);
+      else await validateXtreamConnection(candidate);
+    }
     res.json(await updateXtreamSource(req.params.id, changes, requestOwner(req)));
   } catch (error) { res.status(400).json({ error: error.message }); }
 });
@@ -704,27 +901,27 @@ app.get('/api/xtream/catalog', async (req, res) => {
     const aliases = { live: 'channel', channel: 'channel', movie: 'movie', vod: 'movie', series: 'series' };
     const kind = aliases[String(req.query.kind || '')];
     if (!kind) return res.status(400).json({ error: 'kind must be channel, movie, or series' });
-    const [allItems, categories] = await Promise.all([getXtreamCatalog(source, kind), getXtreamCategories(source, kind)]);
+    const [allItems, categories] = await Promise.all([getSourceCatalog(source, kind), getSourceCategories(source, kind)]);
     const enabled = new Set(source.enabledKeys || []);
     const query = String(req.query.q || '').trim().toLocaleLowerCase();
     const category = String(req.query.category || 'all');
     const titleLanguage = String(req.query.titleLanguage || req.query.language || 'all').toUpperCase();
     const pageSize = Math.min(200, Math.max(10, Number.parseInt(req.query.limit, 10) || 50));
     const requestedPage = Math.max(1, Number.parseInt(req.query.page, 10) || 1);
-    const categoryNames = new Map(categories.map(item => [item.id, item.name]));
-    const catalog = allItems.map(item => ({
-      ...item,
-      languageCode: titleLanguageCode(item),
-      titleLanguage: titleLanguageCode(item),
-    }));
     const languagePriority = { AR: 0, EN: 1 };
-    const languages = [...new Set(catalog.map(item => item.languageCode))]
+    const languageSet = new Set();
+    const filtered = [];
+    for (const item of allItems) {
+      const languageCode = titleLanguageCode(item);
+      languageSet.add(languageCode);
+      if ((category === 'all' || item.categoryId === category)
+        && (titleLanguage === 'ALL' || languageCode === titleLanguage)
+        && (!query || item.title.toLocaleLowerCase().includes(query))) {
+        filtered.push({ ...item, languageCode, titleLanguage: languageCode });
+      }
+    }
+    const languages = [...languageSet]
       .sort((a, b) => (languagePriority[a] ?? 10) - (languagePriority[b] ?? 10) || a.localeCompare(b));
-    const filtered = catalog.filter(item =>
-      (category === 'all' || item.categoryId === category)
-      && (titleLanguage === 'ALL' || item.titleLanguage === titleLanguage)
-      && (!query || item.title.toLocaleLowerCase().includes(query))
-    );
     const pageCount = Math.max(1, Math.ceil(filtered.length / pageSize));
     const page = Math.min(requestedPage, pageCount);
     const start = (page - 1) * pageSize;
@@ -741,8 +938,8 @@ async function resolveXtreamEnabledItems(source, enabledKeys) {
     const allowedSet = new Set(allowed);
     const kinds = [...new Set(allowed.map(key => key.split(':', 1)[0]))];
     const [catalogs, categoryGroups] = await Promise.all([
-      Promise.all(kinds.map(kind => getXtreamCatalog(source, kind))),
-      Promise.all(kinds.map(kind => getXtreamCategories(source, kind))),
+      Promise.all(kinds.map(kind => getSourceCatalog(source, kind))),
+      Promise.all(kinds.map(kind => getSourceCategories(source, kind))),
     ]);
     const categoryNamesByKind = new Map(kinds.map((kind, index) => [
       kind, new Map(categoryGroups[index].map(category => [category.id, category.name])),
@@ -756,15 +953,15 @@ async function resolveXtreamEnabledItems(source, enabledKeys) {
       title: item.title,
       logo: item.logo,
       categoryId: item.categoryId,
-      category: categoryNamesByKind.get(item.kind)?.get(item.categoryId) || source.name || 'Other',
-      language: detectXtreamLanguage(item, categoryNamesByKind.get(item.kind)?.get(item.categoryId) || source.name || 'Other'),
+      category: categoryNamesByKind.get(item.kind)?.get(item.categoryId) || 'Other',
+      language: detectXtreamLanguage(item, categoryNamesByKind.get(item.kind)?.get(item.categoryId) || 'Other'),
       extension: item.extension,
       duration: item.duration,
       added: item.added,
     }));
 }
 
-function suppliedXtreamEnabledItems(source, enabledKeys, suppliedItems) {
+function suppliedXtreamEnabledItems(source, enabledKeys, suppliedItems, categoryNamesByKind = new Map()) {
   if (!Array.isArray(suppliedItems)) return [];
   const allowed = enabledKeys.map(String).filter(key => /^(channel|movie|series):[^:]+$/.test(key));
   const suppliedByKey = new Map(suppliedItems
@@ -774,7 +971,9 @@ function suppliedXtreamEnabledItems(source, enabledKeys, suppliedItems) {
     const item = suppliedByKey.get(key);
     if (!item) return null;
     const [kind, id] = key.split(':', 2);
-    const category = String(item.category || source.name || 'Other');
+    const category = categoryNamesByKind.get(kind)?.get(String(item.categoryId || ''))
+      || (String(item.category || '').trim() && String(item.category).trim() !== source.name ? String(item.category).trim() : '')
+      || 'Other';
     return {
       key,
       id: String(item.id || id),
@@ -800,7 +999,8 @@ app.get('/api/xtream/sources/:id/enabled', async (req, res) => {
     const itemKeys = new Set(enabledItems.map(item => item.key));
     const needsBackfill = enabledItems.length !== enabledKeys.length
       || enabledKeys.some(key => !itemKeys.has(key))
-      || enabledItems.some(item => !item.category || !item.language);
+      || enabledItems.some(item => !item.category || !item.language
+        || String(item.category).trim().toLowerCase() === String(source.name).trim().toLowerCase());
     if (needsBackfill && enabledKeys.length) {
       enabledItems = await resolveXtreamEnabledItems(source, enabledKeys);
       const updated = await updateXtreamSelection(source._id, enabledItems.map(item => item.key), enabledItems, requestOwner(req));
@@ -819,7 +1019,15 @@ app.put('/api/xtream/sources/:id/selection', async (req, res) => {
     // instead of downloading every Xtream list again merely to resolve keys.
     // Full provider catalog reloads here were causing browser "Failed to fetch"
     // after Render ran out of memory or timed out.
-    const enabledItems = suppliedXtreamEnabledItems(source, req.body.enabledKeys, req.body.enabledItems);
+    const kinds = [...new Set(req.body.enabledKeys.map(String)
+      .map(key => key.split(':', 1)[0])
+      .filter(kind => ['channel', 'movie', 'series'].includes(kind)))];
+    const categoryGroups = await Promise.all(kinds.map(kind => getSourceCategories(source, kind)));
+    const categoryNamesByKind = new Map(kinds.map((kind, index) => [
+      kind,
+      new Map(categoryGroups[index].map(category => [String(category.id), category.name])),
+    ]));
+    const enabledItems = suppliedXtreamEnabledItems(source, req.body.enabledKeys, req.body.enabledItems, categoryNamesByKind);
     if (enabledItems.length !== req.body.enabledKeys.length) {
       return res.status(400).json({ error: 'Selected item details are missing. Reload the catalog and try again.' });
     }
@@ -875,20 +1083,28 @@ app.post('/api/xtream/sources/:id/archive/:key/restore', async (req, res) => {
 });
 
 app.get('/api/xtream/play/:sourceId/:kind/:id', async (req, res) => {
+  const controller = new AbortController();
+  const connectionTimer = setTimeout(() => controller.abort(new Error('Provider connection timed out')), 15_000);
+  connectionTimer.unref?.();
+  const abortUpstream = () => controller.abort(new Error('Downstream client disconnected'));
+  res.once('close', abortUpstream);
   try {
-    const source = await getXtreamSource(req.params.sourceId);
+    const source = await getXtreamSource(req.params.sourceId, requestOwner(req));
     if (!source) return res.sendStatus(404);
     if (!['channel', 'movie', 'series'].includes(req.params.kind)) return res.sendStatus(400);
-    if (req.params.kind === 'channel') return res.redirect(302, xtreamProviderUrl(source, req.params.kind, req.params.id, req.query.ext));
+    if (req.params.kind === 'channel') return res.redirect(302, await sourceProviderUrl(source, req.params.kind, req.params.id, req.query.ext));
+    const strategy = choosePlaybackStrategy({ purpose: 'direct-proxy', extension: req.query.ext });
+    if (strategy !== PlaybackStrategy.DIRECT) throw new Error('Direct media strategy unavailable');
     const headers = {};
     if (req.headers.range) headers.range = req.headers.range;
     headers['user-agent'] = req.headers['user-agent'] || 'RH-Stream/1.0';
-    const upstream = await fetch(xtreamProviderUrl(source, req.params.kind, req.params.id, req.query.ext), { headers });
+    const upstream = await fetch(await sourceProviderUrl(source, req.params.kind, req.params.id, req.query.ext), { headers, signal: controller.signal });
+    clearTimeout(connectionTimer);
     if (!upstream.ok && upstream.status !== 206) {
-      const detail = await upstream.text().catch(() => '');
-      return res.status(upstream.status || 502).json({ error: `Xtream media returned HTTP ${upstream.status}`, detail: detail.slice(0, 160) });
+      await upstream.body?.cancel().catch(() => {});
+      return res.status(upstream.status || 502).json({ error: `Xtream media returned HTTP ${upstream.status}` });
     }
-    for (const name of ['cache-control', 'content-length', 'content-range', 'content-type', 'etag', 'last-modified']) {
+    for (const name of ['cache-control', 'content-length', 'content-range', 'content-type', 'etag', 'last-modified', 'accept-ranges']) {
       const value = upstream.headers.get(name);
       if (value) res.setHeader(name, value);
     }
@@ -899,11 +1115,23 @@ app.get('/api/xtream/play/:sourceId/:kind/:id', async (req, res) => {
     res.setHeader('Accept-Ranges', 'bytes');
     res.status(upstream.status);
     if (!upstream.body) return res.end();
-    Readable.fromWeb(upstream.body).on('error', error => {
-      console.warn(`[Xtream] Media proxy interrupted: ${error.message}`);
-      if (!res.headersSent) res.status(502).end(); else res.destroy(error);
-    }).pipe(res);
-  } catch (error) { res.status(502).json({ error: error.message }); }
+    activeDirectStreams += 1;
+    let idleTimer;
+    const resetIdleTimer = () => {
+      clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => controller.abort(new Error('Provider media stream became idle')), mediaStreamIdleTimeoutMs);
+      idleTimer.unref?.();
+    };
+    const idleWatchdog = new Transform({ transform(chunk, _encoding, callback) { resetIdleTimer(); callback(null, chunk); } });
+    resetIdleTimer();
+    try { await pipeline(Readable.fromWeb(upstream.body), idleWatchdog, res); }
+    finally { clearTimeout(idleTimer); activeDirectStreams = Math.max(0, activeDirectStreams - 1); }
+  } catch (error) {
+    if (!res.headersSent && !res.destroyed) res.status(error.name === 'AbortError' ? 499 : 502).json({ error: error.message });
+  } finally {
+    clearTimeout(connectionTimer);
+    res.off('close', abortUpstream);
+  }
 });
 
 function rokuHlsKey(sourceId, kind, id, extension, startSeconds = 0) {
@@ -917,9 +1145,10 @@ function hlsStartSeconds(value) {
   return Math.min(7 * 24 * 60 * 60, Math.max(0, parsed));
 }
 
-async function waitForHlsManifest(filename, timeoutMs = 15_000) {
+async function waitForHlsManifest(filename, timeoutMs = 15_000, signal) {
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
+    if (signal?.aborted) throw signal.reason || new Error('Manifest request cancelled');
     try {
       const stat = await fs.stat(filename);
       if (stat.size > 0) return true;
@@ -929,13 +1158,13 @@ async function waitForHlsManifest(filename, timeoutMs = 15_000) {
   return false;
 }
 
-async function getOrStartRokuHls(source, kind, id, extension, requestedStart = 0) {
+async function getOrStartRokuHls(source, kind, id, extension, requestedStart = 0, identity = {}) {
   const seekableVod = kind === 'movie' || kind === 'series';
   const startSeconds = seekableVod ? hlsStartSeconds(requestedStart) : 0;
   const key = rokuHlsKey(source._id, kind, id, extension, startSeconds);
-  const existing = rokuHlsJobs.get(key);
+  const existing = mediaJobs.get(key);
   if (existing) {
-    existing.lastAccess = Date.now();
+    mediaJobs.touch(existing, identity.viewerId);
     return existing;
   }
 
@@ -943,83 +1172,103 @@ async function getOrStartRokuHls(source, kind, id, extension, requestedStart = 0
   // channel immediately when another channel is opened; otherwise the
   // provider responds with a tiny valid-but-completely-black placeholder.
   if (kind === 'channel') {
-    for (const [otherKey, otherJob] of rokuHlsJobs) {
-      if (otherKey === key || otherJob.kind !== 'channel' || otherJob.sourceId !== String(source._id)) continue;
-      if (otherJob.child && !otherJob.child.killed) otherJob.child.kill('SIGKILL');
-      rokuHlsJobs.delete(otherKey);
-      fs.rm(otherJob.directory, { recursive: true, force: true }).catch(() => {});
+    for (const [otherKey, otherJob] of mediaJobs.entries()) {
+      if (otherKey === key || !otherJob.persistent || otherJob.kind !== 'channel' || otherJob.sourceId !== String(source._id)) continue;
+      await mediaJobs.remove(otherKey, 'replaced-channel');
     }
   }
 
   // A VOD seek replaces the prior stream for that item. Keeping both jobs
   // alive wastes Render CPU/disk and can exceed a provider's connection cap.
   if (seekableVod) {
-    for (const [otherKey, otherJob] of rokuHlsJobs) {
-      if (otherKey === key || otherJob.kind !== kind || otherJob.sourceId !== String(source._id) || otherJob.mediaId !== String(id)) continue;
-      if (otherJob.child && !otherJob.child.killed) otherJob.child.kill('SIGKILL');
-      rokuHlsJobs.delete(otherKey);
-      fs.rm(otherJob.directory, { recursive: true, force: true }).catch(() => {});
+    for (const [otherKey, otherJob] of mediaJobs.entries()) {
+      if (otherKey === key || !otherJob.persistent || otherJob.kind !== kind || otherJob.sourceId !== String(source._id) || otherJob.mediaId !== String(id)) continue;
+      await mediaJobs.remove(otherKey, 'replaced-seek');
     }
   }
 
-  const directory = path.join(rokuHlsRoot, key);
-  await fs.mkdir(directory, { recursive: true });
-  const manifest = path.join(directory, 'master.m3u8');
-  const inputUrl = xtreamProviderUrl(source, kind, id, extension);
-  const args = ['-hide_banner', '-loglevel', 'error'];
-  if (startSeconds > 0) args.push('-ss', String(startSeconds));
-  args.push(
-    // Keep every generated segment, but advertise the playlist as EVENT while
-    // ffmpeg is still appending to it. Marking a growing playlist as VOD made
-    // Roku treat the first short manifest as immutable: playback consumed
-    // those initial segments, stalled near 13%, and never requested the
-    // expanded manifest. ffmpeg adds ENDLIST when a finite source completes.
-    '-i', inputUrl,
+  const strategy = choosePlaybackStrategy({ purpose: 'roku-hls', extension });
+  const mode = strategy === PlaybackStrategy.TRANSCODE ? 'transcode' : 'remux';
+  const { job } = await mediaJobs.getOrCreate({
+    key, mode, persistent: true, sourceId: String(source._id), mediaId: String(id), kind,
+    startSeconds, userId: identity.userId, deviceId: identity.deviceId, viewerId: identity.viewerId,
+  }, async () => {
+    const inputUrl = await sourceProviderUrl(source, kind, id, extension);
+    const directory = path.join(rokuHlsRoot, key);
+    await fs.mkdir(directory, { recursive: true });
+    const manifest = path.join(directory, 'master.m3u8');
+    const args = ['-hide_banner', '-loglevel', 'error'];
+    if (startSeconds > 0) args.push('-ss', String(startSeconds));
+    args.push(
+    // Keep a live, rolling manifest. Do not mark it VOD or EVENT: VOD made Roku
+    // freeze the first short manifest, while EVENT retains an unbounded history.
+    // Keep ffmpeg near playback speed so it cannot run far ahead of Roku.
+                  '-re', '-i', inputUrl,
     '-map', '0:v:0?', '-map', '0:a:0?', '-c', 'copy', '-sn', '-dn',
-    '-f', 'hls', '-hls_time', '2', '-hls_list_size', '0',
-    '-hls_playlist_type', 'event', '-hls_flags', 'independent_segments+temp_file',
+                  '-f', 'hls', '-hls_time', '2', '-hls_list_size', '30', '-hls_delete_threshold', '6',
+                  '-hls_flags', 'independent_segments+temp_file+delete_segments',
     '-hls_segment_filename', path.join(directory, 'segment-%06d.ts'), manifest,
-  );
-  const child = spawn('ffmpeg', args, { stdio: ['ignore', 'ignore', 'pipe'] });
-  const job = { key, sourceId: String(source._id), mediaId: String(id), kind, startSeconds, directory, manifest, child, lastAccess: Date.now(), error: '' };
-  rokuHlsJobs.set(key, job);
-  child.stderr.on('data', chunk => { job.error += chunk.toString(); });
-  child.on('error', error => { job.error += error.message; });
-  child.on('close', code => {
-    job.finished = true;
-    const safeError = job.error.replaceAll(inputUrl, '[provider URL]');
-    if (code !== 0 && code !== null) console.warn(`[Xtream Roku HLS] ${kind}:${id} exited ${code}: ${safeError.trim().slice(-240)}`);
+    );
+    const child = spawn('ffmpeg', args, { stdio: ['ignore', 'ignore', 'pipe'] });
+    const created = {
+      directory, manifest, child, inputUrl, error: '',
+      stop: async () => { await terminateChild(child); await fs.rm(directory, { recursive: true, force: true }); },
+    };
+    child.stderr.on('data', chunk => {
+      created.error = appendTail(created.error, chunk);
+      const registered = mediaJobs.get(key);
+      if (registered) registered.error = created.error;
+    });
+    child.on('error', error => {
+      created.error = appendTail(created.error, error.message);
+      const registered = mediaJobs.get(key);
+      if (registered) registered.error = created.error;
+    });
+    child.on('close', code => {
+      created.finished = true;
+      const registered = mediaJobs.get(key);
+      if (registered) registered.finished = true;
+      const safeError = created.error.replaceAll(inputUrl, '[provider URL]');
+      if (code !== 0 && code !== null) console.warn(`[Media HLS] ${kind}:${id} exited ${code}: ${safeError.trim().slice(-240)}`);
+    });
+    return created;
   });
   return job;
 }
 
-// Keep only actively watched HLS pipelines. Render's disk is ephemeral and
-// this avoids retaining a whole film after playback stops.
-setInterval(() => {
-  const expiry = Date.now() - 45_000;
-  for (const [key, job] of rokuHlsJobs) {
-    if (job.lastAccess >= expiry) continue;
-    if (job.child && !job.child.killed) job.child.kill('SIGKILL');
-    rokuHlsJobs.delete(key);
-    fs.rm(job.directory, { recursive: true, force: true }).catch(() => {});
-  }
+// One centralized sweep owns idle FFmpeg jobs, cache pressure, and a second
+// application-level segment bound in case a provider/ffmpeg edge case defeats
+// the HLS delete flags.
+let mediaHousekeepingRunning = false;
+setInterval(async () => {
+  if (mediaHousekeepingRunning) return;
+  mediaHousekeepingRunning = true;
+  try {
+  const pressure = memoryPressure(mediaLimits);
+  if (pressure.soft) { evictXtreamCache(Date.now(), true); evictM3uCache(Date.now(), true); evictPreviewCache(Date.now(), true); }
+  await mediaJobs.sweep({ aggressive: pressure.hard });
+  await Promise.allSettled([...mediaJobs.values()].filter(job => job.persistent).map(enforceHlsFileBound));
+  } finally { mediaHousekeepingRunning = false; }
 }, 5_000).unref();
 
 app.get('/api/xtream/hls/:sourceId/:kind/:id/master.m3u8', async (req, res) => {
+  const requestAbort = new AbortController();
+  res.once('close', () => requestAbort.abort(new Error('Manifest client disconnected')));
   try {
     // Channels use the same backend HLS pipeline as VOD. Redirecting Roku to
     // the provider's live manifest exposed malformed headers and provider
     // segment URLs directly to the TV.
     if (!['channel', 'movie', 'series'].includes(req.params.kind)) return res.sendStatus(400);
-    const source = await getXtreamSource(req.params.sourceId);
+    const source = await getXtreamSource(req.params.sourceId, requestOwner(req));
     if (!source) return res.sendStatus(404);
     const seekableVod = req.params.kind === 'movie' || req.params.kind === 'series';
     const startSeconds = seekableVod ? hlsStartSeconds(req.query.start) : 0;
-    const job = await getOrStartRokuHls(source, req.params.kind, req.params.id, req.query.ext, startSeconds);
-    if (!await waitForHlsManifest(job.manifest)) {
+    const identity = mediaIdentity(req);
+    const job = await getOrStartRokuHls(source, req.params.kind, req.params.id, req.query.ext, startSeconds, identity);
+    if (!await waitForHlsManifest(job.manifest, 15_000, requestAbort.signal)) {
       return res.status(504).json({ error: job.error.trim().slice(-240) || 'HLS manifest is still being prepared' });
     }
-    job.lastAccess = Date.now();
+    mediaJobs.touch(job, identity.viewerId);
     res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
     res.setHeader('Cache-Control', 'no-store');
     // Roku uses the device token on the manifest request, but relative HLS
@@ -1038,7 +1287,9 @@ app.get('/api/xtream/hls/:sourceId/:kind/:id/master.m3u8', async (req, res) => {
       )).join('\n');
     }
     res.send(manifestText);
-  } catch (error) { res.status(502).json({ error: error.message }); }
+  } catch (error) {
+    if (!res.headersSent && !res.destroyed && !capacityResponse(res, error)) res.status(502).json({ error: error.message });
+  }
 });
 
 app.get('/api/xtream/hls/:sourceId/:kind/:id/:segment', async (req, res) => {
@@ -1047,9 +1298,10 @@ app.get('/api/xtream/hls/:sourceId/:kind/:id/:segment', async (req, res) => {
     const seekableVod = req.params.kind === 'movie' || req.params.kind === 'series';
     const startSeconds = seekableVod ? hlsStartSeconds(req.query.start) : 0;
     const key = rokuHlsKey(req.params.sourceId, req.params.kind, req.params.id, req.query.ext, startSeconds);
-    const job = rokuHlsJobs.get(key);
+    const job = mediaJobs.get(key);
     if (!job) return res.sendStatus(404);
-    job.lastAccess = Date.now();
+    if (job.userId && job.userId !== requestOwner(req)) return res.sendStatus(404);
+    mediaJobs.touch(job, mediaIdentity(req).viewerId);
     const filename = path.join(job.directory, req.params.segment);
     await fs.access(filename);
     res.setHeader('Content-Type', 'video/mp2t');
@@ -1059,11 +1311,12 @@ app.get('/api/xtream/hls/:sourceId/:kind/:id/:segment', async (req, res) => {
 });
 
 app.get('/api/xtream/roku/:sourceId/:kind/:id', async (req, res) => {
-  let child;
+  let job;
+  let jobKey = '';
   let outputStarted = false;
   let startupTimer;
   try {
-    const source = await getXtreamSource(req.params.sourceId);
+    const source = await getXtreamSource(req.params.sourceId, requestOwner(req));
     if (!source) return res.sendStatus(404);
     if (!['movie', 'series'].includes(req.params.kind)) return res.sendStatus(400);
 
@@ -1071,7 +1324,10 @@ app.get('/api/xtream/roku/:sourceId/:kind/:id', async (req, res) => {
     // Roku reports that mismatch as "malformed data (-5)". Fragmented MP4
     // keeps the original H.264/AAC tracks while giving Roku a valid MP4
     // streaming container without downloading the whole file first.
-    const inputUrl = xtreamProviderUrl(source, req.params.kind, req.params.id, req.query.ext);
+    const inputUrl = await sourceProviderUrl(source, req.params.kind, req.params.id, req.query.ext);
+    const strategy = choosePlaybackStrategy({ purpose: 'roku-fragmented-mp4', extension: req.query.ext });
+    const identity = mediaIdentity(req);
+    jobKey = `roku-remux:${source._id}:${req.params.kind}:${req.params.id}:${Date.now()}:${mediaRequestSequence++}`;
     const args = [
       '-hide_banner', '-loglevel', 'error',
       '-i', inputUrl,
@@ -1084,19 +1340,32 @@ app.get('/api/xtream/roku/:sourceId/:kind/:id', async (req, res) => {
       '-frag_duration', '2000000', '-flush_packets', '1',
       '-f', 'mp4', 'pipe:1',
     ];
-    child = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'] });
-    let errorText = '';
-    child.stderr.on('data', chunk => { errorText += chunk.toString(); });
+    ({ job } = await mediaJobs.getOrCreate({
+      key: jobKey,
+      mode: strategy === PlaybackStrategy.TRANSCODE ? 'transcode' : 'remux',
+      persistent: false,
+      sourceId: String(source._id), mediaId: String(req.params.id), kind: req.params.kind,
+      ...identity,
+    }, async () => {
+      const child = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+      return { child, inputUrl, error: '', stop: () => terminateChild(child) };
+    }));
+    const { child } = job;
+    child.stderr.on('data', chunk => { job.error = appendTail(job.error, chunk); });
     child.on('error', error => {
       console.error('[Xtream Roku remux] failed to start:', error.message);
       clearTimeout(startupTimer);
+      job.finished = true;
+      mediaJobs.remove(jobKey, 'spawn-error').catch(() => {});
       if (!res.headersSent) res.status(502).json({ error: 'Could not start Roku media remux' });
       else res.destroy(error);
     });
     child.on('close', code => {
       clearTimeout(startupTimer);
-      const safeErrorText = errorText.replaceAll(inputUrl, '[provider URL]');
+      job.finished = true;
+      const safeErrorText = job.error.replaceAll(inputUrl, '[provider URL]');
       if (code !== 0 && code !== null) console.warn(`[Xtream Roku remux] ${req.params.kind}:${req.params.id} exited ${code}: ${safeErrorText.trim().slice(-240)}`);
+      mediaJobs.remove(jobKey, 'complete').catch(() => {});
       if (outputStarted) {
         if (!res.writableEnded) res.end();
         return;
@@ -1104,17 +1373,17 @@ app.get('/api/xtream/roku/:sourceId/:kind/:id', async (req, res) => {
       // Do not advertise an empty ffmpeg result as HTTP 200 video/mp4. Roku
       // interprets that response as malformed media (-5), hiding the actual
       // provider failure. Keep headers pending until media bytes exist.
-      if (!res.headersSent) {
-        const upstreamStatus = errorText.match(/Server returned (\d{3})/i)?.[1];
+      if (!res.headersSent && !res.destroyed && !res.writableEnded) {
+        const upstreamStatus = job.error.match(/Server returned (\d{3})/i)?.[1];
         const error = upstreamStatus
           ? `Movie source is unavailable (upstream HTTP ${upstreamStatus})`
           : 'Movie source did not return playable media';
         res.status(502).json({ error });
       }
     });
-    res.on('close', () => { if (child && !child.killed) child.kill('SIGKILL'); });
+    res.once('close', () => { clearTimeout(startupTimer); mediaJobs.remove(jobKey, 'client-disconnect').catch(() => {}); });
 
-    child.stdout.once('data', chunk => {
+    child.stdout.once('readable', () => {
       if (res.writableEnded || res.destroyed) return;
       outputStarted = true;
       clearTimeout(startupTimer);
@@ -1122,19 +1391,23 @@ app.get('/api/xtream/roku/:sourceId/:kind/:id', async (req, res) => {
       res.setHeader('Content-Type', 'video/mp4');
       res.setHeader('Cache-Control', 'no-store');
       res.setHeader('Accept-Ranges', 'none');
-      res.write(chunk);
-      child.stdout.pipe(res);
+      pipeline(child.stdout, res).catch(error => {
+        if (!res.destroyed) res.destroy(error);
+        mediaJobs.remove(jobKey, 'stream-error').catch(() => {});
+      });
     });
     startupTimer = setTimeout(() => {
       if (outputStarted || res.headersSent) return;
-      if (child && !child.killed) child.kill('SIGKILL');
-      res.status(504).json({ error: 'Movie source timed out before returning media' });
+      mediaJobs.remove(jobKey, 'startup-timeout').catch(() => {});
+      if (!res.destroyed && !res.writableEnded) res.status(504).json({ error: 'Movie source timed out before returning media' });
     }, 20_000);
+    startupTimer.unref?.();
   } catch (error) {
     clearTimeout(startupTimer);
-    if (child && !child.killed) child.kill('SIGKILL');
-    if (!res.headersSent) res.status(502).json({ error: error.message });
-    else res.destroy(error);
+    if (jobKey) await mediaJobs.remove(jobKey, 'request-error').catch(() => {});
+    if (!res.headersSent) {
+      if (!capacityResponse(res, error)) res.status(502).json({ error: error.message });
+    } else res.destroy(error);
   }
 });
 async function buildXtreamSeriesPayload({ limit, selected: suppliedSelected } = {}) {
@@ -1234,6 +1507,35 @@ app.get('/api/roku/channels', async (req, res) => {
     res.json({ items, page: 0, limit: items.length, total: items.length, hasMore: false });
   } catch (error) { res.status(502).json({ error: error.message }); }
 });
-app.listen(port, '0.0.0.0', () => {
+// Render storage is ephemeral, but a process crash can leave the prior job
+// directories behind for the lifetime of the container.
+await fs.rm(rokuHlsRoot, { recursive: true, force: true });
+await fs.mkdir(rokuHlsRoot, { recursive: true });
+
+const resourceLogIntervalMs = Math.max(60_000, Number.parseInt(process.env.MEDIA_RESOURCE_LOG_INTERVAL_MS || '300000', 10) || 300_000);
+setInterval(async () => {
+  try {
+    const snapshot = await mediaHealthSnapshot();
+    console.log(`[Media health] rss=${snapshot.rssMB}MB heap=${snapshot.heapUsedMB}MB direct=${snapshot.activeDirectStreams} remux=${snapshot.activeRemuxJobs} transcode=${snapshot.activeTranscodes} hls=${snapshot.hlsDiskUsageMB}MB`);
+  } catch (error) { console.warn(`[Media health] snapshot failed: ${error.message}`); }
+}, resourceLogIntervalMs).unref();
+
+const server = app.listen(port, '0.0.0.0', () => {
   console.log(`RH Stream API listening on http://0.0.0.0:${port}`);
 });
+
+async function shutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`[Server] ${signal} received; draining media jobs`);
+  const closeServer = new Promise(resolve => server.close(resolve));
+  const forceTimer = setTimeout(() => process.exit(1), 10_000);
+  forceTimer.unref?.();
+  await Promise.allSettled([closeServer, mediaJobs.shutdown()]);
+  await fs.rm(rokuHlsRoot, { recursive: true, force: true }).catch(error => console.warn(`[Media] HLS cleanup failed: ${error.message}`));
+  clearTimeout(forceTimer);
+  process.exit(0);
+}
+
+process.once('SIGTERM', () => { shutdown('SIGTERM').catch(error => { console.error(error); process.exit(1); }); });
+process.once('SIGINT', () => { shutdown('SIGINT').catch(error => { console.error(error); process.exit(1); }); });

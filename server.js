@@ -17,6 +17,7 @@ import { HlsStrategy, PlaybackStrategy, choosePlaybackStrategy, determineHlsStra
 import { getPlayback, getPlaybackHistory, savePlayback } from './playback-store.js';
 import { getFavorites, toggleFavorite } from './favorites-store.js';
 import { changeAccountPassword, claimAutomaticPairing, createDeviceSession, getLinkedDevices, getPairingInfo, getRokuDeviceSessionStatus, loginAccount, loginDeviceSession, recordDeviceHeartbeat, registerAccount, resolveDeviceToken, setupDeviceSession, unlinkAccountDevice } from './device-sessions.js';
+import { createLibraryCategory, deleteLibraryCategory, getManagedLibrary, renameLibraryCategory, replaceLibraryCategoryItems } from './library-category-store.js';
 
 const app = express();
 const port = process.env.PORT || 8787;
@@ -48,6 +49,9 @@ let previewCacheBytes = 0;
 let activeDirectStreams = 0;
 let shuttingDown = false;
 let mediaRequestSequence = 0;
+const movieDurationCache = new Map();
+const movieDurationCacheMaxEntries = 100;
+const movieDurationCacheTtlMs = 24 * 60 * 60 * 1000;
 
 const sourceType = source => source?.type === 'm3u' ? 'm3u' : 'xtream';
 const getSourceCatalog = (source, kind) => sourceType(source) === 'm3u' ? getM3uCatalog(source, kind) : getXtreamCatalog(source, kind);
@@ -66,6 +70,32 @@ function mediaIdentity(req) {
 
 function appendTail(current, chunk, maxBytes = 8_000) {
   return `${current}${chunk}`.slice(-maxBytes);
+}
+
+async function probeMediaDuration(inputUrl) {
+  return new Promise((resolve, reject) => {
+    const child = spawn('ffprobe', [
+      '-v', 'error', '-rw_timeout', '15000000',
+      '-show_entries', 'format=duration',
+      '-of', 'default=noprint_wrappers=1:nokey=1', inputUrl,
+    ], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let output = '';
+    let errorOutput = '';
+    const timeout = setTimeout(() => {
+      child.kill('SIGKILL');
+      reject(new Error('Movie duration probe timed out'));
+    }, 20_000);
+    timeout.unref?.();
+    child.stdout.on('data', chunk => { output = appendTail(output, chunk, 1024); });
+    child.stderr.on('data', chunk => { errorOutput = appendTail(errorOutput, chunk, 2048); });
+    child.once('error', error => { clearTimeout(timeout); reject(error); });
+    child.once('close', code => {
+      clearTimeout(timeout);
+      const seconds = Number.parseFloat(output.trim());
+      if (code === 0 && Number.isFinite(seconds) && seconds > 0) resolve(Math.floor(seconds));
+      else reject(new Error(errorOutput.trim() || 'Movie duration is unavailable'));
+    });
+  });
 }
 
 function capacityResponse(res, error) {
@@ -272,26 +302,26 @@ function selectedXtreamItem(source, item) {
   };
 }
 
-async function getRokuSelectedItems(kind, ownerId = null) {
-  // Roku is fed only from the explicit frontend selection. This avoids
-  // downloading and expanding a provider's whole catalog on the TV.
+async function getLibrarySelectedItems(ownerId = null) {
   if (!ownerId) return [];
   const sources = await getAllXtreamSources(ownerId);
-  const groups = await Promise.all(sources.map(async source => {
-    let categoryNames = new Map();
-    try {
-      categoryNames = new Map((await getSourceCategories(source, kind)).map(category => [String(category.id), category.name]));
-    } catch (error) {
-      console.warn(`[Xtream] Could not refresh ${kind} categories for Roku: ${error.message}`);
-    }
-    return (Array.isArray(source.enabledItems) ? source.enabledItems : [])
-      .filter(item => item?.kind === kind)
-      .map(item => selectedXtreamItem(source, {
-        ...item,
-        category: categoryNames.get(String(item.categoryId || '')) || item.category,
-      }));
-  }));
+  const groups = sources.map(source => (Array.isArray(source.enabledItems) ? source.enabledItems : [])
+    .filter(item => item?.kind)
+    .map(item => selectedXtreamItem(source, item)));
   return groups.flat();
+}
+
+async function getRokuSelectedItems(kind, ownerId = null) {
+  // The managed Library is the category source of truth. Provider categories
+  // only seed it; Roku never recomputes rails from the provider after that.
+  if (!ownerId) return [];
+  const suppliedItems = await getLibrarySelectedItems(ownerId);
+  const managed = await getManagedLibrary(ownerId, suppliedItems, kind);
+  return managed.categories.flatMap(category => category.items.map(item => ({
+    ...item,
+    category: category.name,
+    rokuCategory: rokuText(category.name),
+  })));
 }
 
 function directXtreamItem(item) {
@@ -487,6 +517,61 @@ app.use('/api/xtream', (req, res, next) => {
   if (req.path === '/logo') return next();
   if (!requestOwner(req)) return res.status(401).json({ error: 'Pair this browser with a Roku device first' });
   next();
+});
+
+app.use('/api/library', (req, res, next) => {
+  if (!requestOwner(req)) return res.status(401).json({ error: 'Sign in to manage Library categories' });
+  next();
+});
+
+async function managedLibraryForRequest(req, kind = '') {
+  const ownerId = requestOwner(req);
+  return getManagedLibrary(ownerId, await getLibrarySelectedItems(ownerId), kind);
+}
+
+app.get('/api/library/categories', async (req, res) => {
+  try {
+    res.set('Cache-Control', 'no-store');
+    res.json(await managedLibraryForRequest(req, String(req.query.kind || '')));
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+app.post('/api/library/categories', async (req, res) => {
+  try {
+    const ownerId = requestOwner(req);
+    const result = await createLibraryCategory(ownerId, await getLibrarySelectedItems(ownerId), {
+      kind: String(req.body?.kind || ''), name: req.body?.name,
+    });
+    res.status(201).json(result);
+  } catch (error) { res.status(400).json({ error: error.message }); }
+});
+
+app.patch('/api/library/categories/:id', async (req, res) => {
+  try {
+    const ownerId = requestOwner(req);
+    const result = await renameLibraryCategory(ownerId, await getLibrarySelectedItems(ownerId), req.params.id, req.body?.name);
+    if (!result) return res.sendStatus(404);
+    res.json(result);
+  } catch (error) { res.status(400).json({ error: error.message }); }
+});
+
+app.put('/api/library/categories/:id/items', async (req, res) => {
+  try {
+    if (!Array.isArray(req.body?.itemKeys)) return res.status(400).json({ error: 'itemKeys must be an array' });
+    const ownerId = requestOwner(req);
+    const result = await replaceLibraryCategoryItems(ownerId, await getLibrarySelectedItems(ownerId), req.params.id, req.body.itemKeys);
+    if (!result) return res.sendStatus(404);
+    res.json(result);
+  } catch (error) { res.status(400).json({ error: error.message }); }
+});
+
+app.delete('/api/library/categories/:id', async (req, res) => {
+  try {
+    const ownerId = requestOwner(req);
+    const result = await deleteLibraryCategory(ownerId, await getLibrarySelectedItems(ownerId), req.params.id);
+    if (!result) return res.sendStatus(404);
+    res.json(result);
+  } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 // Roku must not try to build the full Xtream catalog during application
@@ -979,9 +1064,28 @@ app.get('/api/xtream/movie/:sourceId/:id/duration', async (req, res) => {
   try {
     const source = await getXtreamSource(req.params.sourceId, requestOwner(req));
     if (!source) return res.sendStatus(404);
+    const cacheKey = `${source._id}:movie:${req.params.id}`;
+    const cached = movieDurationCache.get(cacheKey);
+    if (cached?.expiresAt > Date.now()) {
+      res.set('Cache-Control', 'private, max-age=300');
+      return res.json({ seconds: cached.seconds, duration: cached.duration, source: cached.source });
+    }
     const info = await getXtreamMovieInfo(source, req.params.id);
+    let seconds = Number(info.seconds) || 0;
+    let durationSource = 'xtream';
+    if (seconds <= 0) {
+      const inputUrl = await sourceProviderUrl(source, 'movie', req.params.id, req.query.ext);
+      seconds = await probeMediaDuration(inputUrl);
+      durationSource = 'probe';
+    }
+    const duration = seconds > 0
+      ? [Math.floor(seconds / 3600), Math.floor((seconds % 3600) / 60), Math.floor(seconds % 60)].map(value => String(value).padStart(2, '0')).join(':')
+      : info.duration;
+    movieDurationCache.delete(cacheKey);
+    movieDurationCache.set(cacheKey, { seconds, duration, source: durationSource, expiresAt: Date.now() + movieDurationCacheTtlMs });
+    while (movieDurationCache.size > movieDurationCacheMaxEntries) movieDurationCache.delete(movieDurationCache.keys().next().value);
     res.set('Cache-Control', 'private, max-age=300');
-    res.json({ seconds: info.seconds, duration: info.duration });
+    res.json({ seconds, duration, source: durationSource });
   } catch (error) { res.status(502).json({ error: error.message }); }
 });
 

@@ -132,7 +132,6 @@ export function claimAutomaticPairing(code) {
   if (session.claimedAt) return { error: 'This automatic login link has already been used' };
   session.claimedAt = Date.now();
   const result = { token: issueToken(session, 'browser'), deviceId: session.deviceId };
-  sessions.delete(session.code);
   return result;
 }
 
@@ -193,6 +192,7 @@ export async function registerAccount(email, password) {
 export function getRokuDeviceSessionStatus(code) {
   const session = getDeviceSession(code);
   if (!session) return null;
+  if (session.claimedAt) return { status: 'consumed', expiresAt: session.expiresAt };
   if (!session.approvedAt) return { status: 'pending', expiresAt: session.expiresAt };
   return { status: 'approved', expiresAt: session.expiresAt, token: issueToken(session, 'roku') };
 }

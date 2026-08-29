@@ -698,15 +698,24 @@ app.get('/api/playback/preview', async (req, res) => {
   res.once('close', cancelPreview);
   try {
     const itemId = String(req.query?.itemId || '');
-    if (!itemId) return res.status(400).json({ error: 'itemId is required' });
-    const playback = await getPlayback(itemId);
-    if (!playback) return res.sendStatus(404);
-    const target = parseXtreamPlaybackItem(playback.url || itemId);
+    const requestedSourceId = String(req.query?.sourceId || '');
+    const requestedKind = String(req.query?.kind || '');
+    const requestedId = String(req.query?.id || '');
+    let playback = null;
+    let target = requestedSourceId && ['movie', 'series'].includes(requestedKind) && requestedId
+      ? { sourceId: requestedSourceId, kind: requestedKind, id: requestedId, extension: String(req.query?.ext || 'mp4') }
+      : null;
+    if (!target) {
+      if (!itemId) return res.status(400).json({ error: 'itemId or playback target is required' });
+      playback = await getPlayback(itemId);
+      if (!playback) return res.sendStatus(404);
+      target = parseXtreamPlaybackItem(playback.url || itemId);
+    }
     if (!target) return res.status(404).json({ error: 'Preview is unavailable for this item' });
-    const source = await getXtreamSource(target.sourceId);
+    const source = await getXtreamSource(target.sourceId, requestOwner(req));
     if (!source) return res.sendStatus(404);
-    const position = Math.max(0, Math.floor(Number(playback.position) || 0));
-    const cacheKey = `${itemId}:${position}`;
+    const position = Math.max(0, Math.floor(Number(req.query?.position ?? playback?.position) || 0));
+    const cacheKey = `${target.sourceId}:${target.kind}:${target.id}:${target.extension}:${position}`;
     evictPreviewCache();
     let frame = previewCache.get(cacheKey)?.frame;
     if (!frame) {

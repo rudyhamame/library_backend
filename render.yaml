@@ -20,6 +20,8 @@ services:
         value: playback_progress
       - key: MONGODB_XTREAM_COLLECTION
         value: xtream_sources
+      - key: MONGODB_LIBRARY_CATEGORY_COLLECTION
+        value: library_categories
       - key: MONGODB_FAVORITES_COLLECTION
         value: favorites
       - key: MONGODB_DEVICE_COLLECTION

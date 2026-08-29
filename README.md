@@ -3,6 +3,10 @@
 Independent Xtream and M3U API for the RH Library web, Android, and iPad
 clients. It provides playlist management, catalog browsing, library selection,
 direct media proxying, MongoDB playback history, and MongoDB favorites.
+Library-managed rail categories are stored in the `library_categories`
+collection by default. Playlist categories seed this collection, while names,
+deletions, and item membership are controlled through the Library UI and are
+the source of truth for Roku.
 
 This service intentionally uses the same MongoDB database, collection names,
 and `DEVICE_AUTH_SECRET` as the Roku backend. That keeps accounts and selected

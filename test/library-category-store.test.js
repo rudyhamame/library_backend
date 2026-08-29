@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { libraryItemKey, reconcileLibraryCategories } from '../library-category-store.js';
+import { libraryItemKey, reconcileLibraryCategories } from '../library-category-core.js';
 
 const items = [
   { sourceId: 'source-1', key: 'series:1', kind: 'series', categoryId: '10', category: 'Drama' },

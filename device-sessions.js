@@ -12,6 +12,9 @@ const accountCollectionName = process.env.MONGODB_ACCOUNT_COLLECTION || 'account
 const signingSecret = process.env.DEVICE_AUTH_SECRET || 'local-development-secret-change-before-production';
 let profilesPromise;
 let accountsPromise;
+const heartbeatCache = new Map();
+const heartbeatIntervalMs = 30_000;
+const runningWindowMs = 150_000;
 
 async function profiles() {
   if (!profilesPromise) {
@@ -157,14 +160,29 @@ export async function getLinkedDevices(accountId) {
   if (!ObjectId.isValid(accountId)) return [];
   const rows = await (await profiles()).find(
     { accountId: new ObjectId(accountId) },
-    { projection: { deviceId: 1, linkedAt: 1, updatedAt: 1 } },
+    { projection: { deviceId: 1, linkedAt: 1, updatedAt: 1, lastSeenAt: 1 } },
   ).sort({ linkedAt: 1 }).toArray();
   return rows.map(device => ({
     id: String(device._id),
     deviceId: device.deviceId,
     linkedAt: device.linkedAt || device.updatedAt || null,
+    lastSeenAt: device.lastSeenAt || null,
+    running: Boolean(device.lastSeenAt && Date.now() - new Date(device.lastSeenAt).getTime() <= runningWindowMs),
     label: `Roku ${String(device.deviceId || '').replace(/^roku-/, '').slice(-8).toUpperCase()}`,
   }));
+}
+
+export async function recordDeviceHeartbeat(deviceId) {
+  const normalized = String(deviceId || '').trim();
+  if (!normalized) return;
+  const now = Date.now();
+  if (now - (heartbeatCache.get(normalized) || 0) < heartbeatIntervalMs) return;
+  heartbeatCache.set(normalized, now);
+  try {
+    await (await profiles()).updateOne({ deviceId: normalized }, { $set: { lastSeenAt: new Date(now) } });
+  } catch {
+    heartbeatCache.delete(normalized);
+  }
 }
 
 export async function unlinkAccountDevice(accountId, deviceId) {

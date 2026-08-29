@@ -16,7 +16,7 @@ import { MediaCapacityError, MediaJobManager, defaultMediaLimits, memoryPressure
 import { PlaybackStrategy, choosePlaybackStrategy } from './playback-strategy.js';
 import { getPlayback, getPlaybackHistory, savePlayback } from './playback-store.js';
 import { getFavorites, toggleFavorite } from './favorites-store.js';
-import { changeAccountPassword, createDeviceSession, getLinkedDevices, getPairingInfo, getRokuDeviceSessionStatus, loginAccount, loginDeviceSession, resolveDeviceToken, setupDeviceSession, unlinkAccountDevice } from './device-sessions.js';
+import { changeAccountPassword, createDeviceSession, getLinkedDevices, getPairingInfo, getRokuDeviceSessionStatus, loginAccount, loginDeviceSession, recordDeviceHeartbeat, resolveDeviceToken, setupDeviceSession, unlinkAccountDevice } from './device-sessions.js';
 
 const app = express();
 const port = process.env.PORT || 8787;
@@ -149,7 +149,9 @@ async function enforceHlsFileBound(job) {
 
 function requestOwner(req) {
   const token = String(req.get('x-device-token') || req.query.deviceToken || '');
-  return resolveDeviceToken(token)?.ownerId || null;
+  const session = resolveDeviceToken(token);
+  if (session?.ownerId) recordDeviceHeartbeat(session.deviceId).catch(() => {});
+  return session?.ownerId || null;
 }
 
 function requestAccount(req) {

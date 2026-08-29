@@ -13,7 +13,7 @@ import { createXtreamSource, deleteXtreamSource, getAllXtreamSources, getXtreamS
 import { evictXtreamCache, getXtreamCatalog, getXtreamCategories, getXtreamMovieInfo, getXtreamSeriesEpisodes, validateXtreamConnection, xtreamCacheStats, xtreamProviderUrl } from './xtream.js';
 import { evictM3uCache, getM3uCatalog, getM3uCategories, m3uCacheStats, m3uProviderUrl, validateM3uConnection } from './m3u.js';
 import { MediaCapacityError, MediaJobManager, defaultMediaLimits, memoryPressure } from './media-job-manager.js';
-import { PlaybackStrategy, choosePlaybackStrategy } from './playback-strategy.js';
+import { HlsStrategy, PlaybackStrategy, choosePlaybackStrategy, determineHlsStrategy, hlsCodecArgs } from './playback-strategy.js';
 import { getPlayback, getPlaybackHistory, savePlayback } from './playback-store.js';
 import { getFavorites, toggleFavorite } from './favorites-store.js';
 import { changeAccountPassword, createDeviceSession, getLinkedDevices, getPairingInfo, getRokuDeviceSessionStatus, loginAccount, loginDeviceSession, recordDeviceHeartbeat, resolveDeviceToken, setupDeviceSession, unlinkAccountDevice } from './device-sessions.js';
@@ -1092,6 +1092,7 @@ app.post('/api/xtream/sources/:id/archive/:key/restore', async (req, res) => {
 });
 
 app.get('/api/xtream/play/:sourceId/:kind/:id', async (req, res) => {
+  if (['movie', 'series'].includes(req.params.kind)) return res.status(410).json({ error: 'Movie and series playback is HLS-only. Use /api/xtream/hls.' });
   const controller = new AbortController();
   const connectionTimer = setTimeout(() => controller.abort(new Error('Provider connection timed out')), 15_000);
   connectionTimer.unref?.();
@@ -1196,10 +1197,10 @@ async function getOrStartRokuHls(source, kind, id, extension, requestedStart = 0
     }
   }
 
-  const strategy = choosePlaybackStrategy({ purpose: 'roku-hls', extension });
-  const mode = strategy === PlaybackStrategy.TRANSCODE ? 'transcode' : 'remux';
+  const decision = determineHlsStrategy();
+  const mode = decision.strategy === HlsStrategy.FULL_TRANSCODE ? 'transcode' : 'remux';
   const { job } = await mediaJobs.getOrCreate({
-    key, mode, persistent: true, sourceId: String(source._id), mediaId: String(id), kind,
+    key, mode, hlsStrategy: decision.strategy, hlsVideoMode: decision.videoMode, hlsAudioMode: decision.audioMode, persistent: true, sourceId: String(source._id), mediaId: String(id), kind,
     startSeconds, userId: identity.userId, deviceId: identity.deviceId, viewerId: identity.viewerId,
   }, async () => {
     const inputUrl = await sourceProviderUrl(source, kind, id, extension);
@@ -1213,7 +1214,7 @@ async function getOrStartRokuHls(source, kind, id, extension, requestedStart = 0
     // freeze the first short manifest, while EVENT retains an unbounded history.
     // Keep ffmpeg near playback speed so it cannot run far ahead of Roku.
                   '-re', '-i', inputUrl,
-    '-map', '0:v:0?', '-map', '0:a:0?', '-c', 'copy', '-sn', '-dn',
+    '-map', '0:v:0?', '-map', '0:a:0?', ...hlsCodecArgs(decision), '-sn', '-dn',
                   '-f', 'hls', '-hls_time', '2', '-hls_list_size', '30', '-hls_delete_threshold', '6',
                   '-hls_flags', 'independent_segments+temp_file+delete_segments',
     '-hls_segment_filename', path.join(directory, 'segment-%06d.ts'), manifest,
@@ -1320,6 +1321,7 @@ app.get('/api/xtream/hls/:sourceId/:kind/:id/:segment', async (req, res) => {
 });
 
 app.get('/api/xtream/roku/:sourceId/:kind/:id', async (req, res) => {
+  return res.status(410).json({ error: 'Movie and series playback is HLS-only. Use /api/xtream/hls.' });
   let job;
   let jobKey = '';
   let outputStarted = false;

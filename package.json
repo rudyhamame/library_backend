@@ -1,5 +1,5 @@
 {
-  "name": "streaming-catalog-api",
+  "name": "rh-library-api",
   "private": true,
   "type": "module",
   "scripts": {

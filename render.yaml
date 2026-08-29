@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: rh-stream-backend
+    name: rh-library-backend
     runtime: docker
     plan: free
     autoDeploy: true
@@ -9,7 +9,9 @@ services:
       - key: NODE_ENV
         value: production
       - key: PUBLIC_BASE_URL
-        value: https://rh-stream-backend.onrender.com
+        value: https://rh-library-backend.onrender.com
+      - key: FRONTEND_URL
+        value: https://rh-stream-frontend.onrender.com
       - key: MONGODB_URI
         sync: false
       - key: MONGODB_DB
@@ -20,6 +22,12 @@ services:
         value: xtream_sources
       - key: MONGODB_FAVORITES_COLLECTION
         value: favorites
+      - key: MONGODB_DEVICE_COLLECTION
+        value: device_profiles
+      - key: MONGODB_ACCOUNT_COLLECTION
+        value: accounts
+      - key: DEVICE_AUTH_SECRET
+        sync: false
       - key: INTERNAL_DIAGNOSTICS_TOKEN
         sync: false
       - key: MAX_ACTIVE_TRANSCODES

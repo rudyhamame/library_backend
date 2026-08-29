@@ -1,8 +1,13 @@
-# RH Stream backend
+# RH Library backend
 
-Xtream and M3U API for the RH Stream frontend and Roku channel. It provides
-playlist source management, explicit Roku catalog selection, direct media
-proxying, MongoDB playback history, and MongoDB favorites.
+Independent Xtream and M3U API for the RH Library web, Android, and iPad
+clients. It provides playlist management, catalog browsing, library selection,
+direct media proxying, MongoDB playback history, and MongoDB favorites.
+
+This service intentionally uses the same MongoDB database, collection names,
+and `DEVICE_AUTH_SECRET` as the Roku backend. That keeps accounts and selected
+library content synchronized while isolating Library traffic and media jobs in
+a separate Render service.
 
 ## Local development
 
@@ -37,5 +42,6 @@ npm run test:media-leak
 
 ## Render
 
-The repository includes `render.yaml` and a Dockerfile. Configure
-`MONGODB_URI` as a Render secret. Never commit `.env` or provider credentials.
+The repository includes `render.yaml` and a Dockerfile. Configure `MONGODB_URI`
+and `DEVICE_AUTH_SECRET` with the same secret values used by the Roku backend.
+Never commit `.env` or provider credentials.

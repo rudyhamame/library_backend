@@ -78,8 +78,14 @@ export async function getXtreamCatalog(source, kind) {
 
 export async function getXtreamMovieInfo(source, movieId) {
   const data = await request(source, { action: 'get_vod_info', vod_id: movieId });
-  const seconds = Number(data?.info?.duration_secs || data?.movie_data?.duration_secs || 0);
   let duration = String(data?.info?.duration || data?.movie_data?.duration || '');
+  const durationParts = duration.trim().split(':').map(Number);
+  const parsedDuration = durationParts.length === 3
+    ? durationParts[0] * 3600 + durationParts[1] * 60 + durationParts[2]
+    : durationParts.length === 2
+      ? durationParts[0] * 60 + durationParts[1]
+      : Number(duration) || 0;
+  const seconds = Number(data?.info?.duration_secs || data?.movie_data?.duration_secs || 0) || parsedDuration;
   if (!duration && seconds > 0) {
     const hours = Math.floor(seconds / 3600);
     const minutes = Math.floor((seconds % 3600) / 60);

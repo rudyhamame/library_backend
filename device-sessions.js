@@ -13,9 +13,9 @@ const signingSecret = process.env.DEVICE_AUTH_SECRET || 'local-development-secre
 let profilesPromise;
 let accountsPromise;
 const heartbeatCache = new Map();
-const heartbeatIntervalMs = 30_000;
-const runningWindowMs = 90_000;
-const streamingWindowMs = 45_000;
+const heartbeatIntervalMs = 10_000;
+const runningWindowMs = 30_000;
+const streamingWindowMs = 30_000;
 
 async function profiles() {
   if (!profilesPromise) {

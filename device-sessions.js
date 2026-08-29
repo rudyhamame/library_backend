@@ -129,7 +129,9 @@ export function claimAutomaticPairing(code) {
   if (!session.autoLogin || !session.accountId) return { error: 'Sign in once before automatic QR login is available' };
   if (session.claimedAt) return { error: 'This automatic login link has already been used' };
   session.claimedAt = Date.now();
-  return { token: issueToken(session, 'browser'), deviceId: session.deviceId };
+  const result = { token: issueToken(session, 'browser'), deviceId: session.deviceId };
+  sessions.delete(session.code);
+  return result;
 }
 
 async function consumePairing(code, email, password, setup) {

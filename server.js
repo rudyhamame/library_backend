@@ -16,7 +16,7 @@ import { MediaCapacityError, MediaJobManager, defaultMediaLimits, memoryPressure
 import { HlsStrategy, PlaybackStrategy, choosePlaybackStrategy, determineHlsStrategy, hlsCodecArgs } from './playback-strategy.js';
 import { getPlayback, getPlaybackHistory, savePlayback } from './playback-store.js';
 import { getFavorites, toggleFavorite } from './favorites-store.js';
-import { changeAccountPassword, claimAutomaticPairing, createDeviceSession, getLinkedDevices, getPairingInfo, getRokuDeviceSessionStatus, loginAccount, loginDeviceSession, recordDeviceHeartbeat, resolveDeviceToken, setupDeviceSession, unlinkAccountDevice } from './device-sessions.js';
+import { changeAccountPassword, claimAutomaticPairing, createDeviceSession, getLinkedDevices, getPairingInfo, getRokuDeviceSessionStatus, loginAccount, loginDeviceSession, recordDeviceHeartbeat, registerAccount, resolveDeviceToken, setupDeviceSession, unlinkAccountDevice } from './device-sessions.js';
 
 const app = express();
 const port = process.env.PORT || 8787;
@@ -412,6 +412,13 @@ app.post('/api/account/login', async (req, res) => {
     const result = await loginAccount(req.body?.email, req.body?.password, req.body?.deviceId);
     if (result.error) return res.status(result.error.startsWith('Incorrect') ? 401 : 400).json(result);
     res.json(result);
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+app.post('/api/account/signup', async (req, res) => {
+  try {
+    const result = await registerAccount(req.body?.email, req.body?.password);
+    if (result.error) return res.status(400).json(result);
+    res.status(201).json(result);
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 app.post('/api/account/password', async (req, res) => {

@@ -51,6 +51,7 @@ function purge(reserveSlot = false) {
 }
 
 function ownerIdFor(deviceId) { return createHash('sha256').update(String(deviceId)).digest('hex'); }
+function accountOwnerId(accountId) { return ownerIdFor(`account:${accountId}`); }
 function encode(value) { return Buffer.from(value).toString('base64url'); }
 function sign(value) { return createHmac('sha256', signingSecret).update(value).digest('base64url'); }
 
@@ -172,6 +173,21 @@ async function consumePairing(code, email, password, setup) {
 export function setupDeviceSession(code, email, password) { return consumePairing(code, email, password, true); }
 export function loginDeviceSession(code, email, password) { return consumePairing(code, email, password, false); }
 
+export async function registerAccount(email, password) {
+  const normalizedEmail = normalizeEmail(email);
+  if (!validEmail(normalizedEmail)) return { error: 'Enter a valid email address' };
+  if (!validPassword(password)) return { error: 'Password must contain at least 8 characters' };
+  const collection = await accounts();
+  if (await collection.findOne({ email: normalizedEmail }, { projection: { _id: 1 } })) return { error: 'An account with this email already exists. Sign in instead.' };
+  try {
+    await collection.insertOne({ email: normalizedEmail, passwordHash: hashPassword(password), createdAt: new Date(), updatedAt: new Date() });
+  } catch (error) {
+    if (error?.code === 11000) return { error: 'An account with this email already exists. Sign in instead.' };
+    throw error;
+  }
+  return { ok: true };
+}
+
 export function getRokuDeviceSessionStatus(code) {
   const session = getDeviceSession(code);
   if (!session) return null;
@@ -228,7 +244,7 @@ export async function loginAccount(email, password, deviceId = '') {
   const account = await (await accounts()).findOne({ email: normalizedEmail });
   if (!account || !verifyPassword(password, account.passwordHash)) return { error: 'Incorrect email or password' };
   const linked = await (await profiles()).find({ accountId: account._id }).toArray();
-  if (!linked.length) return { error: 'No Roku devices are linked to this account' };
+  if (!linked.length) return { token: issueToken({ ownerId: accountOwnerId(account._id), accountId: String(account._id) }, 'browser'), devices: [] };
   const devices = linked.map(device => ({ id: String(device._id), deviceId: device.deviceId, label: `Roku ${String(device.deviceId || '').replace(/^roku-/, '').slice(-8).toUpperCase()}` }));
   if (!deviceId && linked.length > 1) return { devices };
   const selected = linked.find(device => deviceId && device.deviceId === deviceId) || (linked.length === 1 ? linked[0] : null);

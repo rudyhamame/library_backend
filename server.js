@@ -656,7 +656,9 @@ async function capturePreview(inputUrl, position, key, identity) {
     key,
     mode: choosePlaybackStrategy({ purpose: 'preview' }) === PlaybackStrategy.TRANSCODE ? 'transcode' : 'remux',
     persistent: false,
-    ...identity,
+    // Preview captures are short-lived support work and must not consume the
+    // device's one active playback slot while the user is scrubbing.
+    ...identity, userId: '', deviceId: '',
   }, async () => {
     const args = [
       '-hide_banner', '-loglevel', 'error',
@@ -1195,6 +1197,17 @@ async function getOrStartRokuHls(source, kind, id, extension, requestedStart = 0
   if (existing) {
     mediaJobs.touch(existing, identity.viewerId);
     return existing;
+  }
+
+  // A device is limited to one active playback job. Release its previous
+  // movie/channel before starting another one so normal navigation does not
+  // return MEDIA_CAPACITY_FULL during the idle cleanup window.
+  if (identity.deviceId) {
+    for (const [otherKey, otherJob] of mediaJobs.entries()) {
+      if (otherKey !== key && otherJob.persistent && otherJob.deviceId === identity.deviceId) {
+        await mediaJobs.remove(otherKey, 'replaced-device-playback');
+      }
+    }
   }
 
   // Xtream accounts commonly allow only one live connection. Stop the prior

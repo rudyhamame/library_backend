@@ -381,7 +381,7 @@ app.post('/api/roku/heartbeat', async (req, res) => {
   try {
     const session = resolveDeviceToken(String(req.get('x-device-token') || req.query.deviceToken || ''));
     if (!session?.deviceId) return res.status(401).json({ error: 'Valid Roku device authorization is required' });
-    await recordDeviceHeartbeat(session.deviceId);
+    await recordDeviceHeartbeat(session.deviceId, req.body?.streaming === true);
     res.json({ ok: true });
   } catch (error) { res.status(500).json({ error: error.message }); }
 });

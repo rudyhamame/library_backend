@@ -15,6 +15,7 @@ let accountsPromise;
 const heartbeatCache = new Map();
 const heartbeatIntervalMs = 30_000;
 const runningWindowMs = 90_000;
+const streamingWindowMs = 45_000;
 
 async function profiles() {
   if (!profilesPromise) {
@@ -160,7 +161,7 @@ export async function getLinkedDevices(accountId) {
   if (!ObjectId.isValid(accountId)) return [];
   const rows = await (await profiles()).find(
     { accountId: new ObjectId(accountId) },
-    { projection: { deviceId: 1, linkedAt: 1, updatedAt: 1, lastSeenAt: 1 } },
+    { projection: { deviceId: 1, linkedAt: 1, updatedAt: 1, lastSeenAt: 1, lastStreamingSeenAt: 1 } },
   ).sort({ linkedAt: 1 }).toArray();
   return rows.map(device => ({
     id: String(device._id),
@@ -168,18 +169,23 @@ export async function getLinkedDevices(accountId) {
     linkedAt: device.linkedAt || device.updatedAt || null,
     lastSeenAt: device.lastSeenAt || null,
     running: Boolean(device.lastSeenAt && Date.now() - new Date(device.lastSeenAt).getTime() <= runningWindowMs),
+    streaming: Boolean(device.lastStreamingSeenAt && Date.now() - new Date(device.lastStreamingSeenAt).getTime() <= streamingWindowMs),
     label: `Roku ${String(device.deviceId || '').replace(/^roku-/, '').slice(-8).toUpperCase()}`,
   }));
 }
 
-export async function recordDeviceHeartbeat(deviceId) {
+export async function recordDeviceHeartbeat(deviceId, streaming = false) {
   const normalized = String(deviceId || '').trim();
   if (!normalized) return;
   const now = Date.now();
-  if (now - (heartbeatCache.get(normalized) || 0) < heartbeatIntervalMs) return;
-  heartbeatCache.set(normalized, now);
+  const previous = heartbeatCache.get(normalized) || { at: 0, streaming: false };
+  if (now - previous.at < heartbeatIntervalMs && previous.streaming === Boolean(streaming)) return;
+  heartbeatCache.set(normalized, { at: now, streaming: Boolean(streaming) });
   try {
-    await (await profiles()).updateOne({ deviceId: normalized }, { $set: { lastSeenAt: new Date(now) } });
+    const update = { $set: { lastSeenAt: new Date(now) } };
+    if (streaming) update.$set.lastStreamingSeenAt = new Date(now);
+    else update.$unset = { lastStreamingSeenAt: '' };
+    await (await profiles()).updateOne({ deviceId: normalized }, update);
   } catch {
     heartbeatCache.delete(normalized);
   }

@@ -1524,15 +1524,14 @@ app.get('/api/roku/library', async (req, res) => {
 });
 app.get('/api/roku/series', async (req, res) => {
   try {
-    const pageInfo = rokuPage(req, rokuInitialSeriesLimit);
-    pageInfo.limit = Math.min(4, pageInfo.limit);
-    pageInfo.offset = pageInfo.page * pageInfo.limit;
     const category = String(req.query.category || '');
     const selected = (await getRokuSelectedItems('series', requestOwner(req)))
       .filter(item => !category || item.category === category)
       .sort((a, b) => Number(b.added || 0) - Number(a.added || 0));
-    const sourcePage = selected.slice(pageInfo.offset, pageInfo.offset + pageInfo.limit);
-    const items = sourcePage.map(item => ({
+    // Series summary cards are small and contain no episode payloads. Return
+    // every selected Series so Roku can build complete category rails in one
+    // request; episode metadata remains lazy-loaded from /series/detail.
+    const items = selected.map(item => ({
       id: `series-search:${item.sourceId}:${item.id}`,
       title: item.title,
       rokuTitle: rokuText(item.title),
@@ -1545,8 +1544,8 @@ app.get('/api/roku/series', async (req, res) => {
       added: item.added,
       contentKind: 'series-search',
     }));
-    console.log(`[Roku] Series summary page ${pageInfo.page} ready: ${items.length} series`);
-    res.json({ items, page: pageInfo.page, limit: pageInfo.limit, total: selected.length, hasMore: pageInfo.offset + sourcePage.length < selected.length });
+    console.log(`[Roku] Complete Series summary ready: ${items.length} series`);
+    res.json({ items, page: 0, limit: items.length, total: items.length, hasMore: false });
   } catch (error) {
     console.error('[Roku] Series catalog failed:', error.message);
     res.status(502).json({ error: error.message });

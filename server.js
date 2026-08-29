@@ -782,6 +782,8 @@ app.put('/api/playback/roku/save', async (req, res) => {
     const payload = {
       itemId,
       title: String(req.query?.title ?? req.body?.title ?? ''),
+      kind: String(req.query?.kind ?? req.body?.kind ?? ''),
+      poster: String(req.query?.poster ?? req.body?.poster ?? ''),
       source: String(req.query?.source ?? req.body?.source ?? 'roku'),
       url: itemId,
       position: Number(req.query?.position ?? req.body?.position ?? 0),

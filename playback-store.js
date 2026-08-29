@@ -21,12 +21,12 @@ export async function getPlayback(itemId) {
   return (await (await playbackCollection()).findOne({ _id: itemId })) || null;
 }
 
-export async function savePlayback({ itemId, title, source, url, position, duration, completed = false }) {
+export async function savePlayback({ itemId, title, kind, poster, source, url, position, duration, completed = false }) {
   const collection = await playbackCollection();
   const now = new Date();
   await collection.updateOne(
     { _id: itemId },
-    { $set: { title: String(title || ''), source: String(source || ''), url: String(url || ''), position: Math.max(0, Number(position) || 0), duration: Math.max(0, Number(duration) || 0), completed: Boolean(completed), updatedAt: now }, $setOnInsert: { createdAt: now } },
+    { $set: { title: String(title || ''), kind: String(kind || ''), poster: String(poster || ''), source: String(source || ''), url: String(url || ''), position: Math.max(0, Number(position) || 0), duration: Math.max(0, Number(duration) || 0), completed: Boolean(completed), updatedAt: now }, $setOnInsert: { createdAt: now } },
     { upsert: true },
   );
   return getPlayback(itemId);

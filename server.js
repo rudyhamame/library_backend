@@ -1117,7 +1117,8 @@ app.get('/api/roku/dashboard', async (req, res) => {
     // Weather is cached, but clock values must be generated for every request
     // so the minute display never remains frozen for the cache lifetime.
     const savedLocations = await getDeviceWeatherLocations(ownerId);
-    const locations = savedLocations.map((location, index) => location ? ({ ...location, id: `slot${index + 1}` }) : null).filter(Boolean);
+    const location = savedLocations[0];
+    const locations = location ? [{ ...location, id: 'slot1' }] : [];
     const cacheKey = JSON.stringify(locations);
     const cached = dashboardCache.get(cacheKey);
     if (cached?.expires > Date.now()) return res.json(freshDashboardTimes(cached.data));

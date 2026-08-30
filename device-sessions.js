@@ -220,13 +220,12 @@ export async function getDeviceWeatherLocations(ownerId) {
     { ownerId: String(ownerId) },
     { projection: { weatherLocations: 1 } },
   );
-  return Array.isArray(profile?.weatherLocations) ? profile.weatherLocations.slice(0, 2) : [];
+  return Array.isArray(profile?.weatherLocations) ? profile.weatherLocations.slice(0, 1) : [];
 }
 
 export async function saveDeviceWeatherLocations(ownerId, locations) {
   if (!ownerId) return { error: 'Linked Roku authorization is required' };
-  const supplied = Array.isArray(locations) ? locations.slice(0, 2) : [];
-  while (supplied.length < 2) supplied.push(null);
+  const supplied = Array.isArray(locations) ? locations.slice(0, 1) : [];
   const weatherLocations = supplied.map(location => location ? ({
     id: String(location.id || ''),
     label: String(location.label || '').trim().slice(0, 180),

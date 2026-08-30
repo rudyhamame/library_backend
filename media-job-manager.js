@@ -87,11 +87,11 @@ export class MediaJobManager {
     return { total: this.jobs.size, remux, transcode, queued: this.starting.size };
   }
 
-  assertCapacity({ mode, userId = '', deviceId = '', allowUnderLoad = false }) {
+  assertCapacity({ mode, userId = '', deviceId = '' }) {
     if (!this.accepting) throw new MediaCapacityError('Media service is shutting down');
     const pressure = this.pressure();
     if (pressure.hard) throw new MediaCapacityError('Server memory pressure is too high for a new media job');
-    if (mode === 'transcode' && !allowUnderLoad && (pressure.soft || pressure.cpuHigh)) throw new MediaCapacityError('Server is busy; transcoding is temporarily unavailable');
+    if (mode === 'transcode' && (pressure.soft || pressure.cpuHigh)) throw new MediaCapacityError('Server is busy; transcoding is temporarily unavailable');
     const counts = this.counts();
     const starting = [...this.startingSpecs.values()];
     if (counts.total + counts.queued >= this.limits.maxTotalJobs) throw new MediaCapacityError('Media capacity is currently full');

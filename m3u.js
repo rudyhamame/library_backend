@@ -16,7 +16,11 @@ export function evictM3uCache(now = Date.now(), aggressive = false) {
 export function m3uCacheStats() { return { entries: cache.size, maxEntries: cacheMaxEntries, inFlight: inFlight.size, maxInFlight }; }
 
 function attribute(line, name) {
-  return line.match(new RegExp(`${name}="([^"]*)"`, 'i'))?.[1]?.trim() || '';
+  const match = line.match(new RegExp(`${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s,]+))`, 'i'));
+  return String(match?.[1] ?? match?.[2] ?? match?.[3] ?? '')
+    .replace(/&amp;/gi, '&')
+    .replace(/&#38;/g, '&')
+    .trim();
 }
 
 function itemId(url) {

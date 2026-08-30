@@ -1170,11 +1170,21 @@ app.get('/api/xtream/logo', async (req, res) => {
   res.once('close', abort);
   try {
     const supplied = String(req.query.url || '').trim();
-    const target = new URL(supplied);
-    if (!['http:', 'https:'].includes(target.protocol)) throw new Error('Unsupported logo URL');
-    if (['localhost', '127.0.0.1', '0.0.0.0', '::1'].includes(target.hostname)) throw new Error('Unsupported logo host');
-
-    const response = await fetch(target, { signal: controller.signal, redirect: 'error' });
+    const validateLogoTarget = target => {
+      if (!['http:', 'https:'].includes(target.protocol)) throw new Error('Unsupported logo URL');
+      if (['localhost', '127.0.0.1', '0.0.0.0', '::1'].includes(target.hostname)) throw new Error('Unsupported logo host');
+    };
+    let target = new URL(supplied);
+    let response;
+    for (let redirects = 0; redirects <= 3; redirects += 1) {
+      validateLogoTarget(target);
+      response = await fetch(target, { signal: controller.signal, redirect: 'manual' });
+      if (![301, 302, 303, 307, 308].includes(response.status)) break;
+      const location = response.headers.get('location');
+      await response.body?.cancel();
+      if (!location || redirects === 3) throw new Error('Logo redirected too many times');
+      target = new URL(location, target);
+    }
     if (!response.ok) return res.sendStatus(response.status === 404 ? 404 : 502);
     const contentType = response.headers.get('content-type') || 'image/jpeg';
     if (!contentType.toLowerCase().startsWith('image/')) return res.status(415).send('Logo is not an image');

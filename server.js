@@ -34,6 +34,7 @@ const rokuText = (value) => arabicText.test(String(value || '')) ? shapeArabicFo
 // the user reaches the end of the current series list.
 const rokuInitialSeriesLimit = Math.min(4, Math.max(1, Number.parseInt(process.env.ROKU_INITIAL_SERIES_LIMIT || '4', 10)));
 const rokuMoviePageLimit = 10;
+const rokuCatalogPageLimit = 10;
 const xtreamItemsInFlight = new Map();
 const rokuHlsRoot = path.join(os.tmpdir(), 'rh-stream-hls');
 const frontendUrl = process.env.FRONTEND_URL || 'https://rh-stream-frontend.onrender.com';
@@ -1709,14 +1710,15 @@ app.get('/api/roku/library', async (req, res) => {
 });
 app.get('/api/roku/series', async (req, res) => {
   try {
+    const pageInfo = rokuPage(req, rokuCatalogPageLimit);
+    pageInfo.limit = rokuCatalogPageLimit;
+    pageInfo.offset = pageInfo.page * pageInfo.limit;
     const category = String(req.query.category || '');
     const selected = (await getRokuSelectedItems('series', requestOwner(req)))
       .filter(item => !category || item.category === category)
       .sort((a, b) => Number(b.added || 0) - Number(a.added || 0));
-    // Series summary cards are small and contain no episode payloads. Return
-    // every selected Series so Roku can build complete category rails in one
-    // request; episode metadata remains lazy-loaded from /series/detail.
-    const items = selected.map(item => ({
+    const sourcePage = selected.slice(pageInfo.offset, pageInfo.offset + pageInfo.limit);
+    const items = sourcePage.map(item => ({
       id: `series-search:${item.sourceId}:${item.id}`,
       title: item.title,
       rokuTitle: rokuText(item.title),
@@ -1729,8 +1731,14 @@ app.get('/api/roku/series', async (req, res) => {
       added: item.added,
       contentKind: 'series-search',
     }));
-    console.log(`[Roku] Complete Series summary ready: ${items.length} series`);
-    res.json({ items, page: 0, limit: items.length, total: items.length, hasMore: false });
+    console.log(`[Roku] Series page ${pageInfo.page} ready: ${items.length}/${selected.length}`);
+    res.json({
+      items,
+      page: pageInfo.page,
+      limit: pageInfo.limit,
+      total: selected.length,
+      hasMore: pageInfo.offset + sourcePage.length < selected.length,
+    });
   } catch (error) {
     console.error('[Roku] Series catalog failed:', error.message);
     res.status(502).json({ error: error.message });
@@ -1738,8 +1746,21 @@ app.get('/api/roku/series', async (req, res) => {
 });
 app.get('/api/roku/channels', async (req, res) => {
   try {
-    const items = buildXtreamChannelsPayload(await getRokuSelectedItems('channel', requestOwner(req)));
-    res.json({ items, page: 0, limit: items.length, total: items.length, hasMore: false });
+    const pageInfo = rokuPage(req, rokuCatalogPageLimit);
+    pageInfo.limit = rokuCatalogPageLimit;
+    pageInfo.offset = pageInfo.page * pageInfo.limit;
+    const selected = (await getRokuSelectedItems('channel', requestOwner(req)))
+      .slice()
+      .sort((a, b) => Number(b.added || 0) - Number(a.added || 0));
+    const sourcePage = selected.slice(pageInfo.offset, pageInfo.offset + pageInfo.limit);
+    const items = buildXtreamChannelsPayload(sourcePage);
+    res.json({
+      items,
+      page: pageInfo.page,
+      limit: pageInfo.limit,
+      total: selected.length,
+      hasMore: pageInfo.offset + sourcePage.length < selected.length,
+    });
   } catch (error) { res.status(502).json({ error: error.message }); }
 });
 // Render storage is ephemeral, but a process crash can leave the prior job

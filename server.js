@@ -110,6 +110,19 @@ function appendTail(current, chunk, maxBytes = 8_000) {
   return `${current}${chunk}`.slice(-maxBytes);
 }
 
+function redactSensitiveUrl(value) {
+  const text = String(value || '');
+  try {
+    const parsed = new URL(text);
+    for (const key of ['deviceToken', 'token', 'access_token']) {
+      if (parsed.searchParams.has(key)) parsed.searchParams.set(key, '[redacted]');
+    }
+    return parsed.toString();
+  } catch {
+    return text.replace(/([?&](?:deviceToken|token|access_token)=)[^&\s]*/gi, '$1[redacted]');
+  }
+}
+
 async function probeMediaDuration(inputUrl) {
   return new Promise((resolve, reject) => {
     const child = spawn('ffprobe', [
@@ -941,7 +954,7 @@ app.put('/api/playback/roku/save', async (req, res) => {
       completed: completedValue === 'true' || completedValue === '1',
     };
     const item = await savePlayback(payload);
-    console.log(`[Roku playback] saved ${itemId} at ${item.position}s`);
+    console.log(`[Roku playback] saved ${redactSensitiveUrl(itemId)} at ${item.position}s`);
     res.json({ item });
   } catch (error) { res.status(500).json({ error: error.message }); }
 });

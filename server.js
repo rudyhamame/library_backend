@@ -4,7 +4,7 @@ import cors from 'cors';
 import { Readable, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { spawn } from 'node:child_process';
-import { createHash, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -55,6 +55,24 @@ let mediaRequestSequence = 0;
 const movieDurationCache = new Map();
 const movieDurationCacheMaxEntries = 100;
 const movieDurationCacheTtlMs = 24 * 60 * 60 * 1000;
+const streamTicketSecret = process.env.DEVICE_AUTH_SECRET || 'local-development-secret-change-before-production';
+
+function issueStreamTicket(ownerId, sourceId, kind, id) {
+  const payload = Buffer.from(JSON.stringify({ ownerId, sourceId, kind, id, exp: Date.now() + 5 * 60_000 })).toString('base64url');
+  const signature = createHmac('sha256', streamTicketSecret).update(payload).digest('base64url');
+  return `${payload}.${signature}`;
+}
+
+function resolveStreamTicket(token, sourceId, kind, id) {
+  const [payload, signature] = String(token || '').split('.');
+  if (!payload || !signature) return null;
+  const expected = createHmac('sha256', streamTicketSecret).update(payload).digest('base64url');
+  if (signature.length !== expected.length || !timingSafeEqual(Buffer.from(signature), Buffer.from(expected))) return null;
+  try {
+    const data = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
+    return data.ownerId && data.exp > Date.now() && data.sourceId === sourceId && data.kind === kind && data.id === id ? data : null;
+  } catch { return null; }
+}
 
 const sourceType = source => source?.type === 'm3u' ? 'm3u' : 'xtream';
 const getSourceCatalog = (source, kind) => sourceType(source) === 'm3u' ? getM3uCatalog(source, kind) : getXtreamCatalog(source, kind);
@@ -99,10 +117,11 @@ function waitForLibraryRevision(ownerId, since, timeoutMs = 25_000) {
 function mediaIdentity(req) {
   const token = String(req.get('x-device-token') || req.query.deviceToken || '');
   const session = resolveDeviceToken(token);
+  const ticket = resolveStreamTicket(req.query.streamTicket, req.params.sourceId, req.params.kind, req.params.id);
   return {
-    userId: String(session?.ownerId || ''),
+    userId: String(session?.ownerId || ticket?.ownerId || ''),
     deviceId: String(session?.deviceId || ''),
-    viewerId: String(session?.deviceId || session?.ownerId || req.ip || 'anonymous'),
+    viewerId: String(session?.deviceId || session?.ownerId || ticket?.ownerId || req.ip || 'anonymous'),
   };
 }
 
@@ -232,6 +251,12 @@ function requestOwner(req) {
   const token = String(req.get('x-device-token') || req.query.deviceToken || '');
   const session = resolveDeviceToken(token);
   return session?.ownerId || null;
+}
+
+function mediaOwner(req) {
+  return requestOwner(req) || resolveStreamTicket(
+    req.query.streamTicket, req.params.sourceId, req.params.kind, req.params.id,
+  )?.ownerId || null;
 }
 
 function requestAccount(req) {
@@ -581,8 +606,22 @@ app.get('/internal/media-health', async (req, res) => {
 
 app.use('/api/xtream', (req, res, next) => {
   if (req.path === '/logo') return next();
+  const hls = req.path.match(/^\/hls\/([^/]+)\/(channel|movie|series)\/([^/]+)\/(?:master\.m3u8|segment-\d{6}\.ts)$/);
+  if (hls && resolveStreamTicket(req.query.streamTicket, decodeURIComponent(hls[1]), hls[2], decodeURIComponent(hls[3]))) return next();
   if (!requestOwner(req)) return res.status(401).json({ error: 'Pair this browser with a Roku device first' });
   next();
+});
+
+app.get('/api/xtream/stream-ticket/:sourceId/:kind/:id', async (req, res) => {
+  try {
+    const ownerId = requestOwner(req);
+    if (!ownerId) return res.status(401).json({ error: 'Authentication required' });
+    if (!['channel', 'movie', 'series'].includes(req.params.kind)) return res.sendStatus(400);
+    const source = await getXtreamSource(req.params.sourceId, ownerId);
+    if (!source) return res.sendStatus(404);
+    res.set('Cache-Control', 'no-store');
+    res.json({ ticket: issueStreamTicket(ownerId, req.params.sourceId, req.params.kind, req.params.id) });
+  } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 app.use('/api/library', (req, res, next) => {
@@ -1156,7 +1195,7 @@ app.get('/api/xtream/catalog', async (req, res) => {
 
 app.get('/api/xtream/movie/:sourceId/:id/duration', async (req, res) => {
   try {
-    const source = await getXtreamSource(req.params.sourceId, requestOwner(req));
+    const source = await getXtreamSource(req.params.sourceId, mediaOwner(req));
     if (!source) return res.sendStatus(404);
     const cacheKey = `${source._id}:movie:${req.params.id}`;
     const cached = movieDurationCache.get(cacheKey);
@@ -1555,6 +1594,8 @@ app.get('/api/xtream/hls/:sourceId/:kind/:id/master.m3u8', async (req, res) => {
     const segmentQuery = new URLSearchParams();
     const deviceToken = String(req.query.deviceToken || '').trim();
     if (deviceToken) segmentQuery.set('deviceToken', deviceToken);
+    const streamTicket = String(req.query.streamTicket || '').trim();
+    if (streamTicket) segmentQuery.set('streamTicket', streamTicket);
     if (startSeconds > 0) segmentQuery.set('start', String(startSeconds));
     if ([...segmentQuery].length > 0) {
       const query = segmentQuery.toString();
@@ -1576,7 +1617,7 @@ app.get('/api/xtream/hls/:sourceId/:kind/:id/:segment', async (req, res) => {
     const key = rokuHlsKey(req.params.sourceId, req.params.kind, req.params.id, req.query.ext, startSeconds);
     const job = mediaJobs.get(key);
     if (!job) return res.sendStatus(404);
-    if (job.userId && job.userId !== requestOwner(req)) return res.sendStatus(404);
+    if (job.userId && job.userId !== mediaOwner(req)) return res.sendStatus(404);
     mediaJobs.touch(job, mediaIdentity(req).viewerId);
     const filename = path.join(job.directory, req.params.segment);
     await fs.access(filename);

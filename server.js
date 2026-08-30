@@ -1764,7 +1764,9 @@ async function buildXtreamSeriesPayload({ limit, selected: suppliedSelected } = 
           const playbackUrl = rokuXtreamPlaybackPath(source._id, 'series', episode.id, extension);
           const title = episode.title || `${details.title} · ${episode.episodeNumber}`;
           items.push({
-            id: `xtream:${source._id}:series:${episode.id}`,
+            id: episode.id,
+            sourceId: String(source._id),
+            favoriteId: `xtream:${source._id}:series:${episode.id}`,
             source: 'xtream', kind: 'episode', contentKind: 'episode',
             title, rokuTitle: rokuText(title), rokuTextKind: /[A-Za-z]/.test(title) ? 'latin' : 'arabic',
             seriesTitle: details.title, rokuSeriesTitle: rokuText(details.title),

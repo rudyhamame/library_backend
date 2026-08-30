@@ -84,3 +84,13 @@ test('hard memory pressure rejects all new FFmpeg jobs', async () => {
     /memory pressure/i,
   );
 });
+
+test('allows a bounded preview transcode under CPU load but not hard memory pressure', async () => {
+  const manager = new MediaJobManager({ limits, pressure: () => ({ soft: true, hard: false, cpuHigh: true }) });
+  const { job } = await manager.getOrCreate(
+    { key: 'preview', mode: 'transcode', allowUnderLoad: true },
+    async () => ({ stop() {} }),
+  );
+  assert.equal(job.key, 'preview');
+  await manager.shutdown();
+});

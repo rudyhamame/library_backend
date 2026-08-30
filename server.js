@@ -909,6 +909,9 @@ async function capturePreview(inputUrl, position, key, identity) {
     key,
     mode: choosePlaybackStrategy({ purpose: 'preview' }) === PlaybackStrategy.TRANSCODE ? 'transcode' : 'remux',
     persistent: false,
+    // Preview capture extracts one bounded frame. Allow it under normal CPU
+    // load while retaining hard-memory and all job-count limits.
+    allowUnderLoad: true,
     // Preview captures are short-lived support work and must not consume the
     // device's one active playback slot while the user is scrubbing.
     ...identity, userId: '', deviceId: '',

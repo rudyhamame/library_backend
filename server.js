@@ -624,6 +624,18 @@ app.get('/api/xtream/stream-ticket/:sourceId/:kind/:id', async (req, res) => {
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
+app.get('/api/xtream/series/:sourceId/:id', async (req, res) => {
+  try {
+    const ownerId = requestOwner(req);
+    if (!ownerId) return res.status(401).json({ error: 'Authentication required' });
+    const source = await getXtreamSource(req.params.sourceId, ownerId);
+    if (!source) return res.sendStatus(404);
+    const details = await getXtreamSeriesEpisodes(source, req.params.id);
+    res.set('Cache-Control', 'no-store');
+    res.json(details);
+  } catch (error) { res.status(502).json({ error: error.message }); }
+});
+
 app.use('/api/library', (req, res, next) => {
   if (!requestOwner(req)) return res.status(401).json({ error: 'Sign in to manage Library categories' });
   next();

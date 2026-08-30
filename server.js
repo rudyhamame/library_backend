@@ -18,8 +18,10 @@ import { getPlayback, getPlaybackHistory, savePlayback } from './playback-store.
 import { getFavorites, toggleFavorite } from './favorites-store.js';
 import { changeAccountPassword, claimAutomaticPairing, createDeviceSession, getDeviceWeatherLocations, getLinkedDevices, getPairingInfo, getRokuDeviceSessionStatus, loginAccount, loginDeviceSession, recordDeviceHeartbeat, registerAccount, resolveDeviceToken, saveDeviceWeatherLocations, setupDeviceSession, unlinkAccountDevice } from './device-sessions.js';
 import { createLibraryCategory, deleteLibraryCategory, getManagedLibrary, renameLibraryCategory, replaceLibraryCategoryItems } from './library-category-store.js';
+import { enforceLibraryOnly } from './library-route-policy.js';
 
 const app = express();
+app.use(enforceLibraryOnly);
 const port = process.env.PORT || 8787;
 const dashboardCache = new Map();
 const previewCache = new Map();
@@ -1269,6 +1271,11 @@ app.get('/api/xtream/catalog', async (req, res) => {
         filtered.push({ ...item, languageCode, titleLanguage: languageCode });
       }
     }
+    // Sort the complete filtered catalog before pagination. This keeps every
+    // page boundary stable: loading 20 more items can never insert an earlier
+    // title into the middle of the already-rendered list.
+    filtered.sort((a, b) => String(a.title || '').trim().localeCompare(String(b.title || '').trim(), undefined, { numeric: true, sensitivity: 'base' })
+      || String(a.key || '').localeCompare(String(b.key || '')));
     const languages = [...languageSet]
       .sort((a, b) => (languagePriority[a] ?? 10) - (languagePriority[b] ?? 10) || a.localeCompare(b));
     const pageCount = Math.max(1, Math.ceil(filtered.length / pageSize));

@@ -214,6 +214,36 @@ export async function getLinkedDevices(accountId) {
   }));
 }
 
+export async function getDeviceWeatherLocations(ownerId) {
+  if (!ownerId) return [];
+  const profile = await (await profiles()).findOne(
+    { ownerId: String(ownerId) },
+    { projection: { weatherLocations: 1 } },
+  );
+  return Array.isArray(profile?.weatherLocations) ? profile.weatherLocations.slice(0, 2) : [];
+}
+
+export async function saveDeviceWeatherLocations(ownerId, locations) {
+  if (!ownerId) return { error: 'Linked Roku authorization is required' };
+  const supplied = Array.isArray(locations) ? locations.slice(0, 2) : [];
+  while (supplied.length < 2) supplied.push(null);
+  const weatherLocations = supplied.map(location => location ? ({
+    id: String(location.id || ''),
+    label: String(location.label || '').trim().slice(0, 180),
+    latitude: Number(location.latitude),
+    longitude: Number(location.longitude),
+    timezone: String(location.timezone || 'auto').trim().slice(0, 120),
+  }) : null);
+  if (weatherLocations.some(location => location && (!location.label || !Number.isFinite(location.latitude) || !Number.isFinite(location.longitude)))) {
+    return { error: 'Select valid weather locations' };
+  }
+  const result = await (await profiles()).updateOne(
+    { ownerId: String(ownerId) },
+    { $set: { weatherLocations, updatedAt: new Date() } },
+  );
+  return result.matchedCount ? { locations: weatherLocations } : { error: 'Linked Roku profile not found' };
+}
+
 export async function recordDeviceHeartbeat(deviceId, streaming = false) {
   const normalized = String(deviceId || '').trim();
   if (!normalized) return;

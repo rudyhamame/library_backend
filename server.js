@@ -16,13 +16,12 @@ import { MediaCapacityError, MediaJobManager, defaultMediaLimits, memoryPressure
 import { HlsStrategy, PlaybackStrategy, choosePlaybackStrategy, determineHlsStrategy, hlsCodecArgs } from './playback-strategy.js';
 import { getPlayback, getPlaybackHistory, savePlayback } from './playback-store.js';
 import { getFavorites, toggleFavorite } from './favorites-store.js';
-import { changeAccountPassword, claimAutomaticPairing, createDeviceSession, getLinkedDevices, getPairingInfo, getRokuDeviceSessionStatus, loginAccount, loginDeviceSession, recordDeviceHeartbeat, registerAccount, resolveDeviceToken, setupDeviceSession, unlinkAccountDevice } from './device-sessions.js';
+import { changeAccountPassword, claimAutomaticPairing, createDeviceSession, getDeviceWeatherLocations, getLinkedDevices, getPairingInfo, getRokuDeviceSessionStatus, loginAccount, loginDeviceSession, recordDeviceHeartbeat, registerAccount, resolveDeviceToken, saveDeviceWeatherLocations, setupDeviceSession, unlinkAccountDevice } from './device-sessions.js';
 import { createLibraryCategory, deleteLibraryCategory, getManagedLibrary, renameLibraryCategory, replaceLibraryCategoryItems } from './library-category-store.js';
 
 const app = express();
 const port = process.env.PORT || 8787;
-let dashboardCache = { expires: 0, data: null };
-const dashboardTimeZones = { toronto: 'America/Toronto', latakia: 'Asia/Damascus' };
+const dashboardCache = new Map();
 const previewCache = new Map();
 const arabicText = /[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]/;
 const rokuText = (value) => arabicText.test(String(value || '')) ? shapeArabicForRoku(value) : String(value || '');
@@ -272,10 +271,26 @@ function cityIsoMinute(timeZone) {
   return `${values.year}-${values.month}-${values.day}T${values.hour}:${values.minute}`;
 }
 
+function cityClock(timeZone) {
+  const values = Object.fromEntries(new Intl.DateTimeFormat('en-CA', {
+    timeZone, year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23',
+  }).formatToParts(new Date()).filter(part => part.type !== 'literal').map(part => [part.type, part.value]));
+  const year = Number(values.year);
+  const month = Number(values.month);
+  const day = Number(values.day);
+  return {
+    year, month, day,
+    hour: Number(values.hour), minute: Number(values.minute), second: Number(values.second),
+    weekday: new Date(Date.UTC(year, month - 1, day)).getUTCDay(),
+  };
+}
+
 function freshDashboardTimes(data) {
   return { ...data, cities: (data?.cities || []).map(city => ({
     ...city,
-    time: cityIsoMinute(dashboardTimeZones[city.id] || 'UTC'),
+    time: cityIsoMinute(city.timezone || 'UTC'),
+    clock: cityClock(city.timezone || 'UTC'),
   })) };
 }
 
@@ -1052,15 +1067,60 @@ app.put('/api/playback', async (req, res) => {
     res.json({ item: await savePlayback({ itemId, ...req.body }) });
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
-app.get('/api/roku/dashboard', async (_, res) => {
+app.get('/api/roku/weather-locations/search', async (req, res) => {
   try {
+    if (!requestOwner(req)) return res.status(401).json({ error: 'Sign in to search weather locations' });
+    const name = String(req.query.q || '').trim();
+    if (name.length < 2) return res.status(400).json({ error: 'Enter at least two characters' });
+    const language = String(req.query.language || 'en').toLowerCase() === 'ar' ? 'ar' : 'en';
+    const query = new URLSearchParams({ name, count: '100', language, format: 'json' });
+    const response = await fetch(`https://geocoding-api.open-meteo.com/v1/search?${query}`, { signal: AbortSignal.timeout(8_000) });
+    if (!response.ok) throw new Error(`Geocoding HTTP ${response.status}`);
+    const payload = await response.json();
+    const locations = (payload.results || []).map(location => ({
+      id: location.id,
+      name: location.name,
+      country: location.country || '',
+      admin1: location.admin1 || '',
+      latitude: location.latitude,
+      longitude: location.longitude,
+      timezone: location.timezone || 'auto',
+      label: [location.name, location.admin1, location.country].filter(Boolean).join(', '),
+    }));
+    res.json({ locations });
+  } catch (error) { res.status(502).json({ error: error.message }); }
+});
+
+app.get('/api/account/weather-locations', async (req, res) => {
+  try {
+    const ownerId = requestOwner(req);
+    if (!ownerId) return res.status(401).json({ error: 'Sign in to manage weather locations' });
+    res.json({ locations: await getDeviceWeatherLocations(ownerId) });
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+app.put('/api/account/weather-locations', async (req, res) => {
+  try {
+    const ownerId = requestOwner(req);
+    if (!ownerId) return res.status(401).json({ error: 'Sign in to manage weather locations' });
+    const result = await saveDeviceWeatherLocations(ownerId, req.body?.locations);
+    if (result.error) return res.status(result.error.includes('not found') ? 404 : 400).json(result);
+    dashboardCache.clear();
+    res.json(result);
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+app.get('/api/roku/dashboard', async (req, res) => {
+  try {
+    const ownerId = requestOwner(req);
+    if (!ownerId) return res.status(401).json({ error: 'Valid device authorization is required' });
     // Weather is cached, but clock values must be generated for every request
     // so the minute display never remains frozen for the cache lifetime.
-    if (dashboardCache.expires > Date.now()) return res.json(freshDashboardTimes(dashboardCache.data));
-    const locations = [
-      { id: 'toronto', label: 'TORONTO, CANADA', latitude: 43.6532, longitude: -79.3832, timezone: 'America/Toronto' },
-      { id: 'latakia', label: 'LATAKIA, SYRIA', latitude: 35.5317, longitude: 35.7917, timezone: 'Asia/Damascus' },
-    ];
+    const savedLocations = await getDeviceWeatherLocations(ownerId);
+    const locations = savedLocations.map((location, index) => location ? ({ ...location, id: `slot${index + 1}` }) : null).filter(Boolean);
+    const cacheKey = JSON.stringify(locations);
+    const cached = dashboardCache.get(cacheKey);
+    if (cached?.expires > Date.now()) return res.json(freshDashboardTimes(cached.data));
     const cities = await Promise.all(locations.map(async (location) => {
       const query = new URLSearchParams({
         latitude: location.latitude, longitude: location.longitude,
@@ -1069,10 +1129,11 @@ app.get('/api/roku/dashboard', async (_, res) => {
       const response = await fetch(`https://api.open-meteo.com/v1/forecast?${query}`, { signal: AbortSignal.timeout(8_000) });
       if (!response.ok) throw new Error(`Weather HTTP ${response.status}`);
       const data = await response.json();
-      return { id: location.id, label: location.label, time: data.current?.time || '', temperature: data.current?.temperature_2m, weatherCode: data.current?.weather_code };
+      return { id: location.id, label: location.label, timezone: location.timezone, time: data.current?.time || '', temperature: data.current?.temperature_2m, weatherCode: data.current?.weather_code };
     }));
-    dashboardCache = { expires: Date.now() + 120_000, data: { backend: 'online', cities } };
-    res.json(freshDashboardTimes(dashboardCache.data));
+    const entry = { expires: Date.now() + 120_000, data: { backend: 'online', cities } };
+    dashboardCache.set(cacheKey, entry);
+    res.json(freshDashboardTimes(entry.data));
   } catch (error) { res.status(502).json({ backend: 'online', error: error.message }); }
 });
 function parsePlaylistInput(body, existing = null) {

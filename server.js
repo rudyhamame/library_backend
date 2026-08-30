@@ -402,8 +402,6 @@ async function getRokuSelectedItems(kind, ownerId = null) {
 
 function directXtreamItem(item) {
   const extension = String(item.extension || '').toLowerCase();
-  // Every movie and series VOD item uses the seek-aware HLS pipeline,
-  // regardless of its provider container.
   const playbackUrl = rokuXtreamPlaybackPath(item.sourceId, item.kind, item.id, extension);
   return {
     ...item,
@@ -414,12 +412,19 @@ function directXtreamItem(item) {
     rokuTitle: rokuText(item.title),
     rokuTextKind: /[A-Za-z]/.test(item.title) ? 'latin' : 'arabic',
     originalFormat: extension || 'mp4',
-    streamFormat: 'hls',
+    streamFormat: rokuXtreamStreamFormat(extension),
   };
+}
+
+function rokuXtreamStreamFormat(extension = '') {
+  return ['mp4', 'm4v'].includes(String(extension).toLowerCase()) ? 'mp4' : 'hls';
 }
 
 function rokuXtreamPlaybackPath(sourceId, kind, id, extension = '') {
   const ext = String(extension || '').replace(/[^a-z0-9]/gi, '').toLowerCase();
+  if (rokuXtreamStreamFormat(ext) === 'mp4') {
+    return `/api/xtream/play/${encodeURIComponent(sourceId)}/${kind}/${encodeURIComponent(id)}${ext ? `?ext=${encodeURIComponent(ext)}` : ''}`;
+  }
   return `/api/xtream/hls/${encodeURIComponent(sourceId)}/${kind}/${encodeURIComponent(id)}/master.m3u8${ext ? `?ext=${encodeURIComponent(ext)}` : ''}`;
 }
 
@@ -1770,7 +1775,7 @@ async function buildXtreamSeriesPayload({ limit, selected: suppliedSelected } = 
             rokuCategory: seriesItem.rokuCategory,
             language: seriesItem.language,
             added: seriesItem.added,
-            url: playbackUrl, playbackUrl, streamFormat: 'hls',
+            url: playbackUrl, playbackUrl, streamFormat: rokuXtreamStreamFormat(extension),
             originalFormat: extension || 'mp4',
           });
         }

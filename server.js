@@ -401,6 +401,20 @@ function rokuXtreamPlaybackPath(sourceId, kind, id, extension = '') {
 app.use(cors());
 app.use(express.json());
 
+// Verify the actual Roku credential, not merely process availability. This
+// keeps the Library backend indicator from showing green when the saved token
+// is expired, invalid, or signed with a different DEVICE_AUTH_SECRET.
+app.get('/api/roku/auth-health', (req, res) => {
+  const token = String(req.get('x-device-token') || req.query.deviceToken || '');
+  const session = resolveDeviceToken(token);
+  res.set('Cache-Control', 'no-store');
+  if (!session?.ownerId || !session?.deviceId || session.type !== 'roku') {
+    console.warn(`[Roku auth] health rejected token=${token ? 'present-invalid' : 'missing'}`);
+    return res.status(401).json({ ok: false, authenticated: false });
+  }
+  res.json({ ok: true, authenticated: true });
+});
+
 // The Roku displays a short-lived QR/device code. The phone signs up or signs
 // in, then the Roku polls for approval and receives its token automatically.
 app.post('/api/roku/device-session', async (req, res) => {

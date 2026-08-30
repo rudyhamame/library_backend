@@ -375,6 +375,7 @@ function directXtreamItem(item) {
     playbackUrl,
     rokuTitle: rokuText(item.title),
     rokuTextKind: /[A-Za-z]/.test(item.title) ? 'latin' : 'arabic',
+    originalFormat: extension || 'mp4',
     streamFormat: 'hls',
   };
 }
@@ -635,8 +636,11 @@ app.get('/api/roku/bootstrap', async (req, res) => {
   try {
     // Home needs a very small, fast catalog only. Return the newest saved
     // Roku entries without expanding every series into episodes.
-    const [selectedSeries, selectedMovies] = await Promise.all([
-      getRokuSelectedItems('series', requestOwner(req)), getRokuSelectedItems('movie', requestOwner(req)),
+    const ownerId = requestOwner(req);
+    const [selectedSeries, selectedMovies, selectedChannels] = await Promise.all([
+      getRokuSelectedItems('series', ownerId),
+      getRokuSelectedItems('movie', ownerId),
+      getRokuSelectedItems('channel', ownerId),
     ]);
     const newestFirst = (items) => [...items]
       .sort((a, b) => Number(b.added || 0) - Number(a.added || 0))
@@ -652,6 +656,7 @@ app.get('/api/roku/bootstrap', async (req, res) => {
       thumbnail: item.logo,
       added: item.added,
       contentKind: 'series-search',
+      originalFormat: String(item.extension || 'mp4').replace(/[^a-z0-9]/gi, '').toUpperCase(),
     }));
     const movies = newestFirst(selectedMovies).map((item) => ({
       ...directXtreamItem(item),
@@ -661,7 +666,14 @@ app.get('/api/roku/bootstrap', async (req, res) => {
       rokuEnabled: true,
     }));
     res.set('Cache-Control', 'no-store');
-    res.json({ items: [...series, ...movies] });
+    res.json({
+      items: [...series, ...movies],
+      stats: {
+        series: selectedSeries.length,
+        movies: selectedMovies.length,
+        channels: selectedChannels.length,
+      },
+    });
   } catch (error) {
     res.status(502).json({ error: error.message });
   }
@@ -707,6 +719,7 @@ app.get('/api/roku/search', async (req, res) => {
         sourceId: String(item.sourceId),
         seriesId: item.id,
         contentKind: 'series-search',
+        originalFormat: String(item.extension || 'mp4').replace(/[^a-z0-9]/gi, '').toUpperCase(),
       })) });
     }
     const items = matches.map(item => ({
@@ -1678,6 +1691,7 @@ async function buildXtreamSeriesPayload({ limit, selected: suppliedSelected } = 
             language: seriesItem.language,
             added: seriesItem.added,
             url: playbackUrl, playbackUrl, streamFormat: 'hls',
+            originalFormat: extension || 'mp4',
           });
         }
       } catch (error) {
@@ -1730,6 +1744,7 @@ app.get('/api/roku/series', async (req, res) => {
       thumbnail: item.logo,
       added: item.added,
       contentKind: 'series-search',
+      originalFormat: String(item.extension || 'mp4').replace(/[^a-z0-9]/gi, '').toUpperCase(),
     }));
     console.log(`[Roku] Series page ${pageInfo.page} ready: ${items.length}/${selected.length}`);
     res.json({

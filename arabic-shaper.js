@@ -11,14 +11,25 @@ const forms = {
 const dual = new Set(Object.entries(forms).filter(([, value]) => value.length === 4).map(([key]) => key));
 const joinsRight = new Set(Object.keys(forms));
 const arabic = /[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]/;
+const transparentMark = /[\u0610-\u061A\u064B-\u065F\u0670\u06D6-\u06ED\u08D3-\u08FF]/;
+
+function adjacentLetter(chars, index, direction) {
+  for (let cursor = index + direction; cursor >= 0 && cursor < chars.length; cursor += direction) {
+    if (!transparentMark.test(chars[cursor])) return chars[cursor];
+  }
+  return '';
+}
 
 function shapeWord(word) {
   const chars = [...word];
   const shaped = chars.map((char, index) => {
     const options = forms[char];
     if (!options) return char;
-    const previous = chars[index - 1];
-    const next = chars[index + 1];
+    // Arabic vowel and Quranic marks do not break joining between their
+    // neighbouring letters. Roku receives presentation forms because its
+    // text renderer does not reliably perform contextual Arabic shaping.
+    const previous = adjacentLetter(chars, index, -1);
+    const next = adjacentLetter(chars, index, 1);
     const joinPrevious = Boolean(previous && dual.has(previous) && joinsRight.has(char));
     const joinNext = Boolean(next && dual.has(char) && joinsRight.has(next));
     const formIndex = joinPrevious && joinNext ? 3 : joinPrevious ? Math.min(1, options.length - 1) : joinNext ? Math.min(2, options.length - 1) : 0;
@@ -28,6 +39,8 @@ function shapeWord(word) {
 }
 
 export function shapeArabicForRoku(value) {
-  const shaped = String(value || '').split(/(\s+)/).map(token => arabic.test(token) ? shapeWord(token) : token).reverse().join('');
+  const source = String(value || '');
+  if (!arabic.test(source)) return source;
+  const shaped = source.split(/(\s+)/).map(token => arabic.test(token) ? shapeWord(token) : token).reverse().join('');
   return shaped.length > 68 ? `${shaped.slice(0, 65)}...` : shaped;
 }

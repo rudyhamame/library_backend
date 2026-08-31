@@ -15,6 +15,7 @@ import { evictM3uCache, getM3uCatalog, getM3uCategories, m3uCacheStats, m3uProvi
 import { MediaCapacityError, MediaJobManager, defaultMediaLimits, memoryPressure } from './media-job-manager.js';
 import { HlsStrategy, PlaybackStrategy, choosePlaybackStrategy, determineHlsStrategy, hlsCodecArgs } from './playback-strategy.js';
 import { getPlayback, getPlaybackHistory, savePlayback } from './playback-store.js';
+import { getStreamingHistory, saveStreamingHistory } from './streaming-history-store.js';
 import { getFavorites, toggleFavorite } from './favorites-store.js';
 import { authorizeDeviceSession, changeAccountPassword, claimAutomaticPairing, createDeviceSession, getDeviceWeatherLocations, getLinkedDevices, getPairingInfo, getRokuDeviceSessionStatus, isRokuSessionLinked, loginAccount, loginDeviceSession, recordDeviceHeartbeat, registerAccount, resolveDeviceToken, saveDeviceWeatherLocations, setupDeviceSession, unlinkAccountDevice } from './device-sessions.js';
 import { createLibraryCategory, deleteLibraryCategory, getManagedLibrary, renameLibraryCategory, replaceLibraryCategoryItems } from './library-category-store.js';
@@ -936,6 +937,27 @@ app.get('/api/playback/history', async (req, res) => {
     res.set('Cache-Control', 'no-store');
     const items = await getPlaybackHistory(ownerId);
     res.json({ items: items.map((item) => ({ ...item, rokuTitle: rokuText(item.title) })) });
+  }
+  catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+app.get('/api/streaming-history', async (req, res) => {
+  try {
+    const ownerId = requestOwner(req);
+    if (!ownerId) return res.status(401).json({ error: 'Authentication required' });
+    res.set('Cache-Control', 'no-store');
+    res.json({ items: await getStreamingHistory(ownerId, req.query.limit) });
+  }
+  catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+app.put('/api/streaming-history/:sessionId', async (req, res) => {
+  try {
+    const ownerId = requestOwner(req);
+    if (!ownerId) return res.status(401).json({ error: 'Authentication required' });
+    const sessionId = String(req.params.sessionId || '').trim();
+    if (!sessionId) return res.status(400).json({ error: 'Streaming session ID is required' });
+    res.json({ item: await saveStreamingHistory({ ownerId, sessionId, ...req.body }) });
   }
   catch (error) { res.status(500).json({ error: error.message }); }
 });

@@ -18,6 +18,8 @@ services:
         value: rh_stream
       - key: MONGODB_PLAYBACK_COLLECTION
         value: playback_progress
+      - key: MONGODB_STREAMING_HISTORY_COLLECTION
+        value: streaming_history
       - key: MONGODB_XTREAM_COLLECTION
         value: xtream_sources
       - key: MONGODB_LIBRARY_CATEGORY_COLLECTION

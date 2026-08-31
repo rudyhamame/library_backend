@@ -16,7 +16,7 @@ import { MediaCapacityError, MediaJobManager, defaultMediaLimits, memoryPressure
 import { HlsStrategy, PlaybackStrategy, choosePlaybackStrategy, determineHlsStrategy, hlsCodecArgs } from './playback-strategy.js';
 import { getPlayback, getPlaybackHistory, savePlayback } from './playback-store.js';
 import { getFavorites, toggleFavorite } from './favorites-store.js';
-import { authorizeDeviceSession, changeAccountPassword, claimAutomaticPairing, createDeviceSession, getDeviceWeatherLocations, getLinkedDevices, getPairingInfo, getRokuDeviceSessionStatus, loginAccount, loginDeviceSession, recordDeviceHeartbeat, registerAccount, resolveDeviceToken, saveDeviceWeatherLocations, setupDeviceSession, unlinkAccountDevice } from './device-sessions.js';
+import { authorizeDeviceSession, changeAccountPassword, claimAutomaticPairing, createDeviceSession, getDeviceWeatherLocations, getLinkedDevices, getPairingInfo, getRokuDeviceSessionStatus, isRokuSessionLinked, loginAccount, loginDeviceSession, recordDeviceHeartbeat, registerAccount, resolveDeviceToken, saveDeviceWeatherLocations, setupDeviceSession, unlinkAccountDevice } from './device-sessions.js';
 import { createLibraryCategory, deleteLibraryCategory, getManagedLibrary, renameLibraryCategory, replaceLibraryCategoryItems } from './library-category-store.js';
 import { enforceLibraryOnly } from './library-route-policy.js';
 
@@ -457,15 +457,17 @@ app.use(express.json());
 // Verify the actual Roku credential, not merely process availability. This
 // keeps the Library backend indicator from showing green when the saved token
 // is expired, invalid, or signed with a different DEVICE_AUTH_SECRET.
-app.get('/api/roku/auth-health', (req, res) => {
-  const token = String(req.get('x-device-token') || req.query.deviceToken || '');
-  const session = resolveDeviceToken(token);
-  res.set('Cache-Control', 'no-store');
-  if (!session?.ownerId || !session?.deviceId || session.type !== 'roku') {
-    console.warn(`[Roku auth] health rejected token=${token ? 'present-invalid' : 'missing'}`);
-    return res.status(401).json({ ok: false, authenticated: false });
-  }
-  res.json({ ok: true, authenticated: true });
+app.get('/api/roku/auth-health', async (req, res) => {
+  try {
+    const token = String(req.get('x-device-token') || req.query.deviceToken || '');
+    const session = resolveDeviceToken(token);
+    res.set('Cache-Control', 'no-store');
+    if (!await isRokuSessionLinked(session)) {
+      console.warn(`[Roku auth] health rejected token=${token ? 'present-invalid' : 'missing'}`);
+      return res.status(401).json({ ok: false, authenticated: false });
+    }
+    res.json({ ok: true, authenticated: true });
+  } catch (error) { res.status(503).json({ ok: false, authenticated: false, error: error.message }); }
 });
 
 // The Roku displays a short-lived QR/device code. The phone signs up or signs
@@ -549,7 +551,7 @@ app.get('/api/account/devices', async (req, res) => {
 app.post('/api/roku/heartbeat', async (req, res) => {
   try {
     const session = resolveDeviceToken(String(req.get('x-device-token') || req.query.deviceToken || ''));
-    if (!session?.deviceId) return res.status(401).json({ error: 'Valid Roku device authorization is required' });
+    if (!await isRokuSessionLinked(session)) return res.status(401).json({ error: 'Valid linked Roku authorization is required' });
     await recordDeviceHeartbeat(session.deviceId, req.body?.streaming === true);
     res.json({ ok: true });
   } catch (error) { res.status(500).json({ error: error.message }); }
@@ -1169,6 +1171,22 @@ function parsePlaylistInput(body, existing = null) {
 app.get('/api/xtream/sources', async (req, res) => {
   try { res.json({ items: await getXtreamSources(requestOwner(req)) }); }
   catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+// Return catalog sizes without sending or persisting provider catalogs on the
+// mobile device. Provider rows exist only long enough to count them here.
+app.get('/api/xtream/catalog-counts', async (req, res) => {
+  try {
+    const sources = await getAllXtreamSources(requestOwner(req));
+    const counts = { series: 0, movie: 0, channel: 0 };
+    for (const source of sources) {
+      for (const kind of ['series', 'movie', 'channel']) {
+        const catalog = await getSourceCatalog(source, kind);
+        counts[kind] += Array.isArray(catalog) ? catalog.length : 0;
+      }
+    }
+    res.json({ counts });
+  } catch (error) { res.status(502).json({ error: error.message }); }
 });
 
 // Provider channel logos are often published over HTTP.  The Render frontend

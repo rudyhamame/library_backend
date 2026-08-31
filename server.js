@@ -1275,7 +1275,6 @@ app.get('/api/xtream/catalog', async (req, res) => {
     const enabled = new Set(source.enabledKeys || []);
     const query = String(req.query.q || '').trim().toLocaleLowerCase();
     const titleLanguage = String(req.query.titleLanguage || req.query.language || 'all').toUpperCase();
-    const pageSize = Math.min(200, Math.max(10, Number.parseInt(req.query.limit, 10) || 50));
     const requestedPage = Math.max(1, Number.parseInt(req.query.page, 10) || 1);
     const languagePriority = { AR: 0, EN: 1 };
     const languageSet = new Set();
@@ -1294,6 +1293,10 @@ app.get('/api/xtream/catalog', async (req, res) => {
     // title into the middle of the already-rendered list.
     filtered.sort((a, b) => String(a.title || '').trim().localeCompare(String(b.title || '').trim(), undefined, { numeric: true, sensitivity: 'base' })
       || String(a.key || '').localeCompare(String(b.key || '')));
+    const requestedLimit = String(req.query.limit || '').trim().toLowerCase();
+    const pageSize = requestedLimit === 'all'
+      ? Math.max(1, filtered.length)
+      : Math.min(200, Math.max(10, Number.parseInt(requestedLimit, 10) || 50));
     const languages = [...languageSet]
       .sort((a, b) => (languagePriority[a] ?? 10) - (languagePriority[b] ?? 10) || a.localeCompare(b));
     const pageCount = Math.max(1, Math.ceil(filtered.length / pageSize));

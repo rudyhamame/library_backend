@@ -395,12 +395,25 @@ function selectedXtreamItem(source, item) {
   };
 }
 
-async function getLibrarySelectedItems(ownerId = null) {
+async function getLibrarySelectedItems(ownerId = null, requestedKind = '') {
   if (!ownerId) return [];
   const sources = await getAllXtreamSources(ownerId);
-  const groups = sources.map(source => (Array.isArray(source.enabledItems) ? source.enabledItems : [])
-    .filter(item => item?.kind)
-    .map(item => selectedXtreamItem(source, item)));
+  const groups = await Promise.all(sources.map(async source => {
+    const enabledItems = (Array.isArray(source.enabledItems) ? source.enabledItems : [])
+      .filter(item => item?.kind && (!requestedKind || item.kind === requestedKind));
+    let catalogByKey = new Map();
+    if (requestedKind && enabledItems.some(item => !String(item.logo || '').trim())) {
+      try {
+        catalogByKey = new Map((await getSourceCatalog(source, requestedKind)).map(item => [String(item.key), item]));
+      } catch (error) {
+        console.warn(`[Xtream] Could not backfill ${requestedKind} logos for Roku: ${error.message}`);
+      }
+    }
+    return enabledItems.map(item => selectedXtreamItem(source, {
+      ...item,
+      logo: String(item.logo || catalogByKey.get(String(item.key))?.logo || ''),
+    }));
+  }));
   return groups.flat();
 }
 
@@ -408,7 +421,7 @@ async function getRokuSelectedItems(kind, ownerId = null) {
   // The managed Library is the category source of truth. Provider categories
   // only seed it; Roku never recomputes rails from the provider after that.
   if (!ownerId) return [];
-  const suppliedItems = await getLibrarySelectedItems(ownerId);
+  const suppliedItems = await getLibrarySelectedItems(ownerId, kind);
   const managed = await getManagedLibrary(ownerId, suppliedItems, kind);
   return managed.categories.flatMap(category => category.items.map(item => ({
     ...item,

@@ -85,3 +85,32 @@ export async function moveXtreamSources(fromOwnerId, toOwnerId) {
   if (!fromOwnerId || !toOwnerId || fromOwnerId === toOwnerId) return;
   await (await sourceCollection()).updateMany({ ownerId: fromOwnerId }, { $set: { ownerId: toOwnerId, updatedAt: new Date() } });
 }
+
+export async function deduplicateXtreamSources(ownerId) {
+  if (!ownerId) return;
+  const collection = await sourceCollection();
+  const sources = await collection.find({ ownerId }).sort({ updatedAt: -1 }).toArray();
+  const groups = new Map();
+  for (const source of sources) {
+    const signature = `${source.type || 'xtream'}\u0000${source.baseUrl || ''}\u0000${source.username || ''}`;
+    const group = groups.get(signature) || [];
+    group.push(source);
+    groups.set(signature, group);
+  }
+  for (const group of groups.values()) {
+    if (group.length < 2) continue;
+    const [keeper, ...duplicates] = group;
+    const enabled = new Map();
+    const archived = new Map();
+    for (const source of group) {
+      for (const item of source.enabledItems || []) enabled.set(item.key, item);
+      for (const item of source.archivedItems || []) archived.set(item.key, item);
+    }
+    for (const key of enabled.keys()) archived.delete(key);
+    await collection.updateOne({ _id: keeper._id, ownerId }, { $set: {
+      enabledKeys: [...enabled.keys()], enabledItems: [...enabled.values()],
+      archivedKeys: [...archived.keys()], archivedItems: [...archived.values()], updatedAt: new Date(),
+    } });
+    await collection.deleteMany({ _id: { $in: duplicates.map(source => source._id) }, ownerId });
+  }
+}

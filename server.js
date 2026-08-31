@@ -911,24 +911,32 @@ app.get('/api/roku/movies', async (req, res) => {
   }
   catch (error) { res.status(500).json({ error: error.message }); }
 });
-app.get('/api/playback/history', async (_, res) => {
+app.get('/api/playback/history', async (req, res) => {
   try {
+    const ownerId = requestOwner(req);
+    if (!ownerId) return res.status(401).json({ error: 'Authentication required' });
     res.set('Cache-Control', 'no-store');
-    const items = await getPlaybackHistory();
+    const items = await getPlaybackHistory(ownerId);
     res.json({ items: items.map((item) => ({ ...item, rokuTitle: rokuText(item.title) })) });
   }
   catch (error) { res.status(500).json({ error: error.message }); }
 });
 
-app.get('/api/favorites', async (_, res) => {
-  try { res.set('Cache-Control', 'no-store'); res.json({ items: await getFavorites() }); }
+app.get('/api/favorites', async (req, res) => {
+  try {
+    const ownerId = requestOwner(req);
+    if (!ownerId) return res.status(401).json({ error: 'Authentication required' });
+    res.set('Cache-Control', 'no-store'); res.json({ items: await getFavorites(ownerId) });
+  }
   catch (error) { res.status(500).json({ error: error.message }); }
 });
 async function toggleFavoriteRequest(req, res) {
   try {
     const id = String(req.query?.id || req.body?.id || '');
     if (!id) return res.status(400).json({ error: 'id is required' });
-    res.json(await toggleFavorite({ id, title: req.query?.title || req.body?.title, kind: req.query?.kind || req.body?.kind }));
+    const ownerId = requestOwner(req);
+    if (!ownerId) return res.status(401).json({ error: 'Authentication required' });
+    res.json(await toggleFavorite({ ownerId, id, title: req.query?.title || req.body?.title, kind: req.query?.kind || req.body?.kind }));
   } catch (error) { res.status(500).json({ error: error.message }); }
 }
 app.post('/api/favorites/toggle', toggleFavoriteRequest);
@@ -938,17 +946,21 @@ app.get('/api/playback/roku/get', async (req, res) => {
   try {
     const itemId = String(req.query?.itemId || '');
     if (!itemId) return res.status(400).json({ error: 'itemId is required' });
+    const ownerId = requestOwner(req);
+    if (!ownerId) return res.status(401).json({ error: 'Authentication required' });
     res.set('Cache-Control', 'no-store');
-    res.json({ item: await getPlayback(itemId) });
+    res.json({ item: await getPlayback(ownerId, itemId) });
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 app.put('/api/playback/roku/save', async (req, res) => {
   try {
     const itemId = String(req.query?.itemId || req.body?.itemId || '');
     if (!itemId) return res.status(400).json({ error: 'itemId is required' });
+    const ownerId = requestOwner(req);
+    if (!ownerId) return res.status(401).json({ error: 'Authentication required' });
     const completedValue = String(req.query?.completed ?? req.body?.completed ?? 'false').toLowerCase();
     const payload = {
-      itemId,
+      ownerId, itemId,
       title: String(req.query?.title ?? req.body?.title ?? ''),
       kind: String(req.query?.kind ?? req.body?.kind ?? ''),
       poster: String(req.query?.poster ?? req.body?.poster ?? ''),
@@ -964,19 +976,27 @@ app.put('/api/playback/roku/save', async (req, res) => {
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 app.get('/api/playback/:itemId', async (req, res) => {
-  try { res.json({ item: await getPlayback(String(req.params.itemId)) }); }
+  try {
+    const ownerId = requestOwner(req);
+    if (!ownerId) return res.status(401).json({ error: 'Authentication required' });
+    res.json({ item: await getPlayback(ownerId, String(req.params.itemId)) });
+  }
   catch (error) { res.status(500).json({ error: error.message }); }
 });
 app.post('/api/playback/get', async (req, res) => {
   try {
     const itemId = String(req.body?.itemId || '');
     if (!itemId) return res.status(400).json({ error: 'itemId is required' });
-    res.json({ item: await getPlayback(itemId) });
+    const ownerId = requestOwner(req);
+    if (!ownerId) return res.status(401).json({ error: 'Authentication required' });
+    res.json({ item: await getPlayback(ownerId, itemId) });
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 app.put('/api/playback/:itemId', async (req, res) => {
   try {
-    const item = await savePlayback({ itemId: String(req.params.itemId), ...req.body });
+    const ownerId = requestOwner(req);
+    if (!ownerId) return res.status(401).json({ error: 'Authentication required' });
+    const item = await savePlayback({ ownerId, itemId: String(req.params.itemId), ...req.body });
     res.json({ item });
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
@@ -984,7 +1004,9 @@ app.put('/api/playback', async (req, res) => {
   try {
     const itemId = String(req.body?.itemId || '');
     if (!itemId) return res.status(400).json({ error: 'itemId is required' });
-    res.json({ item: await savePlayback({ itemId, ...req.body }) });
+    const ownerId = requestOwner(req);
+    if (!ownerId) return res.status(401).json({ error: 'Authentication required' });
+    res.json({ item: await savePlayback({ ownerId, itemId, ...req.body }) });
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 app.get('/api/roku/weather-locations/search', async (req, res) => {

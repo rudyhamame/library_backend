@@ -12,8 +12,10 @@ deletions, and item membership are controlled through the Library UI and are
 the source of truth for Roku.
 
 This service intentionally uses the same MongoDB database, collection names,
-and `DEVICE_AUTH_SECRET` as the Roku Streamer backend. That keeps accounts and
-selected library content synchronized while preserving separate public roles.
+and `DEVICE_AUTH_SECRET` as the Roku Streamer backend. Every platform token is
+resolved to the same canonical account owner. Playlist sources and selections,
+categories, playback history and resume positions, favorites, and weather are
+account-scoped; linked device profiles retain pairing and presence state only.
 
 ## Local development
 

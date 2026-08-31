@@ -1,8 +1,10 @@
 import { createHash, createHmac, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 import { MongoClient, ObjectId } from 'mongodb';
-import { moveXtreamSources } from './xtream-store.js';
+import { deduplicateXtreamSources, moveXtreamSources } from './xtream-store.js';
 import { accountOwnerId, canonicalSessionOwner } from './account-library-owner.js';
 import { moveLibraryCategories } from './library-category-store.js';
+import { movePlaybackOwners } from './playback-store.js';
+import { moveFavoriteOwners } from './favorites-store.js';
 
 const sessions = new Map();
 const pairingTtlMs = 15 * 60 * 1000;
@@ -67,11 +69,22 @@ async function consolidateAccountLibrary(accountId) {
   const canonicalOwnerId = accountOwnerId(accountId);
   const linkedProfiles = await (await profiles()).find(
     { accountId: new ObjectId(accountId) },
-    { projection: { ownerId: 1 } },
+    { projection: { ownerId: 1, weatherLocations: 1 } },
   ).toArray();
+  const legacyWeather = linkedProfiles.find(profile => Array.isArray(profile.weatherLocations) && profile.weatherLocations.length)?.weatherLocations?.slice(0, 1);
+  const accountUpdate = { ownerId: canonicalOwnerId, dataVersion: 2, updatedAt: new Date() };
+  if (legacyWeather) accountUpdate.weatherLocations = legacyWeather;
+  await (await accounts()).updateOne({ _id: new ObjectId(accountId) }, { $set: accountUpdate });
+  await (await profiles()).updateMany(
+    { accountId: new ObjectId(accountId) },
+    { $set: { accountOwnerId: canonicalOwnerId, updatedAt: new Date() }, $unset: { weatherLocations: '' } },
+  );
   const priorOwnerIds = linkedProfiles.map(profile => profile.ownerId).filter(Boolean);
   for (const ownerId of priorOwnerIds) await moveXtreamSources(ownerId, canonicalOwnerId);
+  await deduplicateXtreamSources(canonicalOwnerId);
   await moveLibraryCategories(priorOwnerIds, canonicalOwnerId);
+  await movePlaybackOwners(priorOwnerIds, canonicalOwnerId);
+  await moveFavoriteOwners(priorOwnerIds, canonicalOwnerId);
   return canonicalOwnerId;
 }
 
@@ -267,6 +280,13 @@ function linkedProfileFilter(ownerId, accountId = '', deviceId = '') {
 
 export async function getDeviceWeatherLocations(ownerId, accountId = '', deviceId = '') {
   if (!ownerId) return [];
+  if (ObjectId.isValid(accountId)) {
+    const account = await (await accounts()).findOne(
+      { _id: new ObjectId(accountId) },
+      { projection: { weatherLocations: 1 } },
+    );
+    if (Array.isArray(account?.weatherLocations)) return account.weatherLocations.slice(0, 1);
+  }
   const profile = await (await profiles()).findOne(
     linkedProfileFilter(ownerId, accountId, deviceId),
     { projection: { weatherLocations: 1 } },
@@ -287,10 +307,15 @@ export async function saveDeviceWeatherLocations(ownerId, locations, accountId =
   if (weatherLocations.some(location => location && (!location.label || !Number.isFinite(location.latitude) || !Number.isFinite(location.longitude)))) {
     return { error: 'Select valid weather locations' };
   }
-  const result = await (await profiles()).updateMany(
-    linkedProfileFilter(ownerId, accountId, deviceId),
-    { $set: { weatherLocations, updatedAt: new Date() } },
-  );
+  const result = ObjectId.isValid(accountId)
+    ? await (await accounts()).updateOne(
+      { _id: new ObjectId(accountId) },
+      { $set: { weatherLocations, updatedAt: new Date() } },
+    )
+    : await (await profiles()).updateMany(
+      linkedProfileFilter(ownerId, accountId, deviceId),
+      { $set: { weatherLocations, updatedAt: new Date() } },
+    );
   return result.matchedCount ? { locations: weatherLocations } : { error: 'Linked Roku profile not found' };
 }
 

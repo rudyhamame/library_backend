@@ -153,7 +153,7 @@ export async function authorizeDeviceSession(code, token) {
   session.accountId = String(accountId);
   await deviceCollection.updateOne(
     { ownerId: session.ownerId },
-    { $setOnInsert: { ownerId: session.ownerId, deviceId: session.deviceId, createdAt: new Date() }, $set: { accountId, linkedAt: profile?.accountId ? undefined : new Date(), updatedAt: new Date() } },
+    { $setOnInsert: { ownerId: session.ownerId, deviceId: session.deviceId, createdAt: new Date() }, $set: { accountId, linkedAt: new Date(), updatedAt: new Date() } },
     { upsert: true },
   );
   if (!profile?.accountId) await moveXtreamSources(accountOwnerId(accountId), session.ownerId);

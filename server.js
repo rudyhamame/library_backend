@@ -398,22 +398,15 @@ function selectedXtreamItem(source, item) {
 async function getLibrarySelectedItems(ownerId = null, requestedKind = '') {
   if (!ownerId) return [];
   const sources = await getAllXtreamSources(ownerId);
-  const groups = await Promise.all(sources.map(async source => {
+  const groups = sources.map(source => {
     const enabledItems = (Array.isArray(source.enabledItems) ? source.enabledItems : [])
       .filter(item => item?.kind && (!requestedKind || item.kind === requestedKind));
-    let catalogByKey = new Map();
-    if (requestedKind && enabledItems.some(item => !String(item.logo || '').trim())) {
-      try {
-        catalogByKey = new Map((await getSourceCatalog(source, requestedKind)).map(item => [String(item.key), item]));
-      } catch (error) {
-        console.warn(`[Xtream] Could not backfill ${requestedKind} logos for Roku: ${error.message}`);
-      }
-    }
-    return enabledItems.map(item => selectedXtreamItem(source, {
-      ...item,
-      logo: String(item.logo || catalogByKey.get(String(item.key))?.logo || ''),
-    }));
-  }));
+    // Roku catalog reads must only use the Library selection already stored in
+    // MongoDB. Fetching a provider's entire catalog here to backfill one absent
+    // logo made every page wait on an unrelated upstream request. Logo
+    // enrichment belongs to the source import/update path, never this hot path.
+    return enabledItems.map(item => selectedXtreamItem(source, item));
+  });
   return groups.flat();
 }
 
@@ -859,28 +852,16 @@ app.get('/api/roku/series/detail', async (req, res) => {
 async function buildXtreamMoviesPayload({ limit, selected } = {}) {
   let movies = (selected || await getRokuSelectedItems('movie')).slice().sort((a, b) => Number(b.added || 0) - Number(a.added || 0));
   if (Number.isFinite(limit) && limit > 0) movies = movies.slice(0, limit);
-  // Many Xtream VOD catalogs omit duration from get_vod_streams. Ask for
-  // detailed metadata only for the small, explicitly-selected Roku library.
-  let cursor = 0;
-  const results = new Array(movies.length);
-  async function worker() {
-    while (cursor < movies.length) {
-      const index = cursor++;
-      const item = movies[index];
-      let duration = displayDuration(item.duration);
-      if (!duration) {
-        try {
-          const source = await getXtreamSource(item.sourceId);
-          if (source) duration = displayDuration((await getXtreamMovieInfo(source, item.id)).duration);
-        } catch (error) {
-          console.warn(`[Xtream] Could not read movie duration for ${item.id}: ${error.message}`);
-        }
-      }
-      results[index] = { ...directXtreamItem(item), duration, kind: 'movie', contentKind: 'movie', rokuEnabled: true };
-    }
-  }
-  await Promise.all(Array.from({ length: Math.min(3, movies.length) }, worker));
-  return results;
+  // Do not call get_vod_info while building a Roku rail. It opens one provider
+  // request per movie and makes a three-item page take many seconds. Roku learns
+  // the authoritative duration from the Video node once playback starts.
+  return movies.map(item => ({
+    ...directXtreamItem(item),
+    duration: displayDuration(item.duration),
+    kind: 'movie',
+    contentKind: 'movie',
+    rokuEnabled: true,
+  }));
 }
 
 function buildXtreamChannelsPayload(items) {
@@ -893,6 +874,7 @@ function buildXtreamChannelsPayload(items) {
 }
 
 app.get('/api/roku/movies', async (req, res) => {
+  const startedAt = Date.now();
   try {
     const pageInfo = rokuPage(req, rokuMoviePageLimit);
     // Roku movie pages are deliberately fixed at ten items per request.
@@ -903,6 +885,9 @@ app.get('/api/roku/movies', async (req, res) => {
       .sort((a, b) => Number(b.added || 0) - Number(a.added || 0));
     const sourcePage = selected.slice(pageInfo.offset, pageInfo.offset + pageInfo.limit);
     const items = await buildXtreamMoviesPayload({ selected: sourcePage });
+    const durationMs = Date.now() - startedAt;
+    res.set('Server-Timing', `roku_movies;dur=${durationMs}`);
+    console.log(`[Roku API] movies page=${pageInfo.page} items=${items.length} total=${selected.length} durationMs=${durationMs}`);
     res.json({
       items,
       page: pageInfo.page,

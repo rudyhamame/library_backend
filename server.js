@@ -1194,7 +1194,11 @@ app.get('/api/xtream/logo', async (req, res) => {
     let response;
     for (let redirects = 0; redirects <= 3; redirects += 1) {
       validateLogoTarget(target);
-      response = await fetch(target, { signal: controller.signal, redirect: 'manual' });
+      response = await fetch(target, {
+        signal: controller.signal,
+        redirect: 'manual',
+        headers: { Accept: 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8', 'User-Agent': 'Mozilla/5.0 RH-Library/1.0' },
+      });
       if (![301, 302, 303, 307, 308].includes(response.status)) break;
       const location = response.headers.get('location');
       await response.body?.cancel();
@@ -1203,7 +1207,7 @@ app.get('/api/xtream/logo', async (req, res) => {
     }
     if (!response.ok) return res.sendStatus(response.status === 404 ? 404 : 502);
     const contentType = response.headers.get('content-type') || 'image/jpeg';
-    if (!contentType.toLowerCase().startsWith('image/')) return res.status(415).send('Logo is not an image');
+    if (!contentType.toLowerCase().startsWith('image/') && !contentType.toLowerCase().startsWith('application/octet-stream')) return res.status(415).send('Logo is not an image');
     const maxBytes = 5 * 1024 * 1024;
     const contentLength = Number(response.headers.get('content-length') || 0);
     if (contentLength > maxBytes) { await response.body?.cancel(); return res.status(413).send('Logo is too large'); }
@@ -1214,7 +1218,7 @@ app.get('/api/xtream/logo', async (req, res) => {
         callback(bytes <= maxBytes ? null : new Error('Logo is too large'), chunk);
       },
     });
-    res.set('Content-Type', contentType.split(';', 1)[0]);
+    res.set('Content-Type', contentType.toLowerCase().startsWith('application/octet-stream') ? 'image/jpeg' : contentType.split(';', 1)[0]);
     res.set('Cache-Control', 'public, max-age=86400, s-maxage=86400');
     if (!response.body) return res.end();
     await pipeline(Readable.fromWeb(response.body), limiter, res);

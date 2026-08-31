@@ -5,6 +5,7 @@ import { accountOwnerId, canonicalSessionOwner } from './account-library-owner.j
 import { moveLibraryCategories } from './library-category-store.js';
 import { movePlaybackOwners } from './playback-store.js';
 import { moveFavoriteOwners } from './favorites-store.js';
+import { moveStreamingHistoryOwners } from './streaming-history-store.js';
 
 const sessions = new Map();
 const pairingTtlMs = 15 * 60 * 1000;
@@ -84,6 +85,7 @@ async function consolidateAccountLibrary(accountId) {
   await deduplicateXtreamSources(canonicalOwnerId);
   await moveLibraryCategories(priorOwnerIds, canonicalOwnerId);
   await movePlaybackOwners(priorOwnerIds, canonicalOwnerId);
+  await moveStreamingHistoryOwners(priorOwnerIds, canonicalOwnerId);
   await moveFavoriteOwners(priorOwnerIds, canonicalOwnerId);
   return canonicalOwnerId;
 }

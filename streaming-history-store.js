@@ -64,3 +64,12 @@ export async function getStreamingHistory(ownerId, limit = 100) {
   return (await (await streamingHistoryCollection()).find({ ownerId: String(ownerId) }).sort({ startedAt: -1 }).limit(safeLimit).toArray())
     .map(({ _id, ownerId: _ownerId, ...item }) => item);
 }
+
+export async function moveStreamingHistoryOwners(fromOwnerIds, toOwnerId) {
+  const owners = [...new Set((Array.isArray(fromOwnerIds) ? fromOwnerIds : [fromOwnerIds]).map(String).filter(Boolean))];
+  if (!toOwnerId || owners.length === 0) return;
+  await (await streamingHistoryCollection()).updateMany(
+    { ownerId: { $in: owners } },
+    { $set: { ownerId: String(toOwnerId), updatedAt: new Date() } },
+  );
+}

@@ -295,6 +295,15 @@ export async function unlinkAccountDevice(accountId, deviceId) {
   return result.modifiedCount ? { ok: true } : { error: 'Linked Roku device not found' };
 }
 
+export async function isRokuSessionLinked(session) {
+  if (session?.type !== 'roku' || !session?.ownerId || !session?.deviceId || !ObjectId.isValid(session?.accountId)) return false;
+  const profile = await (await profiles()).findOne(
+    { ownerId: session.ownerId, deviceId: String(session.deviceId), accountId: new ObjectId(session.accountId) },
+    { projection: { _id: 1 } },
+  );
+  return Boolean(profile);
+}
+
 export async function loginAccount(email, password, deviceId = '') {
   const normalizedEmail = normalizeEmail(email);
   if (!validEmail(normalizedEmail) || !validPassword(password)) return { error: 'Incorrect email or password' };

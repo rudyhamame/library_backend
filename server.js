@@ -24,7 +24,6 @@ const app = express();
 app.use(enforceLibraryOnly);
 const port = process.env.PORT || 8787;
 const dashboardCache = new Map();
-const previewCache = new Map();
 const arabicText = /[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]/;
 const rokuText = (value) => arabicText.test(String(value || '')) ? shapeArabicForRoku(value) : String(value || '');
 // Roku cannot reliably receive a JSON document containing a provider's entire
@@ -43,13 +42,9 @@ const mediaLimits = defaultMediaLimits();
 const debugMediaLogging = String(process.env.DEBUG_MEDIA_LOGGING || 'false').toLowerCase() === 'true';
 const mediaJobs = new MediaJobManager({ limits: mediaLimits, debug: debugMediaLogging });
 const hlsMaxSegments = Math.max(12, Number.parseInt(process.env.HLS_MAX_SEGMENTS || '36', 10) || 36);
-const previewCacheMaxEntries = Math.max(2, Number.parseInt(process.env.PREVIEW_CACHE_MAX_ENTRIES || '12', 10) || 12);
-const previewCacheMaxBytes = Math.max(2, Number.parseInt(process.env.PREVIEW_CACHE_MAX_MB || '12', 10) || 12) * 1024 * 1024;
-const previewCacheTtlMs = Math.max(60_000, Number.parseInt(process.env.PREVIEW_CACHE_TTL_MS || '3600000', 10) || 3_600_000);
 const mediaStreamIdleTimeoutMs = Math.max(10_000, Number.parseInt(process.env.MEDIA_STREAM_IDLE_TIMEOUT_MS || '45000', 10) || 45_000);
 const libraryRevisions = new Map();
 const libraryRevisionWaiters = new Map();
-let previewCacheBytes = 0;
 let activeDirectStreams = 0;
 let shuttingDown = false;
 let mediaRequestSequence = 0;
@@ -190,37 +185,6 @@ function terminateChild(child, graceMs = 1_500) {
     }, graceMs);
     forceTimer.unref?.();
   });
-}
-
-function evictPreviewCache(now = Date.now(), aggressive = false) {
-  for (const [key, entry] of previewCache) {
-    if (entry.expires > now) continue;
-    previewCache.delete(key);
-    previewCacheBytes -= entry.bytes;
-  }
-  while (previewCache.size > previewCacheMaxEntries || previewCacheBytes > previewCacheMaxBytes) {
-    const key = previewCache.keys().next().value;
-    const entry = previewCache.get(key);
-    previewCache.delete(key);
-    previewCacheBytes -= entry?.bytes || 0;
-  }
-  if (aggressive) {
-    while (previewCache.size > 2) {
-      const key = previewCache.keys().next().value;
-      const entry = previewCache.get(key);
-      previewCache.delete(key);
-      previewCacheBytes -= entry?.bytes || 0;
-    }
-  }
-}
-
-function cachePreview(key, frame) {
-  const prior = previewCache.get(key);
-  if (prior) previewCacheBytes -= prior.bytes;
-  previewCache.delete(key);
-  previewCache.set(key, { frame, bytes: frame.length, expires: Date.now() + previewCacheTtlMs });
-  previewCacheBytes += frame.length;
-  evictPreviewCache();
 }
 
 async function hlsDiskUsageBytes() {
@@ -628,8 +592,6 @@ async function mediaHealthSnapshot() {
       xtreamRequestsInFlight: xtreamCacheStats().inFlight,
       m3u: m3uCacheStats().entries,
       m3uRequestsInFlight: m3uCacheStats().inFlight,
-      previews: previewCache.size,
-      previewMB: Number((previewCacheBytes / 1024 / 1024).toFixed(1)),
       catalogRequestsInFlight: xtreamItemsInFlight.size,
     },
   };
@@ -916,99 +878,6 @@ app.get('/api/playback/history', async (_, res) => {
   catch (error) { res.status(500).json({ error: error.message }); }
 });
 
-function parseXtreamPlaybackItem(itemId) {
-  const parsed = new URL(String(itemId || ''), 'http://rh-stream.internal');
-  const match = parsed.pathname.match(/^\/api\/xtream\/(?:play|roku)\/([^/]+)\/(movie|series)\/([^/]+)$/);
-  if (!match) return null;
-  return {
-    sourceId: decodeURIComponent(match[1]),
-    kind: match[2],
-    id: decodeURIComponent(match[3]),
-    extension: parsed.searchParams.get('ext') || 'mp4',
-  };
-}
-
-async function capturePreview(inputUrl, position, key, identity) {
-  const { job } = await mediaJobs.getOrCreate({
-    key,
-    mode: choosePlaybackStrategy({ purpose: 'preview' }) === PlaybackStrategy.TRANSCODE ? 'transcode' : 'remux',
-    persistent: false,
-    // Preview captures are short-lived support work and must not consume the
-    // device's one active playback slot while the user is scrubbing.
-    ...identity, userId: '', deviceId: '',
-  }, async () => {
-    const args = [
-      '-hide_banner', '-loglevel', 'error',
-      '-ss', String(Math.max(0, position)), '-i', inputUrl,
-      '-an', '-sn', '-frames:v', '1',
-      '-vf', 'scale=640:-2:force_original_aspect_ratio=decrease',
-      '-q:v', '3', '-f', 'image2pipe', '-vcodec', 'mjpeg', 'pipe:1',
-    ];
-    const child = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'] });
-    const created = { child, error: '', stop: () => terminateChild(child) };
-    created.result = new Promise((resolve, reject) => {
-      const chunks = [];
-      let total = 0;
-      const timeout = setTimeout(() => child.kill('SIGKILL'), 25_000);
-      timeout.unref?.();
-      child.stdout.on('data', chunk => {
-        total += chunk.length;
-        if (total <= 5 * 1024 * 1024) chunks.push(chunk);
-        else child.kill('SIGKILL');
-      });
-      child.stderr.on('data', chunk => { created.error = appendTail(created.error, chunk); });
-      child.once('error', reject);
-      child.once('close', code => {
-        clearTimeout(timeout);
-        created.finished = true;
-        if (code === 0 && total > 0 && total <= 5 * 1024 * 1024) resolve(Buffer.concat(chunks));
-        else reject(new Error(created.error.trim().slice(-300) || `ffmpeg exited with ${code}`));
-      });
-    });
-    return created;
-  });
-  try { return await job.result; }
-  finally { await mediaJobs.remove(key, 'preview-complete'); }
-}
-
-app.get('/api/playback/preview', async (req, res) => {
-  let previewJobKey = '';
-  const cancelPreview = () => { if (previewJobKey) mediaJobs.remove(previewJobKey, 'client-disconnect').catch(() => {}); };
-  res.once('close', cancelPreview);
-  try {
-    const itemId = String(req.query?.itemId || '');
-    const requestedSourceId = String(req.query?.sourceId || '');
-    const requestedKind = String(req.query?.kind || '');
-    const requestedId = String(req.query?.id || '');
-    let playback = null;
-    let target = requestedSourceId && ['movie', 'series'].includes(requestedKind) && requestedId
-      ? { sourceId: requestedSourceId, kind: requestedKind, id: requestedId, extension: String(req.query?.ext || 'mp4') }
-      : null;
-    if (!target) {
-      if (!itemId) return res.status(400).json({ error: 'itemId or playback target is required' });
-      playback = await getPlayback(itemId);
-      if (!playback) return res.sendStatus(404);
-      target = parseXtreamPlaybackItem(playback.url || itemId);
-    }
-    if (!target) return res.status(404).json({ error: 'Preview is unavailable for this item' });
-    const source = await getXtreamSource(target.sourceId, requestOwner(req));
-    if (!source) return res.sendStatus(404);
-    const position = Math.max(0, Math.floor(Number(req.query?.position ?? playback?.position) || 0));
-    const cacheKey = `${target.sourceId}:${target.kind}:${target.id}:${target.extension}:${position}`;
-    evictPreviewCache();
-    let frame = previewCache.get(cacheKey)?.frame;
-    if (!frame) {
-      previewJobKey = `preview:${createHash('sha256').update(cacheKey).digest('hex').slice(0, 24)}`;
-      frame = await capturePreview(await sourceProviderUrl(source, target.kind, target.id, target.extension), position, previewJobKey, mediaIdentity(req));
-      cachePreview(cacheKey, frame);
-    }
-    res.set({ 'Content-Type': 'image/jpeg', 'Cache-Control': 'private, max-age=86400', 'Content-Length': String(frame.length) });
-    res.end(frame);
-  } catch (error) {
-    console.warn(`[Playback preview] ${error.message}`);
-    if (!res.headersSent && !res.destroyed && !capacityResponse(res, error)) res.status(502).json({ error: 'Could not capture the saved playback frame' });
-  } finally { res.off('close', cancelPreview); }
-});
 app.get('/api/favorites', async (_, res) => {
   try { res.set('Cache-Control', 'no-store'); res.json({ items: await getFavorites() }); }
   catch (error) { res.status(500).json({ error: error.message }); }
@@ -1743,7 +1612,7 @@ setInterval(async () => {
   mediaHousekeepingRunning = true;
   try {
   const pressure = memoryPressure(mediaLimits);
-  if (pressure.soft) { evictXtreamCache(Date.now(), true); evictM3uCache(Date.now(), true); evictPreviewCache(Date.now(), true); }
+  if (pressure.soft) { evictXtreamCache(Date.now(), true); evictM3uCache(Date.now(), true); }
   await mediaJobs.sweep({ aggressive: pressure.hard });
   await Promise.allSettled([...mediaJobs.values()].filter(job => job.persistent).map(enforceHlsFileBound));
   } finally { mediaHousekeepingRunning = false; }

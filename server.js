@@ -1194,6 +1194,12 @@ app.get('/api/xtream/logo', async (req, res) => {
     if (req.query.roku === '1' && target.hostname.toLowerCase() === 'image.tmdb.org') {
       target.pathname = target.pathname.replace(/^\/t\/p\/[^/]+\//, '/t/p/w342/');
     }
+    if (req.query.roku === '1' && /^i\d+\.wp\.com$/i.test(target.hostname)) {
+      // Jetpack's image CDN already accepts a fit transform. Override large
+      // publisher dimensions for Roku cards instead of forwarding 819x1024+
+      // artwork to a 1280x720 SceneGraph.
+      target.searchParams.set('fit', '342,513');
+    }
     let response;
     for (let redirects = 0; redirects <= 3; redirects += 1) {
       validateLogoTarget(target);

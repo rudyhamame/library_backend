@@ -14,8 +14,7 @@ import { evictXtreamCache, getXtreamCatalog, getXtreamCategories, getXtreamMovie
 import { evictM3uCache, getM3uCatalog, getM3uCategories, m3uCacheStats, m3uProviderUrl, validateM3uConnection } from './m3u.js';
 import { MediaCapacityError, MediaJobManager, defaultMediaLimits, memoryPressure } from './media-job-manager.js';
 import { HlsStrategy, PlaybackStrategy, choosePlaybackStrategy, determineHlsStrategy, hlsCodecArgs } from './playback-strategy.js';
-import { getPlayback, getPlaybackHistory, savePlayback } from './playback-store.js';
-import { getStreamingHistory, saveStreamingHistory } from './streaming-history-store.js';
+import { getStreamingContinueWatching, getStreamingHistory, getStreamingResume, saveStreamingHistory } from './streaming-history-store.js';
 import { getFavorites, toggleFavorite } from './favorites-store.js';
 import { authorizeDeviceSession, changeAccountPassword, claimAutomaticPairing, createDeviceSession, getDeviceWeatherLocations, getLinkedDevices, getPairingInfo, getRokuDeviceSessionStatus, isRokuSessionLinked, loginAccount, loginDeviceSession, recordDeviceHeartbeat, registerAccount, resolveDeviceToken, saveDeviceWeatherLocations, setupDeviceSession, unlinkAccountDevice } from './device-sessions.js';
 import { createLibraryCategory, deleteLibraryCategory, getManagedLibrary, renameLibraryCategory, replaceLibraryCategoryItems } from './library-category-store.js';
@@ -432,7 +431,7 @@ function directXtreamItem(item) {
 }
 
 function rokuXtreamStreamFormat(extension = '') {
-  return ['mp4', 'm4v'].includes(String(extension).toLowerCase()) ? 'mp4' : 'hls';
+  return ['mp4', 'm4v', 'mov'].includes(String(extension).toLowerCase()) ? 'mp4' : 'hls';
 }
 
 function rokuXtreamPlaybackPath(sourceId, kind, id, extension = '') {
@@ -930,17 +929,6 @@ app.get('/api/roku/movies', async (req, res) => {
   }
   catch (error) { res.status(500).json({ error: error.message }); }
 });
-app.get('/api/playback/history', async (req, res) => {
-  try {
-    const ownerId = requestOwner(req);
-    if (!ownerId) return res.status(401).json({ error: 'Authentication required' });
-    res.set('Cache-Control', 'no-store');
-    const items = await getPlaybackHistory(ownerId);
-    res.json({ items: items.map((item) => ({ ...item, rokuTitle: rokuText(item.title) })) });
-  }
-  catch (error) { res.status(500).json({ error: error.message }); }
-});
-
 app.get('/api/streaming-history', async (req, res) => {
   try {
     const ownerId = requestOwner(req);
@@ -951,13 +939,44 @@ app.get('/api/streaming-history', async (req, res) => {
   catch (error) { res.status(500).json({ error: error.message }); }
 });
 
+app.get('/api/streaming-history/continue-watching', async (req, res) => {
+  try {
+    const ownerId = requestOwner(req);
+    if (!ownerId) return res.status(401).json({ error: 'Authentication required' });
+    res.set('Cache-Control', 'no-store');
+    res.json({ items: await getStreamingContinueWatching(ownerId, req.query.limit) });
+  }
+  catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+app.get('/api/streaming-history/resume', async (req, res) => {
+  try {
+    const ownerId = requestOwner(req);
+    if (!ownerId) return res.status(401).json({ error: 'Authentication required' });
+    res.set('Cache-Control', 'no-store');
+    const item = await getStreamingResume(ownerId, req.query);
+    res.json({ item });
+  }
+  catch (error) { res.status(500).json({ error: error.message }); }
+});
+
 app.put('/api/streaming-history/:sessionId', async (req, res) => {
   try {
     const ownerId = requestOwner(req);
     if (!ownerId) return res.status(401).json({ error: 'Authentication required' });
     const sessionId = String(req.params.sessionId || '').trim();
     if (!sessionId) return res.status(400).json({ error: 'Streaming session ID is required' });
-    res.json({ item: await saveStreamingHistory({ ownerId, sessionId, ...req.body }) });
+    res.set('Cache-Control', 'no-store');
+    const update = { ...req.query, ...req.body };
+    for (const field of ['startPosition', 'endPosition', 'mediaDuration', 'streamingDuration']) {
+      const secondsField = `${field}Seconds`;
+      const millisecondsField = `${field}Ms`;
+      if (update[millisecondsField] == null && update[secondsField] != null) {
+        update[millisecondsField] = Math.max(0, Number(update[secondsField]) || 0) * 1000;
+      }
+    }
+    if ((update.ended === true || String(update.ended).toLowerCase() === 'true') && !update.endedAt) update.endedAt = new Date();
+    res.json({ item: await saveStreamingHistory({ ownerId, sessionId, ...update }) });
   }
   catch (error) { res.status(500).json({ error: error.message }); }
 });
@@ -982,73 +1001,6 @@ async function toggleFavoriteRequest(req, res) {
 app.post('/api/favorites/toggle', toggleFavoriteRequest);
 app.put('/api/favorites/toggle', toggleFavoriteRequest);
 app.get('/api/favorites/toggle', toggleFavoriteRequest);
-app.get('/api/playback/roku/get', async (req, res) => {
-  try {
-    const itemId = String(req.query?.itemId || '');
-    if (!itemId) return res.status(400).json({ error: 'itemId is required' });
-    const ownerId = requestOwner(req);
-    if (!ownerId) return res.status(401).json({ error: 'Authentication required' });
-    res.set('Cache-Control', 'no-store');
-    res.json({ item: await getPlayback(ownerId, itemId) });
-  } catch (error) { res.status(500).json({ error: error.message }); }
-});
-app.put('/api/playback/roku/save', async (req, res) => {
-  try {
-    const itemId = String(req.query?.itemId || req.body?.itemId || '');
-    if (!itemId) return res.status(400).json({ error: 'itemId is required' });
-    const ownerId = requestOwner(req);
-    if (!ownerId) return res.status(401).json({ error: 'Authentication required' });
-    const completedValue = String(req.query?.completed ?? req.body?.completed ?? 'false').toLowerCase();
-    const payload = {
-      ownerId, itemId,
-      title: String(req.query?.title ?? req.body?.title ?? ''),
-      kind: String(req.query?.kind ?? req.body?.kind ?? ''),
-      poster: String(req.query?.poster ?? req.body?.poster ?? ''),
-      source: String(req.query?.source ?? req.body?.source ?? 'roku'),
-      url: itemId,
-      position: Number(req.query?.position ?? req.body?.position ?? 0),
-      duration: Number(req.query?.duration ?? req.body?.duration ?? 0),
-      completed: completedValue === 'true' || completedValue === '1',
-    };
-    const item = await savePlayback(payload);
-    console.log(`[Roku playback] saved ${redactSensitiveUrl(itemId)} at ${item.position}s`);
-    res.json({ item });
-  } catch (error) { res.status(500).json({ error: error.message }); }
-});
-app.get('/api/playback/:itemId', async (req, res) => {
-  try {
-    const ownerId = requestOwner(req);
-    if (!ownerId) return res.status(401).json({ error: 'Authentication required' });
-    res.json({ item: await getPlayback(ownerId, String(req.params.itemId)) });
-  }
-  catch (error) { res.status(500).json({ error: error.message }); }
-});
-app.post('/api/playback/get', async (req, res) => {
-  try {
-    const itemId = String(req.body?.itemId || '');
-    if (!itemId) return res.status(400).json({ error: 'itemId is required' });
-    const ownerId = requestOwner(req);
-    if (!ownerId) return res.status(401).json({ error: 'Authentication required' });
-    res.json({ item: await getPlayback(ownerId, itemId) });
-  } catch (error) { res.status(500).json({ error: error.message }); }
-});
-app.put('/api/playback/:itemId', async (req, res) => {
-  try {
-    const ownerId = requestOwner(req);
-    if (!ownerId) return res.status(401).json({ error: 'Authentication required' });
-    const item = await savePlayback({ ownerId, itemId: String(req.params.itemId), ...req.body });
-    res.json({ item });
-  } catch (error) { res.status(500).json({ error: error.message }); }
-});
-app.put('/api/playback', async (req, res) => {
-  try {
-    const itemId = String(req.body?.itemId || '');
-    if (!itemId) return res.status(400).json({ error: 'itemId is required' });
-    const ownerId = requestOwner(req);
-    if (!ownerId) return res.status(401).json({ error: 'Authentication required' });
-    res.json({ item: await savePlayback({ ownerId, itemId, ...req.body }) });
-  } catch (error) { res.status(500).json({ error: error.message }); }
-});
 app.get('/api/roku/weather-locations/search', async (req, res) => {
   try {
     if (!requestOwner(req)) return res.status(401).json({ error: 'Sign in to search weather locations' });

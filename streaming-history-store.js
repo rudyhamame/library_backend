@@ -27,7 +27,7 @@ const streamingKind = (value) => {
   return 'movie';
 };
 
-export async function saveStreamingHistory({ ownerId, sessionId, itemId, title, kind, sourceId, startedAt, endedAt, startPositionMs, endPositionMs, streamingDurationMs }) {
+export async function saveStreamingHistory({ ownerId, sessionId, itemId, title, kind, sourceId, extension, poster, startedAt, endedAt, startPositionMs, endPositionMs, streamingDurationMs, mediaDurationMs, completed }) {
   if (!ownerId || !sessionId) throw new Error('Account owner and streaming session ID are required');
   const now = new Date();
   const startDate = startedAt ? new Date(startedAt) : now;
@@ -37,16 +37,24 @@ export async function saveStreamingHistory({ ownerId, sessionId, itemId, title, 
     title: String(title || ''),
     kind: streamingKind(kind),
     sourceId: String(sourceId || ''),
+    extension: String(extension || '').replace(/[^a-z0-9]/gi, '').toLowerCase(),
+    poster: String(poster || ''),
     startPositionMs: milliseconds(startPositionMs),
     endPositionMs: milliseconds(endPositionMs),
     streamingDurationMs: milliseconds(streamingDurationMs),
-    startedAt: Number.isNaN(startDate.getTime()) ? now : startDate,
+    mediaDurationMs: milliseconds(mediaDurationMs),
     updatedAt: now,
   };
+  const isCompleted = completed === true || String(completed).toLowerCase() === 'true';
+  if (isCompleted) update.completed = true;
+  if (startedAt) update.startedAt = Number.isNaN(startDate.getTime()) ? now : startDate;
   if (endDate && !Number.isNaN(endDate.getTime())) update.endedAt = endDate;
+  const insert = { ownerId: String(ownerId), sessionId: String(sessionId), createdAt: now };
+  if (!isCompleted) insert.completed = false;
+  if (!startedAt) insert.startedAt = now;
   await (await streamingHistoryCollection()).updateOne(
     { ownerId: String(ownerId), sessionId: String(sessionId) },
-    { $set: update, $setOnInsert: { ownerId: String(ownerId), sessionId: String(sessionId), createdAt: now } },
+    { $set: update, $setOnInsert: insert },
     { upsert: true },
   );
   return getStreamingSession(ownerId, sessionId);
@@ -63,6 +71,40 @@ export async function getStreamingHistory(ownerId, limit = 100) {
   const safeLimit = Math.min(500, Math.max(1, Number.parseInt(limit, 10) || 100));
   return (await (await streamingHistoryCollection()).find({ ownerId: String(ownerId) }).sort({ startedAt: -1 }).limit(safeLimit).toArray())
     .map(({ _id, ownerId: _ownerId, ...item }) => item);
+}
+
+export async function getStreamingResume(ownerId, { sourceId, itemId, kind }) {
+  if (!ownerId || !sourceId || !itemId) return null;
+  const item = await (await streamingHistoryCollection()).findOne(
+    {
+      ownerId: String(ownerId),
+      sourceId: String(sourceId),
+      itemId: String(itemId),
+      kind: streamingKind(kind),
+    },
+    { sort: { startedAt: -1, updatedAt: -1 } },
+  );
+  if (!item) return null;
+  const { _id, ownerId: _ownerId, ...publicItem } = item;
+  return publicItem;
+}
+
+export async function getStreamingContinueWatching(ownerId, limit = 20) {
+  const safeLimit = Math.min(100, Math.max(1, Number.parseInt(limit, 10) || 20));
+  const history = await getStreamingHistory(ownerId, 500);
+  const latestByItem = new Map();
+  for (const item of history) {
+    if (!item.sourceId || !item.itemId || item.kind === 'channel') continue;
+    const key = `${item.sourceId}:${item.kind}:${item.itemId}`;
+    if (!latestByItem.has(key)) latestByItem.set(key, item);
+  }
+  return [...latestByItem.values()]
+    .filter((item) => {
+      if (item.completed === true || milliseconds(item.endPositionMs) <= 5000) return false;
+      const duration = milliseconds(item.mediaDurationMs);
+      return duration <= 0 || milliseconds(item.endPositionMs) < Math.max(duration - 30000, duration * 0.95);
+    })
+    .slice(0, safeLimit);
 }
 
 export async function moveStreamingHistoryOwners(fromOwnerIds, toOwnerId) {

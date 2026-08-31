@@ -1,14 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { HlsStrategy, PlaybackStrategy, choosePlaybackStrategy, determineHlsStrategy } from '../playback-strategy.js';
+import { HlsStrategy, choosePlaybackStrategy, determineHlsStrategy } from '../playback-strategy.js';
 
 test('keeps all movie and series playback on HLS', () => {
   assert.equal(choosePlaybackStrategy({ purpose: 'direct-proxy' }), HlsStrategy.REMUX);
 });
 
-test('uses remux for compatibility HLS and transcode only for previews', () => {
+test('uses remux for compatibility HLS', () => {
   assert.equal(choosePlaybackStrategy({ purpose: 'roku-hls' }), HlsStrategy.REMUX);
-  assert.equal(choosePlaybackStrategy({ purpose: 'preview' }), PlaybackStrategy.TRANSCODE);
 });
 
 test('transcodes only the incompatible stream when metadata is available', () => {

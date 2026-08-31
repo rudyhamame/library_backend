@@ -26,6 +26,5 @@ export function hlsCodecArgs(decision) {
 }
 
 export function choosePlaybackStrategy({ purpose } = {}) {
-  if (purpose === 'preview') return PlaybackStrategy.TRANSCODE;
   return HlsStrategy.REMUX;
 }

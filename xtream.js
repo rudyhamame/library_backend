@@ -100,6 +100,12 @@ export async function getXtreamCategories(source, kind) {
   return request(source, { action }, rows => (Array.isArray(rows) ? rows : []).map(row => ({ id: stringId(row.category_id), name: String(row.category_name || 'Other') })));
 }
 
+// Warm the catalog/category cache without making the caller wait for the
+// provider's complete response. A later catalog request reuses these results.
+export function warmXtreamCatalog(source, kind) {
+  return Promise.all([getXtreamCatalog(source, kind), getXtreamCategories(source, kind)]).catch(() => null);
+}
+
 export async function getXtreamSeriesEpisodes(source, seriesId) {
   const data = await request(source, { action: 'get_series_info', series_id: seriesId });
   const seasons = new Map((Array.isArray(data?.seasons) ? data.seasons : []).map(season => [String(season.season_number), season]));

@@ -10,7 +10,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { shapeArabicForRoku } from './arabic-shaper.js';
 import { createXtreamSource, deleteXtreamSource, getAllXtreamSources, getXtreamSource, getXtreamSources, publicXtreamSource, updateXtreamSelection, updateXtreamSource } from './xtream-store.js';
-import { evictXtreamCache, getXtreamCatalog, getXtreamCategories, getXtreamMovieInfo, getXtreamSeriesEpisodes, validateXtreamConnection, xtreamCacheStats, xtreamProviderUrl } from './xtream.js';
+import { evictXtreamCache, getXtreamCatalog, getXtreamCategories, getXtreamMovieInfo, getXtreamSeriesEpisodes, validateXtreamConnection, warmXtreamCatalog, xtreamCacheStats, xtreamProviderUrl } from './xtream.js';
 import { evictM3uCache, getM3uCatalog, getM3uCategories, m3uCacheStats, m3uProviderUrl, validateM3uConnection } from './m3u.js';
 import { MediaCapacityError, MediaJobManager, defaultMediaLimits, memoryPressure } from './media-job-manager.js';
 import { HlsStrategy, PlaybackStrategy, choosePlaybackStrategy, determineHlsStrategy, hlsCodecArgs } from './playback-strategy.js';
@@ -1171,7 +1171,7 @@ function parsePlaylistInput(body, existing = null) {
 }
 
 app.get('/api/xtream/sources', async (req, res) => {
-  try { res.json({ items: await getXtreamSources(requestOwner(req)) }); }
+  try { const items = await getXtreamSources(requestOwner(req)); const aliases = { channel: 'channel', movie: 'movie', series: 'series' }; const warmKind = aliases[String(req.query.warmKind || '')]; if (warmKind) for (const source of items.filter(item => sourceType(item) === 'xtream')) warmXtreamCatalog(source, warmKind); res.json({ items }); }
   catch (error) { res.status(500).json({ error: error.message }); }
 });
 

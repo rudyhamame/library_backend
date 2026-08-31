@@ -108,10 +108,13 @@ export async function createDeviceSession(deviceId, frontendUrl, deviceToken = '
   pairUrlObject.pathname = `${pairUrlObject.pathname.replace(/\/$/, '')}/`;
   pairUrlObject.searchParams.set('pair', session.code);
   const pairUrl = pairUrlObject.toString();
+  // Camera apps hand this Android intent URL to RH when it is installed. If
+  // it is not installed, Chrome opens the existing web pairing page instead.
+  const appPairUrl = `intent://pair?pair=${encodeURIComponent(session.code)}#Intent;scheme=rhstream;package=com.rhstream.library;S.browser_fallback_url=${encodeURIComponent(pairUrl)};end`;
   return {
     code: session.code, deviceId: session.deviceId, expiresAt: session.expiresAt,
-    pairUrl,
-    qrImageUrl: `https://quickchart.io/qr?size=190&text=${encodeURIComponent(pairUrl)}`,
+    pairUrl, appPairUrl,
+    qrImageUrl: `https://quickchart.io/qr?size=190&text=${encodeURIComponent(appPairUrl)}`,
   };
 }
 

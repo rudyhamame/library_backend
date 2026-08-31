@@ -76,7 +76,7 @@ function resolveStreamTicket(token, sourceId, kind, id) {
 }
 
 const sourceType = source => source?.type === 'm3u' ? 'm3u' : 'xtream';
-const getSourceCatalog = (source, kind) => sourceType(source) === 'm3u' ? getM3uCatalog(source, kind) : getXtreamCatalog(source, kind);
+const getSourceCatalog = (source, kind, category = 'all') => sourceType(source) === 'm3u' ? getM3uCatalog(source, kind) : getXtreamCatalog(source, kind, category);
 const getSourceCategories = (source, kind) => sourceType(source) === 'm3u' ? getM3uCategories(source, kind) : getXtreamCategories(source, kind);
 const sourceProviderUrl = (source, kind, id, extension = '') => sourceType(source) === 'm3u' ? m3uProviderUrl(source, kind, id) : xtreamProviderUrl(source, kind, id, extension);
 
@@ -1265,10 +1265,11 @@ app.get('/api/xtream/catalog', async (req, res) => {
     const aliases = { live: 'channel', channel: 'channel', movie: 'movie', vod: 'movie', series: 'series' };
     const kind = aliases[String(req.query.kind || '')];
     if (!kind) return res.status(400).json({ error: 'kind must be channel, movie, or series' });
-    const [allItems, categories] = await Promise.all([getSourceCatalog(source, kind), getSourceCategories(source, kind)]);
+    const category = String(req.query.category || '');
+    if (!category || category === 'all') return res.status(400).json({ error: 'Select a playlist category first' });
+    const allItems = await getSourceCatalog(source, kind, category);
     const enabled = new Set(source.enabledKeys || []);
     const query = String(req.query.q || '').trim().toLocaleLowerCase();
-    const category = String(req.query.category || 'all');
     const titleLanguage = String(req.query.titleLanguage || req.query.language || 'all').toUpperCase();
     const pageSize = Math.min(200, Math.max(10, Number.parseInt(req.query.limit, 10) || 50));
     const requestedPage = Math.max(1, Number.parseInt(req.query.page, 10) || 1);
@@ -1295,10 +1296,23 @@ app.get('/api/xtream/catalog', async (req, res) => {
     const page = Math.min(requestedPage, pageCount);
     const start = (page - 1) * pageSize;
     res.json({
-      source: publicXtreamSource(source), categories, languages,
+      source: publicXtreamSource(source), languages,
       items: filtered.slice(start, start + pageSize).map(item => ({ ...item, enabled: enabled.has(item.key) })),
       pagination: { page, pageSize, pageCount, total: filtered.length },
     });
+  } catch (error) { res.status(502).json({ error: error.message }); }
+});
+
+app.get('/api/xtream/categories', async (req, res) => {
+  try {
+    const source = await getXtreamSource(String(req.query.sourceId || ''), requestOwner(req));
+    if (!source) return res.status(404).json({ error: 'Xtream source not found' });
+    const aliases = { live: 'channel', channel: 'channel', movie: 'movie', vod: 'movie', series: 'series' };
+    const kind = aliases[String(req.query.kind || '')];
+    if (!kind) return res.status(400).json({ error: 'kind must be channel, movie, or series' });
+    const categories = await getSourceCategories(source, kind);
+    categories.sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''), undefined, { numeric: true, sensitivity: 'base' }));
+    res.json({ categories });
   } catch (error) { res.status(502).json({ error: error.message }); }
 });
 

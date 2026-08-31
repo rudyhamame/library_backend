@@ -58,9 +58,11 @@ export async function validateXtreamConnection(source) {
   return data.user_info;
 }
 
-export async function getXtreamCatalog(source, kind) {
+export async function getXtreamCatalog(source, kind, categoryId = 'all') {
   const action = kind === 'channel' ? 'get_live_streams' : kind === 'movie' ? 'get_vod_streams' : 'get_series';
-  return request(source, { action }, rows => (Array.isArray(rows) ? rows : []).map(row => {
+  const params = { action };
+  if (categoryId && categoryId !== 'all') params.category_id = categoryId;
+  return request(source, params, rows => (Array.isArray(rows) ? rows : []).map(row => {
     const id = stringId(kind === 'series' ? row.series_id : row.stream_id);
     return {
       key: `${kind}:${id}`,
@@ -101,8 +103,6 @@ export async function getXtreamCategories(source, kind) {
   return request(source, { action }, rows => (Array.isArray(rows) ? rows : []).map(row => ({ id: stringId(row.category_id), name: String(row.category_name || 'Other') })));
 }
 
-// Warm the catalog/category cache without making the caller wait for the
-// provider's complete response. A later catalog request reuses these results.
 export async function getXtreamSeriesEpisodes(source, seriesId) {
   const data = await request(source, { action: 'get_series_info', series_id: seriesId });
   const seasons = new Map((Array.isArray(data?.seasons) ? data.seasons : []).map(season => [String(season.season_number), season]));

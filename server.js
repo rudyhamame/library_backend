@@ -1132,12 +1132,16 @@ app.get('/api/roku/dashboard', async (req, res) => {
     const cities = await Promise.all(locations.map(async (location) => {
       const query = new URLSearchParams({
         latitude: location.latitude, longitude: location.longitude,
-        current: 'temperature_2m,weather_code', timezone: location.timezone,
+        current: 'temperature_2m,weather_code,wind_speed_10m', timezone: location.timezone,
       });
       const response = await fetch(`https://api.open-meteo.com/v1/forecast?${query}`, { signal: AbortSignal.timeout(8_000) });
       if (!response.ok) throw new Error(`Weather HTTP ${response.status}`);
       const data = await response.json();
-      return { id: location.id, label: location.label, timezone: location.timezone, time: data.current?.time || '', temperature: data.current?.temperature_2m, weatherCode: data.current?.weather_code };
+      return {
+        id: location.id, label: location.label, timezone: location.timezone,
+        time: data.current?.time || '', temperature: data.current?.temperature_2m,
+        weatherCode: data.current?.weather_code, windSpeed: data.current?.wind_speed_10m,
+      };
     }));
     const entry = { expires: Date.now() + 120_000, data: { backend: 'online', cities } };
     dashboardCache.set(cacheKey, entry);

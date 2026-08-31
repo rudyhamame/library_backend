@@ -1176,6 +1176,13 @@ app.get('/api/xtream/logo', async (req, res) => {
       if (['localhost', '127.0.0.1', '0.0.0.0', '::1'].includes(target.hostname)) throw new Error('Unsupported logo host');
     };
     let target = new URL(supplied);
+    // Roku cards are roughly 160x240 at a 1280x720 UI resolution. Avoid
+    // forwarding multi-megapixel TMDB originals to the device; TMDB provides
+    // an image-size path specifically for this purpose. Keep the default proxy
+    // behavior unchanged for the Library web frontend.
+    if (req.query.roku === '1' && target.hostname.toLowerCase() === 'image.tmdb.org') {
+      target.pathname = target.pathname.replace(/^\/t\/p\/[^/]+\//, '/t/p/w342/');
+    }
     let response;
     for (let redirects = 0; redirects <= 3; redirects += 1) {
       validateLogoTarget(target);

@@ -34,7 +34,7 @@ async function request(source, params, transform = value => value) {
   if (inFlight.has(key)) return inFlight.get(key);
   if (inFlight.size >= maxInFlight) throw new Error('Xtream provider request capacity is full');
   const pending = (async () => {
-    const response = await fetch(apiUrl(source, params), { signal: AbortSignal.timeout(25_000) });
+    const response = await fetch(apiUrl(source, params), { signal: AbortSignal.timeout(60_000) });
     if (!response.ok) throw new Error(`Xtream server returned HTTP ${response.status}`);
     const data = transform(await response.json());
     if (cacheable) {

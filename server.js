@@ -19,11 +19,15 @@ import { getFavorites, toggleFavorite } from './favorites-store.js';
 import { authorizeDeviceSession, changeAccountPassword, claimAutomaticPairing, createDeviceSession, getDeviceWeatherLocations, getLinkedDevices, getPairingInfo, getRokuDeviceSessionStatus, isRokuSessionLinked, loginAccount, loginDeviceSession, recordDeviceHeartbeat, registerAccount, resolveDeviceToken, saveDeviceWeatherLocations, setupDeviceSession, unlinkAccountDevice } from './device-sessions.js';
 import { createLibraryCategory, deleteLibraryCategory, getManagedLibrary, renameLibraryCategory, replaceLibraryCategoryItems } from './library-category-store.js';
 import { enforceLibraryOnly } from './library-route-policy.js';
+import { checkPlaylistSources } from './playlist-health.js';
 
 const app = express();
 app.use(enforceLibraryOnly);
 const port = process.env.PORT || 8787;
 const dashboardCache = new Map();
+const playlistHealthCache = new Map();
+const playlistHealthInFlight = new Map();
+const playlistHealthTtlMs = Math.max(10_000, Number.parseInt(process.env.PLAYLIST_HEALTH_TTL_MS || '30000', 10) || 30_000);
 const arabicText = /[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]/;
 const rokuText = (value) => arabicText.test(String(value || '')) ? shapeArabicForRoku(value) : String(value || '');
 // Roku cannot reliably receive a JSON document containing a provider's entire
@@ -432,6 +436,37 @@ app.get('/api/roku/auth-health', async (req, res) => {
     }
     res.json({ ok: true, authenticated: true });
   } catch (error) { res.status(503).json({ ok: false, authenticated: false, error: error.message }); }
+});
+
+async function ownerPlaylistHealth(ownerId) {
+  const cached = playlistHealthCache.get(ownerId);
+  if (cached?.expiresAt > Date.now()) return cached.payload;
+  if (playlistHealthInFlight.has(ownerId)) return playlistHealthInFlight.get(ownerId);
+  const request = (async () => {
+    const sources = await getAllXtreamSources(ownerId);
+    const health = await checkPlaylistSources(sources, source => (
+      sourceType(source) === 'm3u' ? validateM3uConnection(source) : validateXtreamConnection(source)
+    ));
+    const payload = { ...health, checkedAt: new Date().toISOString() };
+    playlistHealthCache.set(ownerId, { payload, expiresAt: Date.now() + playlistHealthTtlMs });
+    return payload;
+  })();
+  playlistHealthInFlight.set(ownerId, request);
+  try { return await request; }
+  finally { playlistHealthInFlight.delete(ownerId); }
+}
+
+// This is intentionally stronger than /api/xtream/sources: a MongoDB record
+// is "saved", not "online". The login page uses this provider-backed result.
+app.get('/api/roku/playlist-health', async (req, res) => {
+  try {
+    const ownerId = requestOwner(req);
+    if (!ownerId) return res.status(401).json({ ok: false, status: 'not_paired' });
+    res.set('Cache-Control', 'no-store');
+    res.json(await ownerPlaylistHealth(ownerId));
+  } catch (error) {
+    res.status(503).json({ ok: false, status: 'unavailable', error: error.message });
+  }
 });
 
 // The Roku displays a short-lived QR/device code. The phone signs up or signs

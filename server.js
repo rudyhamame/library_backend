@@ -1179,13 +1179,39 @@ app.get('/api/xtream/catalog-counts', async (req, res) => {
   try {
     const sources = await getAllXtreamSources(requestOwner(req));
     const counts = { series: 0, movie: 0, channel: 0 };
+    const recent = { series: [], movie: [], channel: [] };
+    const addedTime = item => {
+      const numeric = Number(item.added);
+      if (Number.isFinite(numeric) && numeric > 0) return numeric;
+      const parsed = Date.parse(item.added);
+      return Number.isFinite(parsed) ? Math.floor(parsed / 1000) : 0;
+    };
     for (const source of sources) {
       for (const kind of ['series', 'movie', 'channel']) {
         const catalog = await getSourceCatalog(source, kind);
         counts[kind] += Array.isArray(catalog) ? catalog.length : 0;
+        for (const item of catalog) {
+            const candidate = {
+              id: item.id, key: item.key, kind, title: item.title,
+              categoryId: item.categoryId, logo: item.logo, rating: item.rating,
+              duration: item.duration, extension: item.extension,
+              added: item.added, sourceId: String(source._id),
+            };
+            const group = recent[kind];
+            if (group.length < 10) group.push(candidate);
+            else {
+              let oldest = 0;
+              for (let i = 1; i < group.length; i += 1) {
+                if (addedTime(group[i]) < addedTime(group[oldest])) oldest = i;
+              }
+              if (addedTime(candidate) > addedTime(group[oldest])) group[oldest] = candidate;
+            }
+          }
       }
     }
-    res.json({ counts });
+    for (const group of Object.values(recent)) group.sort((a, b) => addedTime(b) - addedTime(a)
+      || String(a.title || '').localeCompare(String(b.title || '')));
+    res.json({ counts, recent });
   } catch (error) { res.status(502).json({ error: error.message }); }
 });
 

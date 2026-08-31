@@ -26,8 +26,9 @@ async function request(source, params, transform = value => value) {
   evictXtreamCache(now);
   // A series-info response may carry hundreds of episodes and images. Keeping
   // every expanded series in the five-minute cache is what grows the Render
-  // heap until Node is terminated. Catalog lists remain cached; details do not.
-  const cacheable = !['get_series_info', 'get_vod_info'].includes(params?.action);
+  // heap until Node is terminated. Catalog lists and details are intentionally
+  // not retained here so the backend does not store the provider catalog.
+  const cacheable = !['get_series_info', 'get_vod_info', 'get_series', 'get_vod_streams', 'get_live_streams', 'get_series_categories', 'get_vod_categories', 'get_live_categories'].includes(params?.action);
   const cached = cache.get(key);
   if (cacheable && cached?.expires > now) return cached.data;
   if (inFlight.has(key)) return inFlight.get(key);
@@ -102,10 +103,6 @@ export async function getXtreamCategories(source, kind) {
 
 // Warm the catalog/category cache without making the caller wait for the
 // provider's complete response. A later catalog request reuses these results.
-export function warmXtreamCatalog(source, kind) {
-  return Promise.all([getXtreamCatalog(source, kind), getXtreamCategories(source, kind)]).catch(() => null);
-}
-
 export async function getXtreamSeriesEpisodes(source, seriesId) {
   const data = await request(source, { action: 'get_series_info', series_id: seriesId });
   const seasons = new Map((Array.isArray(data?.seasons) ? data.seasons : []).map(season => [String(season.season_number), season]));

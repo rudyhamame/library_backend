@@ -1,6 +1,8 @@
 import { createHash, createHmac, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 import { MongoClient, ObjectId } from 'mongodb';
 import { moveXtreamSources } from './xtream-store.js';
+import { accountOwnerId, canonicalSessionOwner } from './account-library-owner.js';
+import { moveLibraryCategories } from './library-category-store.js';
 
 const sessions = new Map();
 const pairingTtlMs = 15 * 60 * 1000;
@@ -52,13 +54,25 @@ function purge(reserveSlot = false) {
 }
 
 function ownerIdFor(deviceId) { return createHash('sha256').update(String(deviceId)).digest('hex'); }
-function accountOwnerId(accountId) { return ownerIdFor(`account:${accountId}`); }
 function encode(value) { return Buffer.from(value).toString('base64url'); }
 function sign(value) { return createHmac('sha256', signingSecret).update(value).digest('base64url'); }
 
 function issueToken(session, type) {
-  const payload = encode(JSON.stringify({ ownerId: session.ownerId, deviceId: session.deviceId, accountId: session.accountId || null, type, exp: Date.now() + tokenTtlMs }));
+  const payload = encode(JSON.stringify({ ownerId: canonicalSessionOwner(session), deviceId: session.deviceId, accountId: session.accountId || null, type, exp: Date.now() + tokenTtlMs }));
   return `${payload}.${sign(payload)}`;
+}
+
+async function consolidateAccountLibrary(accountId) {
+  if (!ObjectId.isValid(accountId)) return null;
+  const canonicalOwnerId = accountOwnerId(accountId);
+  const linkedProfiles = await (await profiles()).find(
+    { accountId: new ObjectId(accountId) },
+    { projection: { ownerId: 1 } },
+  ).toArray();
+  const priorOwnerIds = linkedProfiles.map(profile => profile.ownerId).filter(Boolean);
+  for (const ownerId of priorOwnerIds) await moveXtreamSources(ownerId, canonicalOwnerId);
+  await moveLibraryCategories(priorOwnerIds, canonicalOwnerId);
+  return canonicalOwnerId;
 }
 
 function hashPassword(password) {
@@ -91,10 +105,11 @@ export async function createDeviceSession(deviceId, frontendUrl, deviceToken = '
   // login. Validate its local Roku token against the still-linked DB profile;
   // neither the token nor account credentials are ever placed in the QR URL.
   const authorization = resolveDeviceToken(deviceToken);
-  if (authorization?.type === 'roku' && authorization.deviceId === normalizedDeviceId && authorization.ownerId === session.ownerId && ObjectId.isValid(authorization.accountId)) {
-    const profile = await (await profiles()).findOne({ ownerId: session.ownerId, deviceId: normalizedDeviceId, accountId: new ObjectId(authorization.accountId) }, { projection: { accountId: 1 } });
+  if (authorization?.type === 'roku' && authorization.deviceId === normalizedDeviceId && ObjectId.isValid(authorization.accountId)) {
+    const profile = await (await profiles()).findOne({ deviceId: normalizedDeviceId, accountId: new ObjectId(authorization.accountId) }, { projection: { accountId: 1 } });
     if (profile?.accountId) {
       session.accountId = String(profile.accountId);
+      session.ownerId = accountOwnerId(profile.accountId);
       session.autoLogin = true;
     }
   }
@@ -123,8 +138,10 @@ export function getDeviceSession(code) { purge(); return sessions.get(String(cod
 export async function getPairingInfo(code, token = '') {
   const session = getDeviceSession(code);
   if (!session) return null;
-  const profile = await (await profiles()).findOne({ ownerId: session.ownerId }, { projection: { accountId: 1 } });
-  const authenticated = resolveDeviceToken(token)?.ownerId === session.ownerId;
+  const profile = await (await profiles()).findOne({ deviceId: session.deviceId }, { projection: { accountId: 1 } });
+  const authorization = resolveDeviceToken(token);
+  const authenticated = authorization?.deviceId === session.deviceId
+    || (profile?.accountId && String(authorization?.accountId || '') === String(profile.accountId));
   return { deviceId: session.deviceId, expiresAt: session.expiresAt, needsSignup: !profile?.accountId, purpose: profile?.accountId ? 'manage-library' : 'activate-device', authenticated, canAutoLogin: Boolean(session.autoLogin && session.accountId && !session.claimedAt) };
 }
 
@@ -148,15 +165,16 @@ export async function authorizeDeviceSession(code, token) {
   if (authorization?.type !== 'browser' || !ObjectId.isValid(authorization.accountId)) return { error: 'Sign in to authorize this Roku' };
   const accountId = new ObjectId(authorization.accountId);
   const deviceCollection = await profiles();
-  const profile = await deviceCollection.findOne({ ownerId: session.ownerId }, { projection: { accountId: 1 } });
+  const deviceOwnerId = ownerIdFor(session.deviceId);
+  const profile = await deviceCollection.findOne({ deviceId: session.deviceId }, { projection: { accountId: 1 } });
   if (profile?.accountId && String(profile.accountId) !== String(accountId)) return { error: 'This Roku is linked to a different RH account' };
   session.accountId = String(accountId);
   await deviceCollection.updateOne(
-    { ownerId: session.ownerId },
-    { $setOnInsert: { ownerId: session.ownerId, deviceId: session.deviceId, createdAt: new Date() }, $set: { accountId, linkedAt: new Date(), updatedAt: new Date() } },
+    { deviceId: session.deviceId },
+    { $setOnInsert: { ownerId: deviceOwnerId, deviceId: session.deviceId, createdAt: new Date() }, $set: { accountId, linkedAt: new Date(), updatedAt: new Date() } },
     { upsert: true },
   );
-  if (!profile?.accountId) await moveXtreamSources(accountOwnerId(accountId), session.ownerId);
+  session.ownerId = await consolidateAccountLibrary(accountId);
   session.approvedAt = Date.now();
   return { ok: true, deviceId: session.deviceId };
 }
@@ -169,7 +187,8 @@ async function consumePairing(code, email, password, setup) {
   if (!validPassword(password)) return { error: 'Password must contain at least 8 characters' };
   const deviceCollection = await profiles();
   const accountCollection = await accounts();
-  const profile = await deviceCollection.findOne({ ownerId: session.ownerId });
+  const deviceOwnerId = ownerIdFor(session.deviceId);
+  const profile = await deviceCollection.findOne({ deviceId: session.deviceId });
   let account;
   if (setup) {
     if (profile?.accountId) return { error: 'This Roku is already activated. Sign in instead.' };
@@ -188,11 +207,11 @@ async function consumePairing(code, email, password, setup) {
   }
   session.accountId = String(account._id);
   await deviceCollection.updateOne(
-    { ownerId: session.ownerId },
-    { $setOnInsert: { ownerId: session.ownerId, deviceId: session.deviceId, createdAt: new Date() }, $set: { accountId: account._id, linkedAt: new Date(), updatedAt: new Date() } },
+    { deviceId: session.deviceId },
+    { $setOnInsert: { ownerId: deviceOwnerId, deviceId: session.deviceId, createdAt: new Date() }, $set: { accountId: account._id, linkedAt: new Date(), updatedAt: new Date() } },
     { upsert: true },
   );
-  await moveXtreamSources(accountOwnerId(account._id), session.ownerId);
+  session.ownerId = await consolidateAccountLibrary(account._id);
   session.approvedAt = Date.now();
   return { token: issueToken(session, 'browser'), deviceId: session.deviceId };
 }
@@ -240,16 +259,22 @@ export async function getLinkedDevices(accountId) {
   }));
 }
 
-export async function getDeviceWeatherLocations(ownerId) {
+function linkedProfileFilter(ownerId, accountId = '', deviceId = '') {
+  if (ObjectId.isValid(accountId)) return { accountId: new ObjectId(accountId) };
+  if (deviceId) return { deviceId: String(deviceId) };
+  return { ownerId: String(ownerId) };
+}
+
+export async function getDeviceWeatherLocations(ownerId, accountId = '', deviceId = '') {
   if (!ownerId) return [];
   const profile = await (await profiles()).findOne(
-    { ownerId: String(ownerId) },
+    linkedProfileFilter(ownerId, accountId, deviceId),
     { projection: { weatherLocations: 1 } },
   );
   return Array.isArray(profile?.weatherLocations) ? profile.weatherLocations.slice(0, 1) : [];
 }
 
-export async function saveDeviceWeatherLocations(ownerId, locations) {
+export async function saveDeviceWeatherLocations(ownerId, locations, accountId = '', deviceId = '') {
   if (!ownerId) return { error: 'Linked Roku authorization is required' };
   const supplied = Array.isArray(locations) ? locations.slice(0, 1) : [];
   const weatherLocations = supplied.map(location => location ? ({
@@ -262,8 +287,8 @@ export async function saveDeviceWeatherLocations(ownerId, locations) {
   if (weatherLocations.some(location => location && (!location.label || !Number.isFinite(location.latitude) || !Number.isFinite(location.longitude)))) {
     return { error: 'Select valid weather locations' };
   }
-  const result = await (await profiles()).updateOne(
-    { ownerId: String(ownerId) },
+  const result = await (await profiles()).updateMany(
+    linkedProfileFilter(ownerId, accountId, deviceId),
     { $set: { weatherLocations, updatedAt: new Date() } },
   );
   return result.matchedCount ? { locations: weatherLocations } : { error: 'Linked Roku profile not found' };
@@ -298,7 +323,7 @@ export async function unlinkAccountDevice(accountId, deviceId) {
 export async function isRokuSessionLinked(session) {
   if (session?.type !== 'roku' || !session?.ownerId || !session?.deviceId || !ObjectId.isValid(session?.accountId)) return false;
   const profile = await (await profiles()).findOne(
-    { ownerId: session.ownerId, deviceId: String(session.deviceId), accountId: new ObjectId(session.accountId) },
+    { deviceId: String(session.deviceId), accountId: new ObjectId(session.accountId) },
     { projection: { _id: 1 } },
   );
   return Boolean(profile);
@@ -310,12 +335,12 @@ export async function loginAccount(email, password, deviceId = '') {
   const account = await (await accounts()).findOne({ email: normalizedEmail });
   if (!account || !verifyPassword(password, account.passwordHash)) return { error: 'Incorrect email or password' };
   const linked = await (await profiles()).find({ accountId: account._id }).toArray();
-  if (!linked.length) return { token: issueToken({ ownerId: accountOwnerId(account._id), accountId: String(account._id) }, 'browser'), devices: [] };
+  const ownerId = await consolidateAccountLibrary(account._id) || accountOwnerId(account._id);
+  if (!linked.length) return { token: issueToken({ ownerId, accountId: String(account._id) }, 'browser'), devices: [] };
   const devices = linked.map(device => ({ id: String(device._id), deviceId: device.deviceId, label: `Roku ${String(device.deviceId || '').replace(/^roku-/, '').slice(-8).toUpperCase()}` }));
-  if (!deviceId && linked.length > 1) return { devices };
   const selected = linked.find(device => deviceId && device.deviceId === deviceId) || (linked.length === 1 ? linked[0] : null);
-  if (!selected) return { error: 'Select a linked Roku device' };
-  const session = { ownerId: selected.ownerId, deviceId: selected.deviceId, accountId: String(account._id) };
+  if (deviceId && !selected) return { error: 'Select a linked Roku device' };
+  const session = { ownerId, deviceId: selected?.deviceId, accountId: String(account._id) };
   return { token: issueToken(session, 'browser'), devices };
 }
 
@@ -336,6 +361,7 @@ export function resolveDeviceToken(token) {
   if (signature.length !== expected.length || !timingSafeEqual(Buffer.from(signature), Buffer.from(expected))) return null;
   try {
     const data = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
-    return data.ownerId && data.exp > Date.now() ? data : null;
+    if (!data.ownerId || data.exp <= Date.now()) return null;
+    return { ...data, ownerId: canonicalSessionOwner(data) };
   } catch { return null; }
 }

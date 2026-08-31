@@ -50,6 +50,34 @@ async function synchronizedDocument(ownerId, suppliedItems) {
   return next;
 }
 
+export async function moveLibraryCategories(fromOwnerIds, toOwnerId) {
+  const sourceOwners = [...new Set((Array.isArray(fromOwnerIds) ? fromOwnerIds : [fromOwnerIds])
+    .map(String).filter(ownerId => ownerId && ownerId !== toOwnerId))];
+  if (!toOwnerId || sourceOwners.length === 0) return;
+  const collection = await categoryCollection();
+  const documents = await collection.find({ ownerId: { $in: [toOwnerId, ...sourceOwners] } }).toArray();
+  if (documents.length === 0) return;
+  const canonical = documents.find(document => document.ownerId === toOwnerId)
+    || { ownerId: toOwnerId, categories: [], assignments: [] };
+  const categories = new Map();
+  const assignments = new Map();
+  for (const document of documents) {
+    for (const category of document.categories || []) categories.set(category.id, category);
+    for (const assignment of document.assignments || []) {
+      const prior = assignments.get(assignment.itemKey);
+      if (!prior || (!prior.categoryId && assignment.categoryId)) assignments.set(assignment.itemKey, assignment);
+    }
+  }
+  await collection.replaceOne({ ownerId: toOwnerId }, {
+    ...canonical,
+    ownerId: toOwnerId,
+    categories: [...categories.values()],
+    assignments: [...assignments.values()],
+    updatedAt: new Date(),
+  }, { upsert: true });
+  await collection.deleteMany({ ownerId: { $in: sourceOwners } });
+}
+
 export async function getManagedLibrary(ownerId, suppliedItems, kind = '') {
   const document = await synchronizedDocument(ownerId, suppliedItems);
   return publicLibrary(document, suppliedItems, validLibraryKinds.has(kind) ? kind : '');

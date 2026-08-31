@@ -222,6 +222,11 @@ function requestOwner(req) {
   return session?.ownerId || null;
 }
 
+function requestDevice(req) {
+  const token = String(req.get('x-device-token') || req.query.deviceToken || '');
+  return resolveDeviceToken(token)?.deviceId || null;
+}
+
 function mediaOwner(req) {
   return requestOwner(req) || resolveStreamTicket(
     req.query.streamTicket, req.params.sourceId, req.params.kind, req.params.id,
@@ -1010,7 +1015,7 @@ app.get('/api/account/weather-locations', async (req, res) => {
   try {
     const ownerId = requestOwner(req);
     if (!ownerId) return res.status(401).json({ error: 'Sign in to manage weather locations' });
-    res.json({ locations: await getDeviceWeatherLocations(ownerId) });
+    res.json({ locations: await getDeviceWeatherLocations(ownerId, requestAccount(req), requestDevice(req)) });
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
@@ -1018,7 +1023,7 @@ app.put('/api/account/weather-locations', async (req, res) => {
   try {
     const ownerId = requestOwner(req);
     if (!ownerId) return res.status(401).json({ error: 'Sign in to manage weather locations' });
-    const result = await saveDeviceWeatherLocations(ownerId, req.body?.locations);
+    const result = await saveDeviceWeatherLocations(ownerId, req.body?.locations, requestAccount(req), requestDevice(req));
     if (result.error) return res.status(result.error.includes('not found') ? 404 : 400).json(result);
     dashboardCache.clear();
     res.json(result);
@@ -1031,7 +1036,7 @@ app.get('/api/roku/dashboard', async (req, res) => {
     if (!ownerId) return res.status(401).json({ error: 'Valid device authorization is required' });
     // Weather is cached, but clock values must be generated for every request
     // so the minute display never remains frozen for the cache lifetime.
-    const savedLocations = await getDeviceWeatherLocations(ownerId);
+    const savedLocations = await getDeviceWeatherLocations(ownerId, requestAccount(req), requestDevice(req));
     const location = savedLocations[0];
     const locations = location ? [{ ...location, id: 'slot1' }] : [];
     const cacheKey = JSON.stringify(locations);

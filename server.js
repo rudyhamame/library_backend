@@ -30,6 +30,24 @@ const playlistHealthInFlight = new Map();
 const playlistHealthTtlMs = Math.max(10_000, Number.parseInt(process.env.PLAYLIST_HEALTH_TTL_MS || '30000', 10) || 30_000);
 const arabicText = /[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]/;
 const rokuText = (value) => arabicText.test(String(value || '')) ? shapeArabicForRoku(value) : String(value || '');
+const normalizeSearchText = (value) => String(value || '')
+  .normalize('NFKC')
+  .replace(/[\u064B-\u065F\u0670\u06D6-\u06ED]/g, '')
+  .replace(/[\u0640]/g, '')
+  .replace(/[أإآٱ]/g, 'ا')
+  .replace(/[ى]/g, 'ي')
+  .replace(/[ة]/g, 'ه')
+  .replace(/[ؤ]/g, 'و')
+  .replace(/[ئ]/g, 'ي')
+  .replace(/[پ]/g, 'ب')
+  .replace(/[چ]/g, 'ج')
+  .replace(/[ڤ]/g, 'ف')
+  .replace(/[گ]/g, 'ك')
+  .replace(/[٠-٩]/g, digit => String(digit.charCodeAt(0) - 0x0660))
+  .replace(/[۰-۹]/g, digit => String(digit.charCodeAt(0) - 0x06F0))
+  .toLocaleLowerCase()
+  .replace(/\s+/g, ' ')
+  .trim();
 // Roku cannot reliably receive a JSON document containing a provider's entire
 // catalog (this source alone has 44,995 series). Keep the initial screen fast;
 // additional catalog pages are loaded separately by the Roku client.
@@ -1256,10 +1274,10 @@ app.get('/api/xtream/catalog', async (req, res) => {
     const kind = aliases[String(req.query.kind || '')];
     if (!kind) return res.status(400).json({ error: 'kind must be channel, movie, or series' });
     const category = String(req.query.category || '');
-    if (!category || category === 'all') return res.status(400).json({ error: 'Select a playlist category first' });
+    const query = normalizeSearchText(req.query.q);
+    if (!category) return res.status(400).json({ error: 'Select a playlist category first' });
     const allItems = await getSourceCatalog(source, kind, category);
     const enabled = new Set(source.enabledKeys || []);
-    const query = String(req.query.q || '').trim().toLocaleLowerCase();
     const titleLanguage = String(req.query.titleLanguage || req.query.language || 'all').toUpperCase();
     const requestedPage = Math.max(1, Number.parseInt(req.query.page, 10) || 1);
     const languagePriority = { AR: 0, EN: 1 };
@@ -1270,7 +1288,7 @@ app.get('/api/xtream/catalog', async (req, res) => {
       languageSet.add(languageCode);
       if ((category === 'all' || item.categoryId === category)
         && (titleLanguage === 'ALL' || languageCode === titleLanguage)
-        && (!query || item.title.toLocaleLowerCase().includes(query))) {
+        && (!query || normalizeSearchText(`${item.title} ${item.categoryId || ''}`).includes(query))) {
         filtered.push({ ...item, languageCode, titleLanguage: languageCode });
       }
     }

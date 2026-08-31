@@ -447,7 +447,8 @@ async function ownerPlaylistHealth(ownerId) {
     const health = await checkPlaylistSources(sources, source => (
       sourceType(source) === 'm3u' ? validateM3uConnection(source) : validateXtreamConnection(source)
     ));
-    const payload = { ...health, checkedAt: new Date().toISOString() };
+    const { results: _results, ...summary } = health;
+    const payload = { ...summary, checkedAt: new Date().toISOString() };
     playlistHealthCache.set(ownerId, { payload, expiresAt: Date.now() + playlistHealthTtlMs });
     return payload;
   })();
@@ -460,10 +461,11 @@ async function ownerPlaylistHealth(ownerId) {
 // is "saved", not "online". The login page uses this provider-backed result.
 app.get('/api/roku/playlist-health', async (req, res) => {
   try {
-    const ownerId = requestOwner(req);
-    if (!ownerId) return res.status(401).json({ ok: false, status: 'not_paired' });
+    const token = String(req.get('x-device-token') || req.query.deviceToken || '');
+    const session = resolveDeviceToken(token);
+    if (!await isRokuSessionLinked(session)) return res.status(401).json({ ok: false, status: 'not_paired' });
     res.set('Cache-Control', 'no-store');
-    res.json(await ownerPlaylistHealth(ownerId));
+    res.json(await ownerPlaylistHealth(session.ownerId));
   } catch (error) {
     res.status(503).json({ ok: false, status: 'unavailable', error: error.message });
   }

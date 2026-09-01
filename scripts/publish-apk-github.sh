@@ -28,4 +28,4 @@ if gh release view "$release_tag" --repo "$repository" >/dev/null 2>&1; then
 else
   gh release create "$release_tag" "$staged_apk" --repo "$repository" --title "RH IPTV Library" --notes "Latest RH IPTV Library Android debug build."
 fi
-echo "Published $asset_name to https://github.com/$repository/releases/latest/download/RH%20IPTV%20Library.apk"
+echo "Published $asset_name to https://github.com/$repository/releases/latest/download/$asset_name"

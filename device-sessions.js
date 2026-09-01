@@ -6,6 +6,7 @@ import { moveLibraryCategories } from './library-category-store.js';
 import { movePlaybackOwners } from './playback-store.js';
 import { moveFavoriteOwners } from './favorites-store.js';
 import { moveStreamingHistoryOwners } from './streaming-history-store.js';
+import { getAccountProfile } from './account-profile-store.js';
 
 const sessions = new Map();
 const pairingTtlMs = 15 * 60 * 1000;
@@ -61,7 +62,7 @@ function encode(value) { return Buffer.from(value).toString('base64url'); }
 function sign(value) { return createHmac('sha256', signingSecret).update(value).digest('base64url'); }
 
 function issueToken(session, type) {
-  const payload = encode(JSON.stringify({ ownerId: canonicalSessionOwner(session), deviceId: session.deviceId, accountId: session.accountId || null, type, exp: Date.now() + tokenTtlMs }));
+  const payload = encode(JSON.stringify({ ownerId: canonicalSessionOwner(session), deviceId: session.deviceId, accountId: session.accountId || null, profileId: session.profileId || null, type, exp: Date.now() + tokenTtlMs }));
   return `${payload}.${sign(payload)}`;
 }
 
@@ -369,6 +370,22 @@ export async function loginAccount(email, password, deviceId = '') {
   if (deviceId && !selected) return { error: 'Select a linked Roku device' };
   const session = { ownerId, deviceId: selected?.deviceId, accountId: String(account._id) };
   return { token: issueToken(session, 'browser'), devices };
+}
+
+export async function selectAccountProfile(accountId, profileId, authorization = {}) {
+  if (!ObjectId.isValid(accountId)) return { error: 'Sign in to choose a profile' };
+  const profile = await getAccountProfile(accountId, profileId);
+  if (!profile) return { error: 'Profile not found' };
+  const session = {
+    ownerId: profile.ownerId,
+    profileId: profile.id,
+    accountId: String(accountId),
+    deviceId: authorization.deviceId || undefined,
+  };
+  return {
+    token: issueToken(session, authorization.type === 'roku' ? 'roku' : 'browser'),
+    profile: { id: profile.id, name: profile.name, avatar: profile.avatar || 'lime', isDefault: profile.isDefault === true },
+  };
 }
 
 export async function changeAccountPassword(accountId, currentPassword, newPassword) {

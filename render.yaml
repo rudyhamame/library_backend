@@ -32,6 +32,10 @@ services:
         value: device_profiles
       - key: MONGODB_ACCOUNT_COLLECTION
         value: accounts
+      - key: MONGODB_ACCOUNT_PROFILE_COLLECTION
+        value: account_profiles
+      - key: MAX_ACCOUNT_PROFILES
+        value: "5"
       - key: DEVICE_AUTH_SECRET
         sync: false
       - key: INTERNAL_DIAGNOSTICS_TOKEN

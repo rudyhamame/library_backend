@@ -16,7 +16,8 @@ import { MediaCapacityError, MediaJobManager, defaultMediaLimits, memoryPressure
 import { HlsStrategy, PlaybackStrategy, choosePlaybackStrategy, determineHlsStrategy, hlsCodecArgs } from './playback-strategy.js';
 import { getStreamingContinueWatching, getStreamingHistory, getStreamingResume, saveStreamingHistory } from './streaming-history-store.js';
 import { getFavorites, toggleFavorite } from './favorites-store.js';
-import { authorizeDeviceSession, changeAccountPassword, claimAutomaticPairing, createDeviceSession, getDeviceWeatherLocations, getLinkedDevices, getPairingInfo, getRokuDeviceSessionStatus, isRokuSessionLinked, loginAccount, loginDeviceSession, recordDeviceHeartbeat, registerAccount, resolveDeviceToken, saveDeviceWeatherLocations, setupDeviceSession, unlinkAccountDevice } from './device-sessions.js';
+import { authorizeDeviceSession, changeAccountPassword, claimAutomaticPairing, createDeviceSession, getDeviceWeatherLocations, getLinkedDevices, getPairingInfo, getRokuDeviceSessionStatus, isRokuSessionLinked, loginAccount, loginDeviceSession, recordDeviceHeartbeat, registerAccount, resolveDeviceToken, saveDeviceWeatherLocations, selectAccountProfile, setupDeviceSession, unlinkAccountDevice } from './device-sessions.js';
+import { createAccountProfile, getAccountProfiles } from './account-profile-store.js';
 import { createLibraryCategory, deleteLibraryCategory, getManagedLibrary, renameLibraryCategory, replaceLibraryCategoryItems } from './library-category-store.js';
 import { enforceLibraryOnly } from './library-route-policy.js';
 import { checkPlaylistSources } from './playlist-health.js';
@@ -603,6 +604,34 @@ app.post('/api/account/signup', async (req, res) => {
     if (result.error) return res.status(400).json(result);
     res.status(201).json(result);
   } catch (error) { res.status(500).json({ error: error.message }); }
+});
+app.get('/api/account/profiles', async (req, res) => {
+  try {
+    const accountId = requestAccount(req);
+    if (!accountId) return res.status(401).json({ error: 'Sign in to view profiles' });
+    res.set('Cache-Control', 'no-store');
+    res.json({ items: await getAccountProfiles(accountId) });
+  } catch (error) { res.status(Number(error?.status) || 500).json({ error: error.message }); }
+});
+app.post('/api/account/profiles', async (req, res) => {
+  try {
+    const accountId = requestAccount(req);
+    if (!accountId) return res.status(401).json({ error: 'Sign in to create a profile' });
+    const result = await createAccountProfile(accountId, req.body);
+    if (result.error) return res.status(400).json(result);
+    res.status(201).json(result);
+  } catch (error) { res.status(Number(error?.status) || 500).json({ error: error.message }); }
+});
+app.post('/api/account/profiles/:profileId/select', async (req, res) => {
+  try {
+    const authorization = resolveDeviceToken(String(req.get('x-device-token') || ''));
+    const accountId = authorization?.accountId;
+    if (!accountId) return res.status(401).json({ error: 'Sign in to choose a profile' });
+    const result = await selectAccountProfile(accountId, req.params.profileId, authorization);
+    if (result.error) return res.status(404).json(result);
+    res.set('Cache-Control', 'no-store');
+    res.json(result);
+  } catch (error) { res.status(Number(error?.status) || 500).json({ error: error.message }); }
 });
 app.post('/api/account/password', async (req, res) => {
   try {

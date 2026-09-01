@@ -1366,12 +1366,27 @@ app.get('/api/xtream/logo', async (req, res) => {
 app.post('/api/xtream/sources', async (req, res) => {
   try {
     const source = parsePlaylistInput(req.body);
-    if (source.type === 'm3u') await validateM3uConnection({ ...source, _id: 'validation' });
-    else await validateXtreamConnection({ ...source, _id: 'validation' });
+    let connectionStatus = 'online';
+    let connectionMessage = '';
+    try {
+      if (source.type === 'm3u') await validateM3uConnection({ ...source, _id: 'validation' });
+      else await validateXtreamConnection({ ...source, _id: 'validation' });
+    } catch (validationError) {
+      const message = String(validationError?.message || validationError || 'Playlist provider is unavailable');
+      const transientNetworkFailure = /could not be reached|fetch failed|connect_timeout|timed?\s*out|network error|econnreset|econnrefused/i.test(message);
+      if (!transientNetworkFailure) throw validationError;
+      connectionStatus = 'offline';
+      connectionMessage = message;
+    }
     const ownerId = requestOwner(req);
-    const saved = await createXtreamSource({ ...source, ownerId });
+    const saved = await createXtreamSource({ ...source, ownerId, connectionStatus, connectionMessage });
     playlistHealthCache.delete(ownerId);
-    res.status(201).json(saved);
+    res.status(connectionStatus === 'online' ? 201 : 202).json({
+      ...saved,
+      warning: connectionStatus === 'offline'
+        ? 'Source saved, but the playlist provider is currently unreachable from the server.'
+        : '',
+    });
   } catch (error) { res.status(400).json({ error: error.message }); }
 });
 

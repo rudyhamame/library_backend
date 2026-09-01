@@ -33,6 +33,8 @@ export function publicXtreamSource(source) {
     archivedItems: Array.isArray(source.archivedItems) ? source.archivedItems : [],
     selectedCount: Array.isArray(source.enabledKeys) ? source.enabledKeys.length : 0,
     archivedCount: Array.isArray(source.archivedKeys) ? source.archivedKeys.length : 0,
+    connectionStatus: source.connectionStatus || 'unknown',
+    connectionMessage: source.connectionMessage || '',
     updatedAt: source.updatedAt,
   };
 }
@@ -51,9 +53,10 @@ export async function getAllXtreamSources(ownerId) {
   return (await sourceCollection()).find(ownerId ? { ownerId } : {}).sort({ name: 1, updatedAt: -1 }).toArray();
 }
 
-export async function createXtreamSource({ name, type = 'xtream', baseUrl, username = '', password = '', ownerId }) {
+export async function createXtreamSource({ name, type = 'xtream', baseUrl, username = '', password = '', ownerId, connectionStatus = 'online', connectionMessage = '' }) {
   const source = {
     _id: randomUUID(), name, type, baseUrl, username, password, ownerId,
+    connectionStatus, connectionMessage,
     enabledKeys: [], enabledItems: [], archivedKeys: [], archivedItems: [], createdAt: new Date(), updatedAt: new Date(),
   };
   await (await sourceCollection()).insertOne(source);

@@ -164,10 +164,27 @@ async function candidatePool({ sources, savedItems, evidence, language, getCatal
         item.localScore = candidateScore(item, evidence, language);
         candidates.set(identity, item);
       }
-      if (candidates.size >= AI_LIMITS.candidates * 3) break;
+      const languageCounts = { ar: 0, en: 0 };
+      if (language === 'both') for (const candidate of candidates.values()) {
+        const code = inferItemLanguage(candidate); if (code === 'ar' || code === 'en') languageCounts[code] += 1;
+      }
+      if (candidates.size >= AI_LIMITS.candidates * 6
+        || (candidates.size >= AI_LIMITS.candidates * 3
+          && (language !== 'both' || (languageCounts.ar >= AI_LIMITS.output * 2 && languageCounts.en >= AI_LIMITS.output * 2)))) break;
     }
   }
-  return [...candidates.values()].sort((a, b) => b.localScore - a.localScore || itemIdentity(a).localeCompare(itemIdentity(b))).slice(0, AI_LIMITS.candidates);
+  const ranked = [...candidates.values()].sort((a, b) => b.localScore - a.localScore || itemIdentity(a).localeCompare(itemIdentity(b)));
+  if (language !== 'both') return ranked.slice(0, AI_LIMITS.candidates);
+  const quota = Math.floor(AI_LIMITS.candidates / 2);
+  const arabic = ranked.filter(item => inferItemLanguage(item) === 'ar').slice(0, quota);
+  const english = ranked.filter(item => inferItemLanguage(item) === 'en').slice(0, quota);
+  const selected = [...arabic, ...english];
+  const selectedIds = new Set(selected.map(itemIdentity));
+  for (const item of ranked) {
+    if (selected.length >= AI_LIMITS.candidates) break;
+    if (!selectedIds.has(itemIdentity(item))) { selected.push(item); selectedIds.add(itemIdentity(item)); }
+  }
+  return selected.sort((a, b) => b.localScore - a.localScore || itemIdentity(a).localeCompare(itemIdentity(b)));
 }
 
 const responseSchema = {

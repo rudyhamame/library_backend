@@ -1271,7 +1271,11 @@ app.get('/api/xtream/catalog', async (req, res) => {
     const category = String(req.query.category || '');
     const query = normalizeSearchText(req.query.q);
     if (!category) return res.status(400).json({ error: 'Select a playlist category first' });
-    const allItems = await getSourceCatalog(source, kind, category);
+    // Browsing respects the selected category. Searching must use the full
+    // playlist catalog for this content type so matches in other categories
+    // are not hidden by the category currently open in the Android UI.
+    const catalogCategory = query ? 'all' : category;
+    const allItems = await getSourceCatalog(source, kind, catalogCategory);
     const enabled = new Set(source.enabledKeys || []);
     const titleLanguage = String(req.query.titleLanguage || req.query.language || 'all').toUpperCase();
     const requestedPage = Math.max(1, Number.parseInt(req.query.page, 10) || 1);
@@ -1281,7 +1285,7 @@ app.get('/api/xtream/catalog', async (req, res) => {
     for (const item of allItems) {
       const languageCode = titleLanguageCode(item);
       languageSet.add(languageCode);
-      if ((category === 'all' || item.categoryId === category)
+      if ((query || category === 'all' || item.categoryId === category)
         && (titleLanguage === 'ALL' || languageCode === titleLanguage)
         && (!query || normalizeSearchText(`${item.title} ${item.categoryId || ''}`).includes(query))) {
         filtered.push({ ...item, languageCode, titleLanguage: languageCode });

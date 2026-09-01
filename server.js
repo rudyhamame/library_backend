@@ -642,7 +642,7 @@ app.delete('/api/account/profiles/:profileId', async (req, res) => {
 });
 app.post('/api/account/profiles/:profileId/select', async (req, res) => {
   try {
-    const authorization = resolveDeviceToken(String(req.get('x-device-token') || ''));
+    const authorization = resolveDeviceToken(String(req.get('x-device-token') || req.query.deviceToken || ''));
     const accountId = authorization?.accountId;
     if (!accountId) return res.status(401).json({ error: 'Sign in to choose a profile' });
     const result = await selectAccountProfile(accountId, req.params.profileId, authorization);

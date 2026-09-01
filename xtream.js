@@ -70,6 +70,19 @@ async function request(source, params, transform = value => value, options = {})
 
 const stringId = value => String(value ?? '');
 
+function positiveDurationValue(...values) {
+  for (const value of values) {
+    const raw = String(value ?? '').trim();
+    if (!raw) continue;
+    if (/^\d+(?::\d{1,2}){1,2}$/.test(raw)) {
+      const parts = raw.split(':').map(Number);
+      const seconds = parts.length === 3 ? parts[0] * 3600 + parts[1] * 60 + parts[2] : parts[0] * 60 + parts[1];
+      if (seconds > 0) return raw;
+    } else if (Number(raw) > 0) return raw;
+  }
+  return '';
+}
+
 export async function validateXtreamConnection(source, options = {}) {
   const data = await request(source, {}, value => value, options);
   if (!data?.user_info) throw new Error('This URL did not return a valid Xtream account');
@@ -135,7 +148,7 @@ export async function getXtreamSeriesEpisodes(source, seriesId) {
         seasonNumber: Number(seasonNumber) || 1,
         seasonTitle: String(seasons.get(String(seasonNumber))?.name || `Season ${seasonNumber}`),
         extension: String(row.container_extension || 'mp4'),
-        duration: String(row.info?.duration || row.info?.duration_secs || ''),
+        duration: positiveDurationValue(row.info?.duration, row.info?.duration_secs, row.duration, row.duration_secs),
         thumbnail: String(row.info?.movie_image || data?.info?.cover || ''),
       });
     }

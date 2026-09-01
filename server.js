@@ -572,17 +572,16 @@ app.get('/api/roku/auth-health', async (req, res) => {
   } catch (error) { res.status(503).json({ ok: false, authenticated: false, error: error.message }); }
 });
 
-async function ownerPlaylistHealth(ownerId) {
+async function ownerPlaylistHealth(ownerId, { force = false } = {}) {
   const cached = playlistHealthCache.get(ownerId);
-  if (cached?.expiresAt > Date.now()) return cached.payload;
+  if (!force && cached?.expiresAt > Date.now()) return cached.payload;
   if (playlistHealthInFlight.has(ownerId)) return playlistHealthInFlight.get(ownerId);
   const request = (async () => {
     const sources = await getAllXtreamSources(ownerId);
     const health = await checkPlaylistSources(sources, source => (
       sourceType(source) === 'm3u' ? validateM3uConnection(source) : validateXtreamConnection(source)
     ));
-    const { results: _results, ...summary } = health;
-    const payload = { ...summary, checkedAt: new Date().toISOString() };
+    const payload = { ...health, checkedAt: new Date().toISOString() };
     playlistHealthCache.set(ownerId, { payload, expiresAt: Date.now() + playlistHealthTtlMs });
     return payload;
   })();
@@ -599,7 +598,8 @@ app.get('/api/roku/playlist-health', async (req, res) => {
     const session = resolveDeviceToken(token);
     if (!await isRokuSessionLinked(session)) return res.status(401).json({ ok: false, status: 'not_paired' });
     res.set('Cache-Control', 'no-store');
-    res.json(await ownerPlaylistHealth(session.ownerId));
+    const { results: _results, ...summary } = await ownerPlaylistHealth(session.ownerId);
+    res.json(summary);
   } catch (error) {
     res.status(503).json({ ok: false, status: 'unavailable', error: error.message });
   }
@@ -610,7 +610,7 @@ app.get('/api/playlist-health', async (req, res) => {
     const ownerId = requestOwner(req);
     if (!ownerId) return res.status(401).json({ ok: false, status: 'unauthorized' });
     res.set('Cache-Control', 'no-store');
-    res.json(await ownerPlaylistHealth(ownerId));
+    res.json(await ownerPlaylistHealth(ownerId, { force: req.query.refresh === '1' }));
   } catch (error) {
     res.status(503).json({ ok: false, status: 'unavailable', error: error.message });
   }

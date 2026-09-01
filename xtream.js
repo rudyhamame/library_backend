@@ -4,6 +4,7 @@ const cacheMaxEntries = 6;
 const inFlight = new Map();
 const maxInFlight = Math.max(4, Number.parseInt(process.env.XTREAM_MAX_IN_FLIGHT || '12', 10) || 12);
 const upstreamAttempts = Math.max(1, Math.min(3, Number.parseInt(process.env.XTREAM_REQUEST_ATTEMPTS || '3', 10) || 3));
+const upstreamTimeoutMs = Math.max(5_000, Math.min(30_000, Number.parseInt(process.env.XTREAM_REQUEST_TIMEOUT_MS || '18000', 10) || 18_000));
 const wait = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
 
 export function evictXtreamCache(now = Date.now(), aggressive = false) {
@@ -26,7 +27,7 @@ async function fetchXtream(url) {
   let lastError;
   for (let attempt = 1; attempt <= upstreamAttempts; attempt += 1) {
     try {
-      return await fetch(url, { signal: AbortSignal.timeout(60_000) });
+      return await fetch(url, { signal: AbortSignal.timeout(upstreamTimeoutMs) });
     } catch (error) {
       lastError = error;
       if (attempt < upstreamAttempts) await wait(attempt * 350);

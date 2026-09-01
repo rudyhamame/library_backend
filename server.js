@@ -500,6 +500,17 @@ app.get('/api/roku/playlist-health', async (req, res) => {
   }
 });
 
+app.get('/api/playlist-health', async (req, res) => {
+  try {
+    const ownerId = requestOwner(req);
+    if (!ownerId) return res.status(401).json({ ok: false, status: 'unauthorized' });
+    res.set('Cache-Control', 'no-store');
+    res.json(await ownerPlaylistHealth(ownerId));
+  } catch (error) {
+    res.status(503).json({ ok: false, status: 'unavailable', error: error.message });
+  }
+});
+
 // The Roku displays a short-lived QR/device code. The phone signs up or signs
 // in, then the Roku polls for approval and receives its token automatically.
 app.post('/api/roku/device-session', async (req, res) => {
@@ -1351,7 +1362,10 @@ app.post('/api/xtream/sources', async (req, res) => {
     const source = parsePlaylistInput(req.body);
     if (source.type === 'm3u') await validateM3uConnection({ ...source, _id: 'validation' });
     else await validateXtreamConnection({ ...source, _id: 'validation' });
-    res.status(201).json(await createXtreamSource({ ...source, ownerId: requestOwner(req) }));
+    const ownerId = requestOwner(req);
+    const saved = await createXtreamSource({ ...source, ownerId });
+    playlistHealthCache.delete(ownerId);
+    res.status(201).json(saved);
   } catch (error) { res.status(400).json({ error: error.message }); }
 });
 
@@ -1365,7 +1379,10 @@ app.put('/api/xtream/sources/:id', async (req, res) => {
       if (sourceType(candidate) === 'm3u') await validateM3uConnection(candidate);
       else await validateXtreamConnection(candidate);
     }
-    res.json(await updateXtreamSource(req.params.id, changes, requestOwner(req)));
+    const ownerId = requestOwner(req);
+    const saved = await updateXtreamSource(req.params.id, changes, ownerId);
+    playlistHealthCache.delete(ownerId);
+    res.json(saved);
   } catch (error) { res.status(400).json({ error: error.message }); }
 });
 
@@ -1373,6 +1390,7 @@ app.delete('/api/xtream/sources/:id', async (req, res) => {
   try {
     const ownerId = requestOwner(req);
     if (!await deleteXtreamSource(req.params.id, ownerId)) return res.sendStatus(404);
+    playlistHealthCache.delete(ownerId);
     bumpLibraryRevision(ownerId);
     res.sendStatus(204);
   } catch (error) { res.status(500).json({ error: error.message }); }

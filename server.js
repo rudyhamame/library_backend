@@ -1106,32 +1106,15 @@ app.get('/api/android/bootstrap', async (req, res) => {
     if (!ownerId) return res.status(401).json({ error: 'Authentication required' });
     const sources = await getAllXtreamSources(ownerId);
     const counts = { series: 0, movie: 0, channel: 0 };
-    const recent = { series: [], movie: [], channel: [] };
-    const addedTime = (item) => {
-      const numeric = Number(item.added);
-      if (Number.isFinite(numeric) && numeric > 0) return numeric;
-      const parsed = Date.parse(item.added);
-      return Number.isFinite(parsed) ? Math.floor(parsed / 1000) : 0;
-    };
     for (const source of sources) {
       for (const item of Array.isArray(source.enabledItems) ? source.enabledItems : []) {
         const kind = ['series', 'movie', 'channel'].includes(item.kind) ? item.kind : null;
         if (!kind) continue;
         counts[kind] += 1;
-        recent[kind].push({
-          id: item.id, key: item.key, kind, title: item.title,
-          categoryId: item.categoryId, logo: item.logo || item.thumbnail,
-          rating: item.rating, duration: item.duration, extension: item.extension,
-          added: item.added, sourceId: String(source._id),
-        });
       }
     }
-    for (const kind of Object.keys(recent)) {
-      recent[kind].sort((a, b) => addedTime(b) - addedTime(a));
-      recent[kind] = recent[kind].slice(0, 10);
-    }
     res.set('Cache-Control', 'no-store');
-    res.json({ counts, recent });
+    res.json({ counts });
   }
   catch (error) { res.status(500).json({ error: error.message }); }
 });

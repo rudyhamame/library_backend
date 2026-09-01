@@ -1147,7 +1147,7 @@ app.get('/api/roku/dashboard', async (req, res) => {
 });
 function parsePlaylistInput(body, existing = null) {
   const name = String(body?.name || existing?.name || '').trim();
-  const type = body?.type === 'm3u' ? 'm3u' : body?.type === 'xtream' ? 'xtream' : sourceType(existing);
+  let type = body?.type === 'm3u' ? 'm3u' : body?.type === 'xtream' ? 'xtream' : sourceType(existing);
   const supplied = String(body?.url || '').trim();
   if (!name) throw new Error('Source name is required');
   if (!supplied && existing) return { name };
@@ -1155,6 +1155,12 @@ function parsePlaylistInput(body, existing = null) {
   let url;
   try { url = new URL(supplied); } catch { throw new Error('Enter a valid playlist URL'); }
   if (!['http:', 'https:'].includes(url.protocol)) throw new Error('Playlist URL must use HTTP or HTTPS');
+  // Many providers label their Xtream get.php URL as an M3U link. Downloading
+  // that generated file can take minutes for a large catalog and made Add
+  // Source fail even though the account API was healthy. Detect the embedded
+  // Xtream credentials and use player_api.php instead.
+  if (type === 'm3u' && /\/(?:get|player_api)\.php\/?$/i.test(url.pathname)
+    && url.searchParams.get('username') && url.searchParams.get('password')) type = 'xtream';
   if (type === 'm3u') return { name, type, baseUrl: url.toString(), username: '', password: '' };
   const username = String(body?.username || url.searchParams.get('username') || existing?.username || '').trim();
   const password = String(body?.password || url.searchParams.get('password') || existing?.password || '').trim();

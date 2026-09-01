@@ -27,6 +27,14 @@ export async function getRecommendationCache(key) {
   return (await collection()).findOne({ key: String(key), expiresAt: { $gt: new Date() } });
 }
 
+export async function getLatestRecommendationCache(ownerId, language) {
+  if (!ownerId) return null;
+  return (await collection()).findOne(
+    { ownerId: String(ownerId), language: String(language || 'both'), expiresAt: { $gt: new Date() } },
+    { sort: { createdAt: -1 } },
+  );
+}
+
 export async function saveRecommendationCache(entry) {
   const now = new Date();
   await (await collection()).updateOne(
@@ -36,4 +44,3 @@ export async function saveRecommendationCache(entry) {
   );
   return entry;
 }
-

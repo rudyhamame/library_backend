@@ -134,6 +134,7 @@ export async function deleteAccountProfile(accountId, profileId) {
     process.env.MONGODB_STREAMING_HISTORY_COLLECTION || 'streaming_history',
     process.env.MONGODB_FAVORITES_COLLECTION || 'favorites',
     process.env.MONGODB_AI_RECOMMENDATIONS_COLLECTION || 'ai_recommendations',
+    process.env.MONGODB_ANDROID_STARTUP_COLLECTION || 'android_startup_snapshots',
   ];
   await Promise.all(collectionNames.map(name => database.collection(name).deleteMany({ ownerId })));
   await database.collection(process.env.MONGODB_DEVICE_COLLECTION || 'device_profiles').updateMany(
@@ -159,6 +160,7 @@ export async function deleteAccountProfilesAndData(accountId) {
     process.env.MONGODB_STREAMING_HISTORY_COLLECTION || 'streaming_history',
     process.env.MONGODB_FAVORITES_COLLECTION || 'favorites',
     process.env.MONGODB_AI_RECOMMENDATIONS_COLLECTION || 'ai_recommendations',
+    process.env.MONGODB_ANDROID_STARTUP_COLLECTION || 'android_startup_snapshots',
   ];
   await Promise.all(ownedCollections.map(name => database.collection(name).deleteMany({ ownerId: { $in: ownerIds } })));
   await database.collection(process.env.MONGODB_DEVICE_COLLECTION || 'device_profiles').updateMany(

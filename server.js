@@ -22,6 +22,8 @@ import { createLibraryCategory, deleteLibraryCategory, getManagedLibrary, rename
 import { enforceLibraryOnly } from './library-route-policy.js';
 import { checkPlaylistSources } from './playlist-health.js';
 import { getAiRecommendations } from './ai-recommendations.js';
+import { getLatestRecommendationCache } from './recommendations-store.js';
+import { getAndroidStartupSnapshot, saveAndroidStartupSnapshot } from './android-startup-store.js';
 
 const app = express();
 app.use(enforceLibraryOnly);
@@ -69,6 +71,7 @@ const hlsMaxSegments = Math.max(12, Number.parseInt(process.env.HLS_MAX_SEGMENTS
 const mediaStreamIdleTimeoutMs = Math.max(10_000, Number.parseInt(process.env.MEDIA_STREAM_IDLE_TIMEOUT_MS || '45000', 10) || 45_000);
 const libraryRevisions = new Map();
 const libraryRevisionWaiters = new Map();
+const androidStartupRefreshes = new Map();
 let activeDirectStreams = 0;
 let shuttingDown = false;
 let mediaRequestSequence = 0;
@@ -1154,13 +1157,75 @@ app.get('/api/xtream/sources', async (req, res) => {
   catch (error) { res.status(500).json({ error: error.message }); }
 });
 
-// Fast mobile startup payload sourced only from the account's persisted
-// library. Never contact playlist providers while Android is launching.
+async function buildAndroidRecentSnapshot(ownerId) {
+  const sources = await getAllXtreamSources(ownerId);
+  const recent = { series: [], movie: [], channel: [] };
+  const counts = { series: 0, movie: 0, channel: 0 };
+  const addedTime = item => {
+    const numeric = Number(item.added);
+    if (Number.isFinite(numeric) && numeric > 0) return numeric;
+    const parsed = Date.parse(item.added);
+    return Number.isFinite(parsed) ? Math.floor(parsed / 1000) : 0;
+  };
+  for (const source of sources) {
+    for (const kind of ['series', 'movie', 'channel']) {
+      const catalog = await getSourceCatalog(source, kind);
+      counts[kind] += Array.isArray(catalog) ? catalog.length : 0;
+      for (const item of catalog) {
+        const candidate = {
+          id: item.id, key: item.key, kind, title: item.title,
+          categoryId: item.categoryId, logo: item.logo, rating: item.rating,
+          duration: item.duration, extension: item.extension,
+          added: item.added, sourceId: String(source._id),
+        };
+        const group = recent[kind];
+        if (group.length < 10) group.push(candidate);
+        else {
+          let oldest = 0;
+          for (let index = 1; index < group.length; index += 1) {
+            if (addedTime(group[index]) < addedTime(group[oldest])) oldest = index;
+          }
+          if (addedTime(candidate) > addedTime(group[oldest])) group[oldest] = candidate;
+        }
+      }
+    }
+  }
+  for (const group of Object.values(recent)) group.sort((a, b) => addedTime(b) - addedTime(a)
+    || String(a.title || '').localeCompare(String(b.title || '')));
+  await saveAndroidStartupSnapshot(ownerId, { recent, catalogCounts: counts });
+  return { counts, recent };
+}
+
+function scheduleAndroidStartupRefresh(ownerId, language) {
+  const key = `${ownerId}:${language}`;
+  if (androidStartupRefreshes.has(key)) return;
+  const pending = (async () => {
+    await buildAndroidRecentSnapshot(ownerId);
+    await getAiRecommendations({
+      ownerId, language, forceRefresh: false,
+      getSources: getAllXtreamSources,
+      getCatalog: getSourceCatalog,
+      getCategories: getSourceCategories,
+    });
+  })().catch(error => console.warn(`[AndroidStartup] background-refresh-failed owner=${ownerId} error=${error.message}`))
+    .finally(() => androidStartupRefreshes.delete(key));
+  androidStartupRefreshes.set(key, pending);
+}
+
+// Fast mobile startup payload sourced only from MongoDB. Provider catalogs and
+// Gemini are refreshed after the response and never block Android navigation.
 app.get('/api/android/bootstrap', async (req, res) => {
   try {
     const ownerId = requestOwner(req);
     if (!ownerId) return res.status(401).json({ error: 'Authentication required' });
-    const sources = await getAllXtreamSources(ownerId);
+    const authorization = resolveDeviceToken(String(req.get('x-device-token') || ''));
+    const language = ['arabic', 'english', 'both'].includes(String(req.query.language)) ? String(req.query.language) : 'both';
+    const [sources, snapshot, recommendation, devices] = await Promise.all([
+      getAllXtreamSources(ownerId),
+      getAndroidStartupSnapshot(ownerId),
+      getLatestRecommendationCache(ownerId, language),
+      authorization?.accountId ? getLinkedDevices(authorization.accountId, authorization.profileId || '') : Promise.resolve([]),
+    ]);
     const counts = { series: 0, movie: 0, channel: 0 };
     for (const source of sources) {
       for (const item of Array.isArray(source.enabledItems) ? source.enabledItems : []) {
@@ -1170,7 +1235,16 @@ app.get('/api/android/bootstrap', async (req, res) => {
       }
     }
     res.set('Cache-Control', 'no-store');
-    res.json({ counts });
+    res.json({
+      counts,
+      recent: snapshot?.recent || { series: [], movie: [], channel: [] },
+      recommendations: recommendation?.payload?.items || [],
+      devices,
+      sources: sources.map(publicXtreamSource),
+      snapshotUpdatedAt: snapshot?.updatedAt || null,
+    });
+    const snapshotAge = snapshot?.updatedAt ? Date.now() - new Date(snapshot.updatedAt).getTime() : Number.POSITIVE_INFINITY;
+    if (snapshotAge > 15 * 60 * 1000 || !recommendation) scheduleAndroidStartupRefresh(ownerId, language);
   }
   catch (error) { res.status(500).json({ error: error.message }); }
 });
@@ -1199,41 +1273,7 @@ app.post('/api/recommendations/ai', async (req, res) => {
 // mobile device. Provider rows exist only long enough to count them here.
 app.get('/api/xtream/catalog-counts', async (req, res) => {
   try {
-    const sources = await getAllXtreamSources(requestOwner(req));
-    const counts = { series: 0, movie: 0, channel: 0 };
-    const recent = { series: [], movie: [], channel: [] };
-    const addedTime = item => {
-      const numeric = Number(item.added);
-      if (Number.isFinite(numeric) && numeric > 0) return numeric;
-      const parsed = Date.parse(item.added);
-      return Number.isFinite(parsed) ? Math.floor(parsed / 1000) : 0;
-    };
-    for (const source of sources) {
-      for (const kind of ['series', 'movie', 'channel']) {
-        const catalog = await getSourceCatalog(source, kind);
-        counts[kind] += Array.isArray(catalog) ? catalog.length : 0;
-        for (const item of catalog) {
-            const candidate = {
-              id: item.id, key: item.key, kind, title: item.title,
-              categoryId: item.categoryId, logo: item.logo, rating: item.rating,
-              duration: item.duration, extension: item.extension,
-              added: item.added, sourceId: String(source._id),
-            };
-            const group = recent[kind];
-            if (group.length < 10) group.push(candidate);
-            else {
-              let oldest = 0;
-              for (let i = 1; i < group.length; i += 1) {
-                if (addedTime(group[i]) < addedTime(group[oldest])) oldest = i;
-              }
-              if (addedTime(candidate) > addedTime(group[oldest])) group[oldest] = candidate;
-            }
-          }
-      }
-    }
-    for (const group of Object.values(recent)) group.sort((a, b) => addedTime(b) - addedTime(a)
-      || String(a.title || '').localeCompare(String(b.title || '')));
-    res.json({ counts, recent });
+    res.json(await buildAndroidRecentSnapshot(requestOwner(req)));
   } catch (error) { res.status(502).json({ error: error.message }); }
 });
 

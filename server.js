@@ -1175,7 +1175,9 @@ app.get('/api/xtream/sources', async (req, res) => {
 });
 
 async function buildAndroidRecentSnapshot(ownerId) {
-  const sources = await getAllXtreamSources(ownerId);
+  // Sources saved while their provider was unreachable must not turn a
+  // background refresh into a minute-long chain of connection timeouts.
+  const sources = (await getAllXtreamSources(ownerId)).filter(source => source.connectionStatus !== 'offline');
   const recent = { series: [], movie: [], channel: [] };
   const counts = { series: 0, movie: 0, channel: 0 };
   const addedTime = item => {
@@ -1185,8 +1187,14 @@ async function buildAndroidRecentSnapshot(ownerId) {
     return Number.isFinite(parsed) ? Math.floor(parsed / 1000) : 0;
   };
   for (const source of sources) {
-    for (const kind of ['series', 'movie', 'channel']) {
-      const catalog = await getSourceCatalog(source, kind);
+    const catalogs = await Promise.all(['series', 'movie', 'channel'].map(async kind => {
+      try { return [kind, await getSourceCatalog(source, kind)]; }
+      catch (error) {
+        console.warn(`[AndroidStartup] source-refresh-skipped source=${source._id} kind=${kind} error=${error.message}`);
+        return [kind, []];
+      }
+    }));
+    for (const [kind, catalog] of catalogs) {
       counts[kind] += Array.isArray(catalog) ? catalog.length : 0;
       for (const item of catalog) {
         const candidate = {
@@ -1220,7 +1228,8 @@ function scheduleAndroidStartupRefresh(ownerId, language) {
     await buildAndroidRecentSnapshot(ownerId);
     await getAiRecommendations({
       ownerId, language, forceRefresh: false,
-      getSources: getAllXtreamSources,
+      getSources: async requestedOwner => (await getAllXtreamSources(requestedOwner))
+        .filter(source => source.connectionStatus !== 'offline'),
       getCatalog: getSourceCatalog,
       getCategories: getSourceCategories,
     });
@@ -1399,6 +1408,8 @@ app.put('/api/xtream/sources/:id', async (req, res) => {
       const candidate = { ...existing, ...changes };
       if (sourceType(candidate) === 'm3u') await validateM3uConnection(candidate);
       else await validateXtreamConnection(candidate);
+      changes.connectionStatus = 'online';
+      changes.connectionMessage = '';
     }
     const ownerId = requestOwner(req);
     const saved = await updateXtreamSource(req.params.id, changes, ownerId);

@@ -21,7 +21,7 @@ import { createAccountProfile, deleteAccountProfile, getAccountProfile, getAccou
 import { createLibraryCategory, deleteLibraryCategory, getManagedLibrary, renameLibraryCategory, replaceLibraryCategoryItems } from './library-category-store.js';
 import { enforceLibraryOnly } from './library-route-policy.js';
 import { checkPlaylistSources } from './playlist-health.js';
-import { getAiRecommendations } from './ai-recommendations.js';
+import { AI_RECOMMENDATION_VERSION, getAiRecommendations } from './ai-recommendations.js';
 import { getLatestRecommendationCache } from './recommendations-store.js';
 import { getAndroidStartupSnapshot, saveAndroidStartupSnapshot } from './android-startup-store.js';
 
@@ -1223,7 +1223,7 @@ app.get('/api/android/bootstrap', async (req, res) => {
     const [sources, snapshot, recommendation, devices] = await Promise.all([
       getAllXtreamSources(ownerId),
       getAndroidStartupSnapshot(ownerId),
-      getLatestRecommendationCache(ownerId, language),
+      getLatestRecommendationCache(ownerId, language, AI_RECOMMENDATION_VERSION),
       authorization?.accountId ? getLinkedDevices(authorization.accountId, authorization.profileId || '') : Promise.resolve([]),
     ]);
     const counts = { series: 0, movie: 0, channel: 0 };

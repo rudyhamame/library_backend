@@ -27,10 +27,10 @@ export async function getRecommendationCache(key) {
   return (await collection()).findOne({ key: String(key), expiresAt: { $gt: new Date() } });
 }
 
-export async function getLatestRecommendationCache(ownerId, language) {
+export async function getLatestRecommendationCache(ownerId, language, algorithmVersion = 1) {
   if (!ownerId) return null;
   return (await collection()).findOne(
-    { ownerId: String(ownerId), language: String(language || 'both'), expiresAt: { $gt: new Date() } },
+    { ownerId: String(ownerId), language: String(language || 'both'), algorithmVersion: Number(algorithmVersion), expiresAt: { $gt: new Date() } },
     { sort: { createdAt: -1 } },
   );
 }

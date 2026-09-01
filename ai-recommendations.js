@@ -10,6 +10,7 @@ export const AI_LIMITS = Object.freeze({
   refreshCooldownMs: Math.max(1, Number.parseFloat(process.env.AI_RECOMMENDATION_REFRESH_COOLDOWN_MINUTES || '10') || 10) * 60 * 1000,
   retries: Math.max(0, Math.min(2, Number.parseInt(process.env.MAX_GEMINI_RETRIES || '2', 10) || 0)),
 });
+export const AI_RECOMMENDATION_VERSION = 2;
 
 const inFlight = new Map();
 const arabicText = /[\u0600-\u06ff\u0750-\u077f\u08a0-\u08ff]/;
@@ -194,7 +195,8 @@ async function geminiRequest(input) {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) throw Object.assign(new Error('Gemini API key is unavailable'), { noRetry: true });
   const model = process.env.GEMINI_MODEL || 'gemini-3.7-flash';
-  const instruction = `You are a recommendation-ranking engine for an IPTV library. Study the supplied representative saved sample and local preference evidence. Infer broad genres, themes, tone, content type, language, cultural/origin, era and storytelling patterns without overfitting to titles. Rank ONLY the supplied candidates. Never invent an item. Preserve candidate id, sourceId and type exactly. The selected language mode is ${input.languagePreference.toUpperCase()}. Return exactly 10 recommendations when at least 10 candidates exist. Movies and series may appear in any ratio; do not force a split. Favor relevance with useful diversity. Return JSON only.`;
+  const bilingualRule = input.languagePreference === 'both' ? ' For BOTH mode, select exactly 5 Arabic and 5 English items when at least five valid candidates exist in each language.' : '';
+  const instruction = `You are a recommendation-ranking engine for an IPTV library. Study the supplied representative saved sample and local preference evidence. Infer broad genres, themes, tone, content type, language, cultural/origin, era and storytelling patterns without overfitting to titles. Rank ONLY the supplied candidates. Never invent an item. Preserve candidate id, sourceId and type exactly. The selected language mode is ${input.languagePreference.toUpperCase()}.${bilingualRule} Return exactly 10 recommendations when at least 10 candidates exist. Movies and series may appear in any ratio; do not force a split. Favor relevance with useful diversity. Return JSON only.`;
   const body = {
     systemInstruction: { parts: [{ text: instruction }] },
     contents: [{ role: 'user', parts: [{ text: JSON.stringify(input) }] }],
@@ -222,9 +224,9 @@ async function geminiRequest(input) {
   throw lastError || new Error('Gemini request failed');
 }
 
-export function validateAndFillRecommendations(aiOutput, candidates) {
+export function validateAndFillRecommendations(aiOutput, candidates, language = 'both') {
   const byIdentity = new Map(candidates.map(item => [itemIdentity(item), item]));
-  const selected = [];
+  const ranked = [];
   for (const recommendation of Array.isArray(aiOutput?.recommendations) ? aiOutput.recommendations : []) {
     const identity = `${recommendation.sourceId}:${recommendation.type}:${recommendation.id}`;
     const item = byIdentity.get(identity);
@@ -232,15 +234,34 @@ export function validateAndFillRecommendations(aiOutput, candidates) {
       console.warn(`[AIRecommendations] invalid-candidate-removed id=${String(recommendation.id || '').slice(0, 80)}`);
       continue;
     }
-    if (selected.some(value => itemIdentity(value) === identity)) continue;
-    selected.push({ ...item, recommendationReason: String(recommendation.reason || '').slice(0, 180), recommendationScore: Math.max(0, Math.min(1, Number(recommendation.score) || 0)) });
-    if (selected.length === AI_LIMITS.output) break;
+    if (ranked.some(value => itemIdentity(value) === identity)) continue;
+    ranked.push({ ...item, recommendationReason: String(recommendation.reason || '').slice(0, 180), recommendationScore: Math.max(0, Math.min(1, Number(recommendation.score) || 0)) });
   }
   for (const item of candidates) {
-    if (selected.length === AI_LIMITS.output) break;
-    if (!selected.some(value => itemIdentity(value) === itemIdentity(item))) selected.push({ ...item, recommendationReason: 'Strong match based on your saved library.', recommendationScore: 0 });
+    if (!ranked.some(value => itemIdentity(value) === itemIdentity(item))) ranked.push({ ...item, recommendationReason: 'Strong match based on your saved library.', recommendationScore: 0 });
   }
-  return selected;
+  if (normalizeRecommendationLanguage(language) !== 'both') return ranked.slice(0, AI_LIMITS.output);
+  const arabic = ranked.filter(item => inferItemLanguage(item) === 'ar');
+  const english = ranked.filter(item => inferItemLanguage(item) === 'en');
+  if (!arabic.length || !english.length) return ranked.slice(0, AI_LIMITS.output);
+  const targetArabic = Math.min(AI_LIMITS.output / 2, arabic.length);
+  const targetEnglish = Math.min(AI_LIMITS.output / 2, english.length);
+  const primaryArabic = arabic.slice(0, targetArabic);
+  const primaryEnglish = english.slice(0, targetEnglish);
+  const selected = [];
+  const startsArabic = ranked.find(item => ['ar', 'en'].includes(inferItemLanguage(item))) === arabic[0];
+  for (let index = 0; index < Math.max(primaryArabic.length, primaryEnglish.length); index += 1) {
+    const first = startsArabic ? primaryArabic[index] : primaryEnglish[index];
+    const second = startsArabic ? primaryEnglish[index] : primaryArabic[index];
+    if (first) selected.push(first);
+    if (second) selected.push(second);
+  }
+  const selectedIds = new Set(selected.map(itemIdentity));
+  for (const item of ranked) {
+    if (selected.length === AI_LIMITS.output) break;
+    if (!selectedIds.has(itemIdentity(item))) { selected.push(item); selectedIds.add(itemIdentity(item)); }
+  }
+  return selected.slice(0, AI_LIMITS.output);
 }
 
 function publicItem(item) {
@@ -255,7 +276,7 @@ function publicItem(item) {
 function cacheKey(ownerId, language, sources, savedItems) {
   const sourceSignature = sources.map(source => `${source._id}:${source.type || 'xtream'}:${new Date(source.updatedAt || 0).getTime()}`).sort().join('|');
   const preferenceSignature = savedItems.map(itemIdentity).sort().join('|');
-  return hash(`${ownerId}\n${language}\n${hash(sourceSignature)}\n${hash(preferenceSignature)}`);
+  return hash(`v${AI_RECOMMENDATION_VERSION}\n${ownerId}\n${language}\n${hash(sourceSignature)}\n${hash(preferenceSignature)}`);
 }
 
 async function generate({ ownerId, language, forceRefresh, getSources, getCatalog, getCategories, ranker, cacheRead = getRecommendationCache, cacheWrite = saveRecommendationCache, aiAvailable = Boolean(process.env.GEMINI_API_KEY) }) {
@@ -285,10 +306,10 @@ async function generate({ ownerId, language, forceRefresh, getSources, getCatalo
       console.warn(`[AIRecommendations] gemini-${error?.status === 429 ? 'rate-limited' : 'failed'} fallback=local`);
     }
   } else if (savedItems.length) source = 'local-fallback';
-  const items = validateAndFillRecommendations(aiOutput, candidates).map(publicItem);
+  const items = validateAndFillRecommendations(aiOutput, candidates, language).map(publicItem);
   const payload = { language, source, cached: false, preferenceProfile: aiOutput?.preferenceProfile || null, items };
   console.info(`[AIRecommendations] ${source} recommendations=${items.length}`);
-  await cacheWrite({ key, ownerId, language, expiresAt: new Date(Date.now() + AI_LIMITS.ttlMs), payload }).catch(() => {});
+  await cacheWrite({ key, ownerId, language, algorithmVersion: AI_RECOMMENDATION_VERSION, expiresAt: new Date(Date.now() + AI_LIMITS.ttlMs), payload }).catch(() => {});
   return payload;
 }
 

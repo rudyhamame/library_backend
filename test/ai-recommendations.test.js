@@ -57,6 +57,31 @@ test('invalid and duplicate Gemini IDs are rejected and locally filled to exactl
   assert.equal(result.some(item => item.id === '999999'), false);
 });
 
+test('both mode returns five Arabic and five English recommendations when available', () => {
+  const candidates = [
+    ...Array.from({ length: 10 }, (_, index) => candidate(`ar-${index}`, index % 2 ? 'series' : 'movie', 'ar')),
+    ...Array.from({ length: 10 }, (_, index) => candidate(`en-${index}`, index % 2 ? 'series' : 'movie', 'en')),
+  ];
+  const aiOutput = { recommendations: candidates.slice(0, 10).map(item => ({
+    id: item.id, sourceId: item.sourceId, type: item.type, score: .9, reason: 'Arabic-only model output',
+  })) };
+  const result = validateAndFillRecommendations(aiOutput, candidates, 'both');
+  assert.equal(result.length, 10);
+  assert.equal(result.filter(item => item.language === 'ar').length, 5);
+  assert.equal(result.filter(item => item.language === 'en').length, 5);
+});
+
+test('both mode uses available language items and fills shortages without reducing the rail', () => {
+  const candidates = [
+    ...Array.from({ length: 2 }, (_, index) => candidate(`ar-${index}`, 'series', 'ar')),
+    ...Array.from({ length: 12 }, (_, index) => candidate(`en-${index}`, 'movie', 'en')),
+  ];
+  const result = validateAndFillRecommendations(null, candidates, 'both');
+  assert.equal(result.length, 10);
+  assert.equal(result.filter(item => item.language === 'ar').length, 2);
+  assert.equal(result.filter(item => item.language === 'en').length, 8);
+});
+
 test('candidate generation keeps scanning categories until enough valid items exist', async () => {
   const source = { _id: 'source-1', enabledItems: [] };
   const categories = Array.from({ length: 9 }, (_, index) => ({ id: String(index + 1), name: `Category ${index + 1}` }));

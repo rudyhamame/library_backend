@@ -259,12 +259,15 @@ export async function registerAccount(email, password, firstName = '', lastName 
   return { ok: true };
 }
 
-export function getRokuDeviceSessionStatus(code) {
+export async function getRokuDeviceSessionStatus(code) {
   const session = getDeviceSession(code);
   if (!session) return null;
   if (session.claimedAt) return { status: 'consumed', expiresAt: session.expiresAt };
   if (!session.approvedAt) return { status: 'pending', expiresAt: session.expiresAt };
-  return { status: 'approved', expiresAt: session.expiresAt, token: issueToken(session, 'roku') };
+  const profile = session.profileId && session.accountId
+    ? await getAccountProfile(session.accountId, session.profileId)
+    : null;
+  return { status: 'approved', expiresAt: session.expiresAt, token: issueToken(session, 'roku'), profileName: profile?.name || '' };
 }
 
 async function accountProfileId(accountId, profileId = '') {

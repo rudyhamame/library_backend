@@ -516,7 +516,7 @@ app.get('/api/roku/device-session', async (req, res) => {
 });
 app.get('/api/roku/device-session/status', async (req, res) => {
   try {
-    const session = getRokuDeviceSessionStatus(req.query.code);
+    const session = await getRokuDeviceSessionStatus(req.query.code);
     if (!session) return res.status(404).json({ error: 'Pairing code expired' });
     res.json(session);
   } catch (error) { res.status(500).json({ error: error.message }); }

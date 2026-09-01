@@ -8,10 +8,12 @@ const collectionName = process.env.MONGODB_ACCOUNT_PROFILE_COLLECTION || 'accoun
 const maxProfiles = Math.max(2, Math.min(8, Number.parseInt(process.env.MAX_ACCOUNT_PROFILES || '5', 10) || 5));
 const avatars = new Set(['lime', 'teal', 'amber', 'violet', 'rose', 'blue']);
 let collectionPromise;
+let clientPromise;
 
 async function profileCollection() {
   if (!collectionPromise) {
-    collectionPromise = new MongoClient(mongoUri, { serverSelectionTimeoutMS: 5000 }).connect()
+    clientPromise = clientPromise || new MongoClient(mongoUri, { serverSelectionTimeoutMS: 5000 }).connect();
+    collectionPromise = clientPromise
       .then(async client => {
         const collection = client.db(databaseName).collection(collectionName);
         await Promise.all([
@@ -40,7 +42,7 @@ function publicProfile(profile) {
   };
 }
 
-async function ensureDefaultProfile(accountId) {
+async function ensureDefaultProfileRecord(accountId, preferredName = 'Main') {
   if (!ObjectId.isValid(accountId)) throw Object.assign(new Error('Authentication required'), { status: 401 });
   const normalizedAccountId = new ObjectId(String(accountId));
   const collection = await profileCollection();
@@ -50,7 +52,7 @@ async function ensureDefaultProfile(accountId) {
     accountId: normalizedAccountId,
     id: randomUUID(),
     ownerId: accountOwnerId(accountId),
-    name: 'Main',
+    name: normalizeProfileName(preferredName) || 'Main',
     avatar: 'lime',
     isDefault: true,
     position: 0,
@@ -100,6 +102,50 @@ export async function createAccountProfile(accountId, input = {}) {
   };
   await collection.insertOne(profile);
   return { profile: publicProfile(profile) };
+}
+
+export async function updateAccountProfile(accountId, profileId, input = {}) {
+  const profile = await getAccountProfile(accountId, profileId);
+  if (!profile) return { error: 'Profile not found' };
+  const name = input.name === undefined ? profile.name : normalizeProfileName(input.name);
+  if (!name) return { error: 'Enter a profile name' };
+  const normalizedAccountId = new ObjectId(String(accountId));
+  const duplicate = await (await profileCollection()).findOne({ accountId: normalizedAccountId, id: { $ne: String(profileId) }, name: { $regex: `^${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, $options: 'i' } }, { projection: { _id: 1 } });
+  if (duplicate) return { error: 'Choose a different profile name' };
+  const avatar = avatars.has(input.avatar) ? input.avatar : profile.avatar || 'lime';
+  await (await profileCollection()).updateOne(
+    { accountId: normalizedAccountId, id: String(profileId) },
+    { $set: { name, avatar, updatedAt: new Date() } },
+  );
+  return { profile: publicProfile({ ...profile, name, avatar }) };
+}
+
+export async function deleteAccountProfile(accountId, profileId) {
+  const profile = await getAccountProfile(accountId, profileId);
+  if (!profile) return { error: 'Profile not found' };
+  if (profile.isDefault) return { error: 'The main profile cannot be deleted' };
+  const client = await clientPromise;
+  const database = client.db(databaseName);
+  const ownerId = String(profile.ownerId || '');
+  const collectionNames = [
+    process.env.MONGODB_XTREAM_COLLECTION || 'xtream_sources',
+    process.env.MONGODB_LIBRARY_CATEGORY_COLLECTION || 'library_categories',
+    process.env.MONGODB_PLAYBACK_COLLECTION || 'playback_progress',
+    process.env.MONGODB_STREAMING_HISTORY_COLLECTION || 'streaming_history',
+    process.env.MONGODB_FAVORITES_COLLECTION || 'favorites',
+    process.env.MONGODB_AI_RECOMMENDATIONS_COLLECTION || 'ai_recommendations',
+  ];
+  await Promise.all(collectionNames.map(name => database.collection(name).deleteMany({ ownerId })));
+  await database.collection(process.env.MONGODB_DEVICE_COLLECTION || 'device_profiles').updateMany(
+    { accountId: new ObjectId(String(accountId)), profileId: String(profileId) },
+    { $unset: { accountId: '', profileId: '' }, $set: { updatedAt: new Date() } },
+  );
+  await (await profileCollection()).deleteOne({ accountId: new ObjectId(String(accountId)), id: String(profileId) });
+  return { ok: true };
+}
+
+export async function ensureDefaultProfile(accountId, preferredName = 'Main') {
+  return ensureDefaultProfileRecord(accountId, preferredName);
 }
 
 export { maxProfiles as MAX_ACCOUNT_PROFILES };

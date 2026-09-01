@@ -17,7 +17,7 @@ import { HlsStrategy, PlaybackStrategy, choosePlaybackStrategy, determineHlsStra
 import { getStreamingContinueWatching, getStreamingHistory, getStreamingResume, saveStreamingHistory } from './streaming-history-store.js';
 import { getFavorites, toggleFavorite } from './favorites-store.js';
 import { authorizeDeviceSession, changeAccountPassword, claimAutomaticPairing, createDeviceSession, getDeviceWeatherLocations, getLinkedDevices, getPairingInfo, getRokuDeviceSessionStatus, isRokuSessionLinked, loginAccount, loginDeviceSession, recordDeviceHeartbeat, registerAccount, resolveDeviceToken, saveDeviceWeatherLocations, selectAccountProfile, setupDeviceSession, unlinkAccountDevice } from './device-sessions.js';
-import { createAccountProfile, getAccountProfiles } from './account-profile-store.js';
+import { createAccountProfile, deleteAccountProfile, getAccountProfiles, updateAccountProfile } from './account-profile-store.js';
 import { createLibraryCategory, deleteLibraryCategory, getManagedLibrary, renameLibraryCategory, replaceLibraryCategoryItems } from './library-category-store.js';
 import { enforceLibraryOnly } from './library-route-policy.js';
 import { checkPlaylistSources } from './playlist-health.js';
@@ -526,7 +526,7 @@ app.post('/api/roku/device-session/unlink', async (req, res) => {
     const token = String(req.get('x-device-token') || req.query.deviceToken || '');
     const session = resolveDeviceToken(token);
     if (!session?.accountId || !session?.deviceId) return res.status(401).json({ error: 'Linked Roku authorization is required' });
-    const result = await unlinkAccountDevice(session.accountId, session.deviceId);
+    const result = await unlinkAccountDevice(session.accountId, session.deviceId, session.profileId || '');
     if (result.error) return res.status(404).json(result);
     res.json({ ok: true });
   } catch (error) { res.status(500).json({ error: error.message }); }
@@ -554,7 +554,7 @@ app.post('/api/device-session/authorize', async (req, res) => {
 });
 app.post('/api/device-session/setup', async (req, res) => {
   try {
-    const result = await setupDeviceSession(req.body?.code, req.body?.email, req.body?.password);
+    const result = await setupDeviceSession(req.body?.code, req.body?.email, req.body?.password, req.body?.firstName, req.body?.lastName);
     if (result.error) return res.status(result.error.includes('expired') ? 404 : 400).json(result);
     res.json(result);
   } catch (error) { res.status(500).json({ error: error.message }); }
@@ -571,7 +571,7 @@ app.get('/api/account/devices', async (req, res) => {
   try {
     const accountId = requestAccount(req);
     if (!accountId) return res.status(401).json({ error: 'Sign in to view linked devices' });
-    res.json({ items: await getLinkedDevices(accountId) });
+    res.json({ items: await getLinkedDevices(accountId, resolveDeviceToken(String(req.get('x-device-token') || ''))?.profileId || '') });
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 app.post('/api/roku/heartbeat', async (req, res) => {
@@ -586,7 +586,7 @@ app.delete('/api/account/devices/:deviceId', async (req, res) => {
   try {
     const accountId = requestAccount(req);
     if (!accountId) return res.status(401).json({ error: 'Sign in to unlink a Roku device' });
-    const result = await unlinkAccountDevice(accountId, req.params.deviceId);
+    const result = await unlinkAccountDevice(accountId, req.params.deviceId, resolveDeviceToken(String(req.get('x-device-token') || ''))?.profileId || '');
     if (result.error) return res.status(404).json(result);
     res.json(result);
   } catch (error) { res.status(500).json({ error: error.message }); }
@@ -600,7 +600,7 @@ app.post('/api/account/login', async (req, res) => {
 });
 app.post('/api/account/signup', async (req, res) => {
   try {
-    const result = await registerAccount(req.body?.email, req.body?.password);
+    const result = await registerAccount(req.body?.email, req.body?.password, req.body?.firstName, req.body?.lastName);
     if (result.error) return res.status(400).json(result);
     res.status(201).json(result);
   } catch (error) { res.status(500).json({ error: error.message }); }
@@ -620,6 +620,24 @@ app.post('/api/account/profiles', async (req, res) => {
     const result = await createAccountProfile(accountId, req.body);
     if (result.error) return res.status(400).json(result);
     res.status(201).json(result);
+  } catch (error) { res.status(Number(error?.status) || 500).json({ error: error.message }); }
+});
+app.put('/api/account/profiles/:profileId', async (req, res) => {
+  try {
+    const accountId = requestAccount(req);
+    if (!accountId) return res.status(401).json({ error: 'Sign in to edit a profile' });
+    const result = await updateAccountProfile(accountId, req.params.profileId, req.body);
+    if (result.error) return res.status(result.error === 'Profile not found' ? 404 : 400).json(result);
+    res.json(result);
+  } catch (error) { res.status(Number(error?.status) || 500).json({ error: error.message }); }
+});
+app.delete('/api/account/profiles/:profileId', async (req, res) => {
+  try {
+    const accountId = requestAccount(req);
+    if (!accountId) return res.status(401).json({ error: 'Sign in to delete a profile' });
+    const result = await deleteAccountProfile(accountId, req.params.profileId);
+    if (result.error) return res.status(result.error === 'Profile not found' ? 404 : 400).json(result);
+    res.json(result);
   } catch (error) { res.status(Number(error?.status) || 500).json({ error: error.message }); }
 });
 app.post('/api/account/profiles/:profileId/select', async (req, res) => {

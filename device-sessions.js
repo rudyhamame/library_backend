@@ -6,7 +6,7 @@ import { moveLibraryCategories } from './library-category-store.js';
 import { movePlaybackOwners } from './playback-store.js';
 import { moveFavoriteOwners } from './favorites-store.js';
 import { moveStreamingHistoryOwners } from './streaming-history-store.js';
-import { getAccountProfile } from './account-profile-store.js';
+import { ensureDefaultProfile, getAccountProfile } from './account-profile-store.js';
 
 const sessions = new Map();
 const pairingTtlMs = 15 * 60 * 1000;
@@ -182,20 +182,26 @@ export async function authorizeDeviceSession(code, token) {
   const accountId = new ObjectId(authorization.accountId);
   const deviceCollection = await profiles();
   const deviceOwnerId = ownerIdFor(session.deviceId);
-  const profile = await deviceCollection.findOne({ deviceId: session.deviceId }, { projection: { accountId: 1 } });
+  const profile = await deviceCollection.findOne({ deviceId: session.deviceId }, { projection: { accountId: 1, profileId: 1 } });
   if (profile?.accountId && String(profile.accountId) !== String(accountId)) return { error: 'This Roku is linked to a different RH account' };
   session.accountId = String(accountId);
+  const selectedProfile = authorization.profileId
+    ? await getAccountProfile(accountId, authorization.profileId)
+    : await ensureDefaultProfile(accountId);
+  if (!selectedProfile) return { error: 'Profile not found' };
+  const profileId = selectedProfile.id;
   await deviceCollection.updateOne(
     { deviceId: session.deviceId },
-    { $setOnInsert: { ownerId: deviceOwnerId, deviceId: session.deviceId, createdAt: new Date() }, $set: { accountId, linkedAt: new Date(), updatedAt: new Date() } },
+    { $setOnInsert: { ownerId: deviceOwnerId, deviceId: session.deviceId, createdAt: new Date() }, $set: { accountId, profileId, linkedAt: new Date(), updatedAt: new Date() } },
     { upsert: true },
   );
-  session.ownerId = await consolidateAccountLibrary(accountId);
+  session.profileId = profileId;
+  session.ownerId = selectedProfile.isDefault ? await consolidateAccountLibrary(accountId) : selectedProfile.ownerId;
   session.approvedAt = Date.now();
   return { ok: true, deviceId: session.deviceId };
 }
 
-async function consumePairing(code, email, password, setup) {
+async function consumePairing(code, email, password, setup, firstName = '', lastName = '') {
   const session = getDeviceSession(code);
   if (!session) return { error: 'Pairing code expired or invalid' };
   const normalizedEmail = normalizeEmail(email);
@@ -209,8 +215,9 @@ async function consumePairing(code, email, password, setup) {
   if (setup) {
     if (profile?.accountId) return { error: 'This Roku is already activated. Sign in instead.' };
     if (await accountCollection.findOne({ email: normalizedEmail }, { projection: { _id: 1 } })) return { error: 'An account with this email already exists. Sign in instead.' };
-    const created = await accountCollection.insertOne({ email: normalizedEmail, passwordHash: hashPassword(password), createdAt: new Date(), updatedAt: new Date() });
+    const created = await accountCollection.insertOne({ email: normalizedEmail, passwordHash: hashPassword(password), firstName: String(firstName || '').trim().slice(0, 60), lastName: String(lastName || '').trim().slice(0, 60), createdAt: new Date(), updatedAt: new Date() });
     account = { _id: created.insertedId };
+    await ensureDefaultProfile(String(account._id), firstName || 'Main');
   } else {
     account = await accountCollection.findOne({ email: normalizedEmail });
     // A profile created by the earlier device-password implementation can be
@@ -232,17 +239,18 @@ async function consumePairing(code, email, password, setup) {
   return { token: issueToken(session, 'browser'), deviceId: session.deviceId };
 }
 
-export function setupDeviceSession(code, email, password) { return consumePairing(code, email, password, true); }
+export function setupDeviceSession(code, email, password, firstName, lastName) { return consumePairing(code, email, password, true, firstName, lastName); }
 export function loginDeviceSession(code, email, password) { return consumePairing(code, email, password, false); }
 
-export async function registerAccount(email, password) {
+export async function registerAccount(email, password, firstName = '', lastName = '') {
   const normalizedEmail = normalizeEmail(email);
   if (!validEmail(normalizedEmail)) return { error: 'Enter a valid email address' };
   if (!validPassword(password)) return { error: 'Password must contain at least 8 characters' };
   const collection = await accounts();
   if (await collection.findOne({ email: normalizedEmail }, { projection: { _id: 1 } })) return { error: 'An account with this email already exists. Sign in instead.' };
   try {
-    await collection.insertOne({ email: normalizedEmail, passwordHash: hashPassword(password), createdAt: new Date(), updatedAt: new Date() });
+    const created = await collection.insertOne({ email: normalizedEmail, passwordHash: hashPassword(password), firstName: String(firstName || '').trim().slice(0, 60), lastName: String(lastName || '').trim().slice(0, 60), createdAt: new Date(), updatedAt: new Date() });
+    await ensureDefaultProfile(String(created.insertedId), firstName || 'Main');
   } catch (error) {
     if (error?.code === 11000) return { error: 'An account with this email already exists. Sign in instead.' };
     throw error;
@@ -258,15 +266,32 @@ export function getRokuDeviceSessionStatus(code) {
   return { status: 'approved', expiresAt: session.expiresAt, token: issueToken(session, 'roku') };
 }
 
-export async function getLinkedDevices(accountId) {
+async function accountProfileId(accountId, profileId = '') {
+  const defaultProfile = await ensureDefaultProfile(accountId);
+  if (profileId) {
+    const selected = await getAccountProfile(accountId, profileId);
+    if (selected) return selected.id;
+  }
+  return defaultProfile.id;
+}
+
+export async function getLinkedDevices(accountId, profileId = '') {
   if (!ObjectId.isValid(accountId)) return [];
+  const defaultProfile = await ensureDefaultProfile(accountId);
+  const selectedProfileId = await accountProfileId(accountId, profileId);
+  const deviceCollection = await profiles();
+  await deviceCollection.updateMany(
+    { accountId: new ObjectId(accountId), profileId: { $exists: false } },
+    { $set: { profileId: defaultProfile.id, updatedAt: new Date() } },
+  );
   const rows = await (await profiles()).find(
-    { accountId: new ObjectId(accountId) },
-    { projection: { deviceId: 1, linkedAt: 1, updatedAt: 1, lastSeenAt: 1, lastStreamingSeenAt: 1 } },
+    { accountId: new ObjectId(accountId), profileId: selectedProfileId },
+    { projection: { deviceId: 1, profileId: 1, linkedAt: 1, updatedAt: 1, lastSeenAt: 1, lastStreamingSeenAt: 1 } },
   ).sort({ linkedAt: 1 }).toArray();
   return rows.map(device => ({
     id: String(device._id),
     deviceId: device.deviceId,
+    profileId: device.profileId,
     linkedAt: device.linkedAt || device.updatedAt || null,
     lastSeenAt: device.lastSeenAt || null,
     running: Boolean(device.lastSeenAt && Date.now() - new Date(device.lastSeenAt).getTime() <= runningWindowMs),
@@ -339,10 +364,11 @@ export async function recordDeviceHeartbeat(deviceId, streaming = false) {
   }
 }
 
-export async function unlinkAccountDevice(accountId, deviceId) {
+export async function unlinkAccountDevice(accountId, deviceId, profileId = '') {
   if (!ObjectId.isValid(accountId) || !deviceId) return { error: 'Invalid device' };
+  const selectedProfileId = await accountProfileId(accountId, profileId);
   const result = await (await profiles()).updateOne(
-    { accountId: new ObjectId(accountId), deviceId: String(deviceId) },
+    { accountId: new ObjectId(accountId), deviceId: String(deviceId), profileId: selectedProfileId },
     { $unset: { accountId: '' }, $set: { updatedAt: new Date() } },
   );
   return result.modifiedCount ? { ok: true } : { error: 'Linked Roku device not found' };
@@ -350,8 +376,9 @@ export async function unlinkAccountDevice(accountId, deviceId) {
 
 export async function isRokuSessionLinked(session) {
   if (session?.type !== 'roku' || !session?.ownerId || !session?.deviceId || !ObjectId.isValid(session?.accountId)) return false;
+  const selectedProfileId = await accountProfileId(session.accountId, session.profileId || '');
   const profile = await (await profiles()).findOne(
-    { deviceId: String(session.deviceId), accountId: new ObjectId(session.accountId) },
+    { deviceId: String(session.deviceId), accountId: new ObjectId(session.accountId), profileId: selectedProfileId },
     { projection: { _id: 1 } },
   );
   return Boolean(profile);
@@ -362,6 +389,7 @@ export async function loginAccount(email, password, deviceId = '') {
   if (!validEmail(normalizedEmail) || !validPassword(password)) return { error: 'Incorrect email or password' };
   const account = await (await accounts()).findOne({ email: normalizedEmail });
   if (!account || !verifyPassword(password, account.passwordHash)) return { error: 'Incorrect email or password' };
+  await ensureDefaultProfile(String(account._id), account.firstName || 'Main');
   const linked = await (await profiles()).find({ accountId: account._id }).toArray();
   const ownerId = await consolidateAccountLibrary(account._id) || accountOwnerId(account._id);
   if (!linked.length) return { token: issueToken({ ownerId, accountId: String(account._id) }, 'browser'), devices: [] };

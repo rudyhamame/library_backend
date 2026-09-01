@@ -95,6 +95,20 @@ test('candidate generation keeps scanning categories until enough valid items ex
   assert.ok(results.length >= 10);
 });
 
+test('both mode scans past a large Arabic category to collect English candidates', async () => {
+  const source = { _id: 'source-bilingual', enabledItems: [] };
+  const categories = [{ id: 'arabic', name: 'Arabic Drama' }, { id: 'english', name: 'English Drama' }];
+  const results = await recommendationInternals.candidatePool({
+    sources: [source], savedItems: [], evidence: preferenceEvidence([]), language: 'both',
+    getCategories: async () => categories,
+    getCatalog: async (_source, type, categoryId) => categoryId === 'arabic'
+      ? Array.from({ length: 650 }, (_, index) => candidate(`ar-${type}-${index}`, type, 'ar'))
+      : Array.from({ length: 50 }, (_, index) => candidate(`en-${type}-${index}`, type, 'en')),
+  });
+  assert.ok(results.some(item => item.language === 'en'));
+  assert.ok(results.some(item => item.language === 'ar'));
+});
+
 test('one operation serves 100 simultaneous requests and a reload uses cache', async () => {
   const source = { _id: 'source-1', updatedAt: new Date('2026-01-01'), enabledItems: [{ ...candidate('saved', 'series', 'en'), kind: 'series' }] };
   let rankerCalls = 0;

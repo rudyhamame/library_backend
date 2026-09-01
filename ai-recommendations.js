@@ -8,7 +8,7 @@ export const AI_LIMITS = Object.freeze({
   output: 10,
   retries: Math.max(0, Math.min(2, Number.parseInt(process.env.MAX_GEMINI_RETRIES || '2', 10) || 0)),
 });
-export const AI_RECOMMENDATION_VERSION = 3;
+export const AI_RECOMMENDATION_VERSION = 4;
 
 const inFlight = new Map();
 const arabicText = /[\u0600-\u06ff\u0750-\u077f\u08a0-\u08ff]/;
@@ -166,9 +166,8 @@ async function candidatePool({ sources, savedItems, evidence, language, getCatal
       if (language === 'both') for (const candidate of candidates.values()) {
         const code = inferItemLanguage(candidate); if (code === 'ar' || code === 'en') languageCounts[code] += 1;
       }
-      if (candidates.size >= AI_LIMITS.candidates * 6
-        || (candidates.size >= AI_LIMITS.candidates * 3
-          && (language !== 'both' || (languageCounts.ar >= AI_LIMITS.output * 2 && languageCounts.en >= AI_LIMITS.output * 2)))) break;
+      const bilingualReady = languageCounts.ar >= AI_LIMITS.output * 2 && languageCounts.en >= AI_LIMITS.output * 2;
+      if (language === 'both' ? bilingualReady : candidates.size >= AI_LIMITS.candidates * 6) break;
     }
   }
   const ranked = [...candidates.values()].sort((a, b) => b.localScore - a.localScore || itemIdentity(a).localeCompare(itemIdentity(b)));
@@ -295,14 +294,14 @@ function cacheKey(ownerId, language) {
 }
 
 async function generate({ ownerId, language, forceRefresh, getSources, getCatalog, getCategories, ranker, cacheRead = getRecommendationCache, cacheWrite = saveRecommendationCache, aiAvailable = Boolean(process.env.GEMINI_API_KEY) }) {
-  const sources = await getSources(ownerId);
-  const savedItems = canonicalSavedItems(sources);
   const key = cacheKey(ownerId, language);
   const cached = await cacheRead(key).catch(() => null);
   if (cached && !forceRefresh) {
     console.info(`[AIRecommendations] cache-hit language=${language}`);
     return { ...cached.payload, cached: true };
   }
+  const sources = await getSources(ownerId);
+  const savedItems = canonicalSavedItems(sources);
   console.info(`[AIRecommendations] cache-miss language=${language}`);
   const evidenceItems = savedItems.map(item => ({ ...item, type: item.type || item.kind }));
   const evidence = preferenceEvidence(evidenceItems);

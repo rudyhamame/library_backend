@@ -3,6 +3,8 @@ const cacheTtl = 5 * 60 * 1000;
 const cacheMaxEntries = 6;
 const inFlight = new Map();
 const maxInFlight = Math.max(4, Number.parseInt(process.env.XTREAM_MAX_IN_FLIGHT || '12', 10) || 12);
+const upstreamAttempts = Math.max(1, Math.min(3, Number.parseInt(process.env.XTREAM_REQUEST_ATTEMPTS || '3', 10) || 3));
+const wait = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
 
 export function evictXtreamCache(now = Date.now(), aggressive = false) {
   for (const [key, entry] of cache) if (entry.expires <= now) cache.delete(key);
@@ -20,6 +22,20 @@ function apiUrl(source, params = {}) {
   return url;
 }
 
+async function fetchXtream(url) {
+  let lastError;
+  for (let attempt = 1; attempt <= upstreamAttempts; attempt += 1) {
+    try {
+      return await fetch(url, { signal: AbortSignal.timeout(60_000) });
+    } catch (error) {
+      lastError = error;
+      if (attempt < upstreamAttempts) await wait(attempt * 350);
+    }
+  }
+  const cause = String(lastError?.cause?.code || lastError?.cause?.message || lastError?.message || 'network error');
+  throw new Error(`Playlist provider could not be reached (${cause}). Check its server link and try again.`);
+}
+
 async function request(source, params, transform = value => value) {
   const key = `${source._id}:${JSON.stringify(params)}`;
   const now = Date.now();
@@ -34,7 +50,7 @@ async function request(source, params, transform = value => value) {
   if (inFlight.has(key)) return inFlight.get(key);
   if (inFlight.size >= maxInFlight) throw new Error('Xtream provider request capacity is full');
   const pending = (async () => {
-    const response = await fetch(apiUrl(source, params), { signal: AbortSignal.timeout(60_000) });
+    const response = await fetchXtream(apiUrl(source, params));
     if (!response.ok) throw new Error(`Xtream server returned HTTP ${response.status}`);
     const data = transform(await response.json());
     if (cacheable) {

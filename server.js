@@ -581,7 +581,11 @@ async function ownerPlaylistHealth(ownerId, { force = false } = {}) {
     const health = await checkPlaylistSources(sources, source => (
       sourceType(source) === 'm3u' ? validateM3uConnection(source) : validateXtreamConnection(source)
     ));
-    const payload = { ...health, checkedAt: new Date().toISOString() };
+    const payload = {
+      ...health,
+      results: health.results.map(({ sourceId, ok }) => ({ sourceId, ok })),
+      checkedAt: new Date().toISOString(),
+    };
     playlistHealthCache.set(ownerId, { payload, expiresAt: Date.now() + playlistHealthTtlMs });
     return payload;
   })();

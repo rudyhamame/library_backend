@@ -141,7 +141,10 @@ export async function createDeviceSession(deviceId, frontendUrl, deviceToken = '
   const pairUrl = pairUrlObject.toString();
   // Camera apps hand this Android intent URL to RH when it is installed. If
   // it is not installed, Chrome opens the existing web pairing page instead.
-  const appPairUrl = `intent://pair?pair=${encodeURIComponent(session.code)}#Intent;scheme=rhstream;package=com.rhstream.library;S.browser_fallback_url=${encodeURIComponent(pairUrl)};end`;
+  const downloadUrl = process.env.ANDROID_APP_DOWNLOAD_URL || (process.env.CLOUDINARY_CLOUD_NAME
+    ? `https://res.cloudinary.com/${encodeURIComponent(process.env.CLOUDINARY_CLOUD_NAME)}/raw/upload/${encodeURIComponent(process.env.ANDROID_APP_PUBLIC_ID || 'RH IPTV Library.apk')}`
+    : pairUrl);
+  const appPairUrl = `intent://pair?pair=${encodeURIComponent(session.code)}#Intent;scheme=rhstream;package=com.rhstream.library;S.browser_fallback_url=${encodeURIComponent(downloadUrl)};end`;
   return {
     code: session.code, deviceId: session.deviceId, expiresAt: session.expiresAt,
     pairUrl, appPairUrl,

@@ -20,6 +20,7 @@ import { authorizeDeviceSession, changeAccountPassword, claimAutomaticPairing, c
 import { createLibraryCategory, deleteLibraryCategory, getManagedLibrary, renameLibraryCategory, replaceLibraryCategoryItems } from './library-category-store.js';
 import { enforceLibraryOnly } from './library-route-policy.js';
 import { checkPlaylistSources } from './playlist-health.js';
+import { getAiRecommendations } from './ai-recommendations.js';
 
 const app = express();
 app.use(enforceLibraryOnly);
@@ -1117,6 +1118,26 @@ app.get('/api/android/bootstrap', async (req, res) => {
     res.json({ counts });
   }
   catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+app.post('/api/recommendations/ai', async (req, res) => {
+  try {
+    const ownerId = requestOwner(req);
+    if (!ownerId) return res.status(401).json({ error: 'Authentication required' });
+    const payload = await getAiRecommendations({
+      ownerId,
+      language: req.body?.language,
+      forceRefresh: req.body?.refresh === true,
+      getSources: getAllXtreamSources,
+      getCatalog: getSourceCatalog,
+      getCategories: getSourceCategories,
+    });
+    res.set('Cache-Control', 'private, no-store');
+    res.json(payload);
+  } catch (error) {
+    console.error(`[AIRecommendations] endpoint-failed status=${Number(error?.status) || 500}`);
+    res.status(Number(error?.status) || 500).json({ error: 'Recommendations are temporarily unavailable' });
+  }
 });
 
 // Return catalog sizes without sending or persisting provider catalogs on the

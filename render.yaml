@@ -26,6 +26,8 @@ services:
         value: library_categories
       - key: MONGODB_FAVORITES_COLLECTION
         value: favorites
+      - key: MONGODB_AI_RECOMMENDATIONS_COLLECTION
+        value: ai_recommendations
       - key: MONGODB_DEVICE_COLLECTION
         value: device_profiles
       - key: MONGODB_ACCOUNT_COLLECTION
@@ -34,6 +36,22 @@ services:
         sync: false
       - key: INTERNAL_DIAGNOSTICS_TOKEN
         sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-3.7-flash
+      - key: MAX_SAVED_AI_SAMPLE
+        value: "32"
+      - key: MAX_AI_CANDIDATES
+        value: "100"
+      - key: MAX_DESCRIPTION_LENGTH
+        value: "200"
+      - key: AI_RECOMMENDATION_TTL_HOURS
+        value: "24"
+      - key: AI_RECOMMENDATION_REFRESH_COOLDOWN_MINUTES
+        value: "10"
+      - key: MAX_GEMINI_RETRIES
+        value: "2"
       - key: MAX_ACTIVE_TRANSCODES
         value: "1"
       - key: MAX_ACTIVE_REMUX_JOBS

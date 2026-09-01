@@ -62,6 +62,25 @@ const rokuInitialSeriesLimit = Math.min(4, Math.max(1, Number.parseInt(process.e
 const rokuMoviePageLimit = 10;
 const rokuCatalogPageLimit = 10;
 const xtreamItemsInFlight = new Map();
+let catalogMemoryBusy = false;
+const interactiveCatalogQueue = [];
+const backgroundCatalogQueue = [];
+function drainCatalogMemoryQueue() {
+  if (catalogMemoryBusy) return;
+  const job = interactiveCatalogQueue.shift() || backgroundCatalogQueue.shift();
+  if (!job) return;
+  catalogMemoryBusy = true;
+  Promise.resolve().then(job.task).then(job.resolve, job.reject).finally(() => {
+    catalogMemoryBusy = false;
+    setImmediate(drainCatalogMemoryQueue);
+  });
+}
+function withCatalogMemorySlot(task, priority = 'interactive') {
+  return new Promise((resolve, reject) => {
+    (priority === 'background' ? backgroundCatalogQueue : interactiveCatalogQueue).push({ task, resolve, reject });
+    drainCatalogMemoryQueue();
+  });
+}
 const rokuHlsRoot = path.join(os.tmpdir(), 'rh-stream-hls');
 const frontendUrl = process.env.FRONTEND_URL || 'https://rh-stream-frontend.onrender.com';
 const mediaLimits = defaultMediaLimits();
@@ -1192,14 +1211,15 @@ async function buildAndroidRecentSnapshot(ownerId) {
     return Number.isFinite(parsed) ? Math.floor(parsed / 1000) : 0;
   };
   for (const source of sources) {
-    const catalogs = await Promise.all(['series', 'movie', 'channel'].map(async kind => {
-      try { return [kind, await getSourceCatalog(source, kind)]; }
+    for (const kind of ['series', 'movie', 'channel']) {
+      let catalog;
+      try {
+        catalog = await withCatalogMemorySlot(() => getSourceCatalog(source, kind), 'background');
+      }
       catch (error) {
         console.warn(`[AndroidStartup] source-refresh-skipped source=${source._id} kind=${kind} error=${error.message}`);
-        return [kind, []];
+        catalog = [];
       }
-    }));
-    for (const [kind, catalog] of catalogs) {
       counts[kind] += Array.isArray(catalog) ? catalog.length : 0;
       for (const item of catalog) {
         const candidate = {
@@ -1235,7 +1255,9 @@ function scheduleAndroidStartupRefresh(ownerId, language) {
       ownerId, language, forceRefresh: false,
       getSources: async requestedOwner => (await getAllXtreamSources(requestedOwner))
         .filter(source => source.connectionStatus !== 'offline'),
-      getCatalog: getSourceCatalog,
+      getCatalog: (source, kind, category) => withCatalogMemorySlot(
+        () => getSourceCatalog(source, kind, category), 'background',
+      ),
       getCategories: getSourceCategories,
     });
   })().catch(error => console.warn(`[AndroidStartup] background-refresh-failed owner=${ownerId} error=${error.message}`))
@@ -1447,7 +1469,9 @@ app.get('/api/xtream/catalog', async (req, res) => {
     // playlist catalog for this content type so matches in other categories
     // are not hidden by the category currently open in the Android UI.
     const catalogCategory = query ? 'all' : category;
-    const allItems = await getSourceCatalog(source, kind, catalogCategory);
+    const allItems = await withCatalogMemorySlot(
+      () => getSourceCatalog(source, kind, catalogCategory), 'interactive',
+    );
     const enabled = new Set(source.enabledKeys || []);
     const titleLanguage = String(req.query.titleLanguage || req.query.language || 'all').toUpperCase();
     const requestedPage = Math.max(1, Number.parseInt(req.query.page, 10) || 1);

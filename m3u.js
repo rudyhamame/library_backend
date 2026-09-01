@@ -32,8 +32,9 @@ function extension(url) {
   catch { return 'm3u8'; }
 }
 
-async function downloadM3u(source, key) {
-  const response = await fetch(source.baseUrl, { signal: AbortSignal.timeout(25_000) });
+async function downloadM3u(source, key, timeoutMs = 25_000) {
+  const boundedTimeoutMs = Math.max(2_000, Math.min(30_000, Number(timeoutMs) || 25_000));
+  const response = await fetch(source.baseUrl, { signal: AbortSignal.timeout(boundedTimeoutMs) });
   if (!response.ok) throw new Error(`M3U server returned HTTP ${response.status}`);
   const items = [];
   let metadata = null;
@@ -86,21 +87,21 @@ async function downloadM3u(source, key) {
   return items;
 }
 
-async function loadM3u(source) {
+async function loadM3u(source, { timeoutMs = 25_000 } = {}) {
   evictM3uCache();
   const key = `${source._id || 'validation'}:${source.baseUrl}`;
   const cached = cache.get(key);
   if (cached?.expires > Date.now()) return cached.items;
   if (inFlight.has(key)) return inFlight.get(key);
   if (inFlight.size >= maxInFlight) throw new Error('M3U provider request capacity is full');
-  const pending = downloadM3u(source, key);
+  const pending = downloadM3u(source, key, timeoutMs);
   inFlight.set(key, pending);
   try { return await pending; }
   finally { inFlight.delete(key); }
 }
 
-export async function validateM3uConnection(source) {
-  await loadM3u(source);
+export async function validateM3uConnection(source, options = {}) {
+  await loadM3u(source, options);
 }
 
 export async function getM3uCatalog(source, kind) {

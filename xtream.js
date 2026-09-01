@@ -23,21 +23,23 @@ function apiUrl(source, params = {}) {
   return url;
 }
 
-async function fetchXtream(url) {
+async function fetchXtream(url, { attempts = upstreamAttempts, timeoutMs = upstreamTimeoutMs } = {}) {
   let lastError;
-  for (let attempt = 1; attempt <= upstreamAttempts; attempt += 1) {
+  const boundedAttempts = Math.max(1, Math.min(3, Number(attempts) || 1));
+  const boundedTimeoutMs = Math.max(2_000, Math.min(30_000, Number(timeoutMs) || upstreamTimeoutMs));
+  for (let attempt = 1; attempt <= boundedAttempts; attempt += 1) {
     try {
-      return await fetch(url, { signal: AbortSignal.timeout(upstreamTimeoutMs) });
+      return await fetch(url, { signal: AbortSignal.timeout(boundedTimeoutMs) });
     } catch (error) {
       lastError = error;
-      if (attempt < upstreamAttempts) await wait(attempt * 350);
+      if (attempt < boundedAttempts) await wait(attempt * 350);
     }
   }
   const cause = String(lastError?.cause?.code || lastError?.cause?.message || lastError?.message || 'network error');
   throw new Error(`Playlist provider could not be reached (${cause}). Check its server link and try again.`);
 }
 
-async function request(source, params, transform = value => value) {
+async function request(source, params, transform = value => value, options = {}) {
   const key = `${source._id}:${JSON.stringify(params)}`;
   const now = Date.now();
   evictXtreamCache(now);
@@ -51,7 +53,7 @@ async function request(source, params, transform = value => value) {
   if (inFlight.has(key)) return inFlight.get(key);
   if (inFlight.size >= maxInFlight) throw new Error('Xtream provider request capacity is full');
   const pending = (async () => {
-    const response = await fetchXtream(apiUrl(source, params));
+    const response = await fetchXtream(apiUrl(source, params), options);
     if (!response.ok) throw new Error(`Xtream server returned HTTP ${response.status}`);
     const data = transform(await response.json());
     if (cacheable) {
@@ -68,8 +70,8 @@ async function request(source, params, transform = value => value) {
 
 const stringId = value => String(value ?? '');
 
-export async function validateXtreamConnection(source) {
-  const data = await request(source, {});
+export async function validateXtreamConnection(source, options = {}) {
+  const data = await request(source, {}, value => value, options);
   if (!data?.user_info) throw new Error('This URL did not return a valid Xtream account');
   if (String(data.user_info.auth) !== '1') throw new Error('Xtream authentication failed');
   return data.user_info;

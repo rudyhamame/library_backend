@@ -94,9 +94,10 @@ const androidStartupRefreshes = new Map();
 let activeDirectStreams = 0;
 let shuttingDown = false;
 let mediaRequestSequence = 0;
-const movieDurationCache = new Map();
-const movieDurationCacheMaxEntries = 100;
-const movieDurationCacheTtlMs = 24 * 60 * 60 * 1000;
+const mediaDurationCache = new Map();
+const mediaDurationInFlight = new Map();
+const mediaDurationCacheMaxEntries = 2_000;
+const mediaDurationCacheTtlMs = 7 * 24 * 60 * 60 * 1000;
 const streamTicketSecret = process.env.DEVICE_AUTH_SECRET || 'local-development-secret-change-before-production';
 
 function issueStreamTicket(ownerId, sourceId, kind, id) {
@@ -195,7 +196,7 @@ async function probeMediaDuration(inputUrl) {
     let errorOutput = '';
     const timeout = setTimeout(() => {
       child.kill('SIGKILL');
-      reject(new Error('Movie duration probe timed out'));
+      reject(new Error('Media duration probe timed out'));
     }, 20_000);
     timeout.unref?.();
     child.stdout.on('data', chunk => { output = appendTail(output, chunk, 1024); });
@@ -205,9 +206,54 @@ async function probeMediaDuration(inputUrl) {
       clearTimeout(timeout);
       const seconds = Number.parseFloat(output.trim());
       if (code === 0 && Number.isFinite(seconds) && seconds > 0) resolve(Math.floor(seconds));
-      else reject(new Error(errorOutput.trim() || 'Movie duration is unavailable'));
+      else reject(new Error(errorOutput.trim() || 'Media duration is unavailable'));
     });
   });
+}
+
+async function resolveMediaDuration(source, kind, id, extension, knownDuration = '') {
+  const knownSeconds = durationSeconds(knownDuration);
+  if (knownSeconds > 0) return { seconds: knownSeconds, duration: displayDuration(knownSeconds), source: 'catalog' };
+  const cacheKey = `${source._id}:${kind}:${id}`;
+  const cached = mediaDurationCache.get(cacheKey);
+  if (cached?.expiresAt > Date.now()) return cached;
+  if (mediaDurationInFlight.has(cacheKey)) return mediaDurationInFlight.get(cacheKey);
+  const pending = (async () => {
+    let seconds = 0;
+    let durationSource = 'probe';
+    if (kind === 'movie' && sourceType(source) === 'xtream') {
+      try {
+        const info = await getXtreamMovieInfo(source, id);
+        seconds = Number(info.seconds) || durationSeconds(info.duration);
+        if (seconds > 0) durationSource = 'xtream';
+      } catch (error) {
+        console.warn(`[Duration] movie-info-failed source=${source._id} id=${id} error=${error.message}`);
+      }
+    }
+    if (seconds <= 0) {
+      const inputUrl = await sourceProviderUrl(source, kind, id, extension);
+      seconds = await probeMediaDuration(inputUrl);
+      durationSource = 'probe';
+    }
+    return cacheMediaDuration(cacheKey, seconds, durationSource);
+  })().finally(() => mediaDurationInFlight.delete(cacheKey));
+  mediaDurationInFlight.set(cacheKey, pending);
+  return pending;
+}
+
+async function hydrateSeriesDurations(source, details) {
+  const episodes = Array.isArray(details?.episodes) ? details.episodes : [];
+  const hydrated = await mapWithConcurrency(episodes, 3, async episode => {
+    if (durationSeconds(episode.duration) > 0) return { ...episode, duration: displayDuration(episode.duration) };
+    try {
+      const result = await resolveMediaDuration(source, 'series', episode.id, episode.extension, episode.duration);
+      return { ...episode, duration: result.duration };
+    } catch (error) {
+      console.warn(`[Duration] episode-probe-failed source=${source._id} id=${episode.id} error=${error.message}`);
+      return { ...episode, duration: '' };
+    }
+  });
+  return { ...details, episodes: hydrated };
 }
 
 function capacityResponse(res, error) {
@@ -363,6 +409,44 @@ function displayDuration(value) {
   return [hours, minutes, remaining].map(part => String(part).padStart(2, '0')).join(':');
 }
 
+function durationSeconds(value) {
+  const raw = String(value ?? '').trim();
+  if (!raw) return 0;
+  if (/^\d+(?::\d{1,2}){1,2}$/.test(raw)) {
+    const parts = raw.split(':').map(Number);
+    const seconds = parts.length === 3
+      ? parts[0] * 3600 + parts[1] * 60 + parts[2]
+      : parts[0] * 60 + parts[1];
+    return Number.isFinite(seconds) && seconds > 0 ? Math.floor(seconds) : 0;
+  }
+  const seconds = Number(raw);
+  return Number.isFinite(seconds) && seconds > 0 ? Math.floor(seconds) : 0;
+}
+
+function cacheMediaDuration(key, seconds, source) {
+  const duration = displayDuration(seconds);
+  mediaDurationCache.delete(key);
+  mediaDurationCache.set(key, {
+    seconds, duration, source,
+    expiresAt: Date.now() + mediaDurationCacheTtlMs,
+  });
+  while (mediaDurationCache.size > mediaDurationCacheMaxEntries) mediaDurationCache.delete(mediaDurationCache.keys().next().value);
+  return { seconds, duration, source };
+}
+
+async function mapWithConcurrency(items, concurrency, mapper) {
+  const values = new Array(items.length);
+  let cursor = 0;
+  async function worker() {
+    while (cursor < items.length) {
+      const index = cursor++;
+      values[index] = await mapper(items[index], index);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(Math.max(1, concurrency), Math.max(1, items.length)) }, worker));
+  return values;
+}
+
 async function getAllXtreamItems(kind) {
   // The Roku can issue overlapping page/category requests. Coalesce those
   // requests so only one full provider catalog is mapped at a time.
@@ -441,6 +525,7 @@ async function getRokuSelectedItems(kind, ownerId = null) {
 function directXtreamItem(item) {
   const extension = String(item.extension || '').toLowerCase();
   const playbackUrl = rokuXtreamPlaybackPath(item.sourceId, item.kind, item.id, extension);
+  const mediaDurationSeconds = durationSeconds(item.duration);
   return {
     ...item,
     source: 'xtream',
@@ -451,6 +536,7 @@ function directXtreamItem(item) {
     rokuTextKind: /[A-Za-z]/.test(item.title) ? 'latin' : 'arabic',
     originalFormat: extension || 'mp4',
     streamFormat: rokuXtreamStreamFormat(extension),
+    durationSeconds: mediaDurationSeconds,
   };
 }
 
@@ -783,7 +869,7 @@ app.get('/api/xtream/series/:sourceId/:id', async (req, res) => {
     if (!ownerId) return res.status(401).json({ error: 'Authentication required' });
     const source = await getXtreamSource(req.params.sourceId, ownerId);
     if (!source) return res.sendStatus(404);
-    const details = await getXtreamSeriesEpisodes(source, req.params.id);
+    const details = await hydrateSeriesDurations(source, await getXtreamSeriesEpisodes(source, req.params.id));
     res.set('Cache-Control', 'no-store');
     res.json(details);
   } catch (error) { res.status(502).json({ error: error.message }); }
@@ -977,12 +1063,22 @@ app.get('/api/roku/series/detail', async (req, res) => {
 async function buildXtreamMoviesPayload({ limit, selected } = {}) {
   let movies = (selected || await getRokuSelectedItems('movie')).slice().sort((a, b) => Number(b.added || 0) - Number(a.added || 0));
   if (Number.isFinite(limit) && limit > 0) movies = movies.slice(0, limit);
-  // Do not call get_vod_info while building a Roku rail. It opens one provider
-  // request per movie and makes a three-item page take many seconds. Roku learns
-  // the authoritative duration from the Video node once playback starts.
-  return movies.map(item => ({
+  const hydrated = await mapWithConcurrency(movies, 3, async item => {
+    if (durationSeconds(item.duration) > 0) return { ...item, duration: displayDuration(item.duration) };
+    try {
+      const source = await getXtreamSource(item.sourceId);
+      if (!source) return item;
+      const result = await resolveMediaDuration(source, 'movie', item.id, item.extension, item.duration);
+      return { ...item, duration: result.duration };
+    } catch (error) {
+      console.warn(`[Duration] movie-probe-failed source=${item.sourceId} id=${item.id} error=${error.message}`);
+      return { ...item, duration: '' };
+    }
+  });
+  return hydrated.map(item => ({
     ...directXtreamItem(item),
     duration: displayDuration(item.duration),
+    durationSeconds: durationSeconds(item.duration),
     kind: 'movie',
     contentKind: 'movie',
     rokuEnabled: true,
@@ -1427,30 +1523,37 @@ app.get('/api/xtream/logo', async (req, res) => {
   }
 });
 
+function validateSavedPlaylistSource(source, sourceId, ownerId) {
+  setImmediate(async () => {
+    try {
+      const candidate = { ...source, _id: sourceId };
+      if (source.type === 'm3u') await validateM3uConnection(candidate, { timeoutMs: 8_000 });
+      else await validateXtreamConnection(candidate, { attempts: 1, timeoutMs: 8_000 });
+      await updateXtreamSource(sourceId, { connectionStatus: 'online', connectionMessage: '' }, ownerId);
+    } catch (error) {
+      const connectionMessage = String(error?.message || error || 'Playlist provider is unavailable').slice(0, 240);
+      await updateXtreamSource(sourceId, { connectionStatus: 'offline', connectionMessage }, ownerId).catch(() => {});
+      console.warn(`[Playlist] background validation failed source=${sourceId}: ${connectionMessage}`);
+    } finally {
+      playlistHealthCache.delete(ownerId);
+    }
+  });
+}
+
 app.post('/api/xtream/sources', async (req, res) => {
   try {
-    const source = parsePlaylistInput(req.body);
-    let connectionStatus = 'online';
-    let connectionMessage = '';
-    try {
-      if (source.type === 'm3u') await validateM3uConnection({ ...source, _id: 'validation' });
-      else await validateXtreamConnection({ ...source, _id: 'validation' });
-    } catch (validationError) {
-      const message = String(validationError?.message || validationError || 'Playlist provider is unavailable');
-      const transientNetworkFailure = /could not be reached|fetch failed|connect_timeout|timed?\s*out|network error|econnreset|econnrefused/i.test(message);
-      if (!transientNetworkFailure) throw validationError;
-      connectionStatus = 'offline';
-      connectionMessage = message;
-    }
     const ownerId = requestOwner(req);
-    const saved = await createXtreamSource({ ...source, ownerId, connectionStatus, connectionMessage });
-    playlistHealthCache.delete(ownerId);
-    res.status(connectionStatus === 'online' ? 201 : 202).json({
-      ...saved,
-      warning: connectionStatus === 'offline'
-        ? 'Source saved, but the playlist provider is currently unreachable from the server.'
-        : '',
+    if (!ownerId) return res.status(401).json({ error: 'Authentication required' });
+    const source = parsePlaylistInput(req.body);
+    const saved = await createXtreamSource({
+      ...source, ownerId, connectionStatus: 'checking', connectionMessage: 'Checking provider connection in the background.',
     });
+    playlistHealthCache.delete(ownerId);
+    res.status(202).json({
+      ...saved,
+      warning: 'Playlist saved. Provider connection is being checked in the background.',
+    });
+    validateSavedPlaylistSource(source, saved.id, ownerId);
   } catch (error) { res.status(400).json({ error: error.message }); }
 });
 
@@ -1554,28 +1657,20 @@ app.get('/api/xtream/movie/:sourceId/:id/duration', async (req, res) => {
   try {
     const source = await getXtreamSource(req.params.sourceId, mediaOwner(req));
     if (!source) return res.sendStatus(404);
-    const cacheKey = `${source._id}:movie:${req.params.id}`;
-    const cached = movieDurationCache.get(cacheKey);
-    if (cached?.expiresAt > Date.now()) {
-      res.set('Cache-Control', 'private, max-age=300');
-      return res.json({ seconds: cached.seconds, duration: cached.duration, source: cached.source });
-    }
-    const info = await getXtreamMovieInfo(source, req.params.id);
-    let seconds = Number(info.seconds) || 0;
-    let durationSource = 'xtream';
-    if (seconds <= 0) {
-      const inputUrl = await sourceProviderUrl(source, 'movie', req.params.id, req.query.ext);
-      seconds = await probeMediaDuration(inputUrl);
-      durationSource = 'probe';
-    }
-    const duration = seconds > 0
-      ? [Math.floor(seconds / 3600), Math.floor((seconds % 3600) / 60), Math.floor(seconds % 60)].map(value => String(value).padStart(2, '0')).join(':')
-      : info.duration;
-    movieDurationCache.delete(cacheKey);
-    movieDurationCache.set(cacheKey, { seconds, duration, source: durationSource, expiresAt: Date.now() + movieDurationCacheTtlMs });
-    while (movieDurationCache.size > movieDurationCacheMaxEntries) movieDurationCache.delete(movieDurationCache.keys().next().value);
+    const { seconds, duration, source: durationSource } = await resolveMediaDuration(source, 'movie', req.params.id, req.query.ext);
     res.set('Cache-Control', 'private, max-age=300');
     res.json({ seconds, duration, source: durationSource });
+  } catch (error) { res.status(502).json({ error: error.message }); }
+});
+
+app.get('/api/xtream/media-duration/:sourceId/:kind/:id', async (req, res) => {
+  try {
+    if (req.params.kind !== 'movie' && req.params.kind !== 'series') return res.sendStatus(400);
+    const source = await getXtreamSource(req.params.sourceId, mediaOwner(req));
+    if (!source) return res.sendStatus(404);
+    const result = await resolveMediaDuration(source, req.params.kind, req.params.id, req.query.ext, req.query.known);
+    res.set('Cache-Control', 'private, max-age=300');
+    res.json(result);
   } catch (error) { res.status(502).json({ error: error.message }); }
 });
 
@@ -2098,7 +2193,7 @@ async function buildXtreamSeriesPayload({ limit, selected: suppliedSelected } = 
       try {
         const source = await getXtreamSource(seriesItem.sourceId);
         if (!source) { groups[index] = items; continue; }
-        const details = await getXtreamSeriesEpisodes(source, seriesItem.id);
+        const details = await hydrateSeriesDurations(source, await getXtreamSeriesEpisodes(source, seriesItem.id));
         for (const episode of details.episodes) {
           const extension = String(episode.extension || '').toLowerCase();
           const playbackUrl = rokuXtreamPlaybackPath(source._id, 'series', episode.id, extension);
@@ -2113,6 +2208,7 @@ async function buildXtreamSeriesPayload({ limit, selected: suppliedSelected } = 
             seasonTitle: episode.seasonTitle, rokuSeasonTitle: rokuText(episode.seasonTitle),
             seasonSort: episode.seasonNumber, episodeNumber: episode.episodeNumber,
             duration: displayDuration(episode.duration), thumbnail: episode.thumbnail,
+            durationSeconds: durationSeconds(episode.duration),
             category: seriesItem.category,
             rokuCategory: seriesItem.rokuCategory,
             language: seriesItem.language,

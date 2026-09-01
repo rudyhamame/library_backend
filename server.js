@@ -682,6 +682,11 @@ app.delete('/api/account', async (req, res) => {
   } catch (error) { res.status(Number(error?.status) || 500).json({ error: error.message }); }
 });
 
+// Infrastructure probes must only verify that Express is accepting traffic.
+// Database/provider checks belong to /api/health and must not keep Fly's proxy
+// waiting when an external dependency is unavailable.
+app.get('/healthz', (_, res) => res.json({ ok: true }));
+
 app.get('/api/health', async (_, res) => {
   try {
     const xtreamSources = await getXtreamSources();

@@ -12,7 +12,8 @@ RUN npm ci --omit=dev && npm cache clean --force
 COPY --chown=node:node . .
 
 ENV NODE_ENV=production
+ENV PORT=8080
 USER node
-EXPOSE 8787
+EXPOSE 8080
 
 CMD ["node", "server.js"]

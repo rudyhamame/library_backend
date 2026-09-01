@@ -6,11 +6,9 @@ export const AI_LIMITS = Object.freeze({
   candidates: Math.max(10, Number.parseInt(process.env.MAX_AI_CANDIDATES || '100', 10) || 100),
   description: Math.max(0, Number.parseInt(process.env.MAX_DESCRIPTION_LENGTH || '200', 10) || 200),
   output: 10,
-  ttlMs: Math.max(1, Number.parseFloat(process.env.AI_RECOMMENDATION_TTL_HOURS || '24') || 24) * 60 * 60 * 1000,
-  refreshCooldownMs: Math.max(1, Number.parseFloat(process.env.AI_RECOMMENDATION_REFRESH_COOLDOWN_MINUTES || '10') || 10) * 60 * 1000,
   retries: Math.max(0, Math.min(2, Number.parseInt(process.env.MAX_GEMINI_RETRIES || '2', 10) || 0)),
 });
-export const AI_RECOMMENDATION_VERSION = 2;
+export const AI_RECOMMENDATION_VERSION = 3;
 
 const inFlight = new Map();
 const arabicText = /[\u0600-\u06ff\u0750-\u077f\u08a0-\u08ff]/;
@@ -290,18 +288,18 @@ function publicItem(item) {
   };
 }
 
-function cacheKey(ownerId, language, sources, savedItems) {
-  const sourceSignature = sources.map(source => `${source._id}:${source.type || 'xtream'}:${new Date(source.updatedAt || 0).getTime()}`).sort().join('|');
-  const preferenceSignature = savedItems.map(itemIdentity).sort().join('|');
-  return hash(`v${AI_RECOMMENDATION_VERSION}\n${ownerId}\n${language}\n${hash(sourceSignature)}\n${hash(preferenceSignature)}`);
+function cacheKey(ownerId, language) {
+  // Recommendations are an explicit, durable snapshot. Changes to the library
+  // must not replace them; only the profile's Refresh action may do that.
+  return hash(`v${AI_RECOMMENDATION_VERSION}\n${ownerId}\n${language}`);
 }
 
 async function generate({ ownerId, language, forceRefresh, getSources, getCatalog, getCategories, ranker, cacheRead = getRecommendationCache, cacheWrite = saveRecommendationCache, aiAvailable = Boolean(process.env.GEMINI_API_KEY) }) {
   const sources = await getSources(ownerId);
   const savedItems = canonicalSavedItems(sources);
-  const key = cacheKey(ownerId, language, sources, savedItems);
+  const key = cacheKey(ownerId, language);
   const cached = await cacheRead(key).catch(() => null);
-  if (cached && (!forceRefresh || Date.now() - new Date(cached.createdAt).getTime() < AI_LIMITS.refreshCooldownMs)) {
+  if (cached && !forceRefresh) {
     console.info(`[AIRecommendations] cache-hit language=${language}`);
     return { ...cached.payload, cached: true };
   }
@@ -326,7 +324,7 @@ async function generate({ ownerId, language, forceRefresh, getSources, getCatalo
   const items = validateAndFillRecommendations(aiOutput, candidates, language).map(publicItem);
   const payload = { language, source, cached: false, preferenceProfile: aiOutput?.preferenceProfile || null, items };
   console.info(`[AIRecommendations] ${source} recommendations=${items.length}`);
-  await cacheWrite({ key, ownerId, language, algorithmVersion: AI_RECOMMENDATION_VERSION, expiresAt: new Date(Date.now() + AI_LIMITS.ttlMs), payload }).catch(() => {});
+  await cacheWrite({ key, ownerId, language, algorithmVersion: AI_RECOMMENDATION_VERSION, expiresAt: new Date('9999-12-31T23:59:59.999Z'), payload }).catch(() => {});
   return payload;
 }
 

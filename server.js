@@ -17,7 +17,7 @@ import { HlsStrategy, PlaybackStrategy, choosePlaybackStrategy, determineHlsStra
 import { getStreamingContinueWatching, getStreamingHistory, getStreamingResume, saveStreamingHistory } from './streaming-history-store.js';
 import { getFavorites, toggleFavorite } from './favorites-store.js';
 import { authorizeDeviceSession, changeAccountPassword, claimAutomaticPairing, createDeviceSession, getDeviceWeatherLocations, getLinkedDevices, getPairingInfo, getRokuDeviceSessionStatus, isRokuSessionLinked, loginAccount, loginDeviceSession, recordDeviceHeartbeat, registerAccount, resolveDeviceToken, saveDeviceWeatherLocations, selectAccountProfile, setupDeviceSession, unlinkAccountDevice } from './device-sessions.js';
-import { createAccountProfile, deleteAccountProfile, getAccountProfiles, updateAccountProfile } from './account-profile-store.js';
+import { createAccountProfile, deleteAccountProfile, getAccountProfile, getAccountProfiles, updateAccountProfile } from './account-profile-store.js';
 import { createLibraryCategory, deleteLibraryCategory, getManagedLibrary, renameLibraryCategory, replaceLibraryCategoryItems } from './library-category-store.js';
 import { enforceLibraryOnly } from './library-route-policy.js';
 import { checkPlaylistSources } from './playlist-health.js';
@@ -459,7 +459,8 @@ app.get('/api/roku/auth-health', async (req, res) => {
       console.warn(`[Roku auth] health rejected token=${token ? 'present-invalid' : 'missing'}`);
       return res.status(401).json({ ok: false, authenticated: false });
     }
-    res.json({ ok: true, authenticated: true });
+    const profile = session.profileId && session.accountId ? await getAccountProfile(session.accountId, session.profileId) : null;
+    res.json({ ok: true, authenticated: true, profileName: profile?.name || '' });
   } catch (error) { res.status(503).json({ ok: false, authenticated: false, error: error.message }); }
 });
 

@@ -16,7 +16,7 @@ import { MediaCapacityError, MediaJobManager, defaultMediaLimits, memoryPressure
 import { HlsStrategy, PlaybackStrategy, choosePlaybackStrategy, determineHlsStrategy, hlsCodecArgs } from './playback-strategy.js';
 import { getStreamingContinueWatching, getStreamingHistory, getStreamingResume, saveStreamingHistory } from './streaming-history-store.js';
 import { getFavorites, toggleFavorite } from './favorites-store.js';
-import { authorizeDeviceSession, changeAccountPassword, claimAutomaticPairing, createDeviceSession, getDeviceWeatherLocations, getLinkedDevices, getPairingInfo, getRokuDeviceSessionStatus, isRokuSessionLinked, loginAccount, loginDeviceSession, recordDeviceHeartbeat, registerAccount, resolveDeviceToken, saveDeviceWeatherLocations, selectAccountProfile, setupDeviceSession, unlinkAccountDevice } from './device-sessions.js';
+import { authorizeDeviceSession, changeAccountPassword, claimAutomaticPairing, createDeviceSession, deleteAccount, getDeviceWeatherLocations, getLinkedDevices, getPairingInfo, getRokuDeviceSessionStatus, isRokuSessionLinked, loginAccount, loginDeviceSession, recordDeviceHeartbeat, registerAccount, resolveDeviceToken, saveDeviceWeatherLocations, selectAccountProfile, setupDeviceSession, unlinkAccountDevice } from './device-sessions.js';
 import { createAccountProfile, deleteAccountProfile, getAccountProfile, getAccountProfiles, updateAccountProfile } from './account-profile-store.js';
 import { createLibraryCategory, deleteLibraryCategory, getManagedLibrary, renameLibraryCategory, replaceLibraryCategoryItems } from './library-category-store.js';
 import { enforceLibraryOnly } from './library-route-policy.js';
@@ -659,6 +659,13 @@ app.post('/api/account/password', async (req, res) => {
     if (result.error) return res.status(result.error.startsWith('Sign in') ? 401 : 400).json(result);
     res.json(result);
   } catch (error) { res.status(500).json({ error: error.message }); }
+});
+app.delete('/api/account', async (req, res) => {
+  try {
+    const result = await deleteAccount(requestAccount(req), req.body?.password);
+    if (result.error) return res.status(result.error.startsWith('Sign in') ? 401 : 400).json(result);
+    res.json(result);
+  } catch (error) { res.status(Number(error?.status) || 500).json({ error: error.message }); }
 });
 
 app.get('/api/health', async (_, res) => {

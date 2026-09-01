@@ -6,7 +6,7 @@ import { moveLibraryCategories } from './library-category-store.js';
 import { movePlaybackOwners } from './playback-store.js';
 import { moveFavoriteOwners } from './favorites-store.js';
 import { moveStreamingHistoryOwners } from './streaming-history-store.js';
-import { ensureDefaultProfile, getAccountProfile } from './account-profile-store.js';
+import { deleteAccountProfilesAndData, ensureDefaultProfile, getAccountProfile } from './account-profile-store.js';
 
 const sessions = new Map();
 const pairingTtlMs = 15 * 60 * 1000;
@@ -427,6 +427,19 @@ export async function changeAccountPassword(accountId, currentPassword, newPassw
   const account = await collection.findOne({ _id: new ObjectId(accountId) });
   if (!account || !verifyPassword(currentPassword, account.passwordHash)) return { error: 'Current password is incorrect' };
   await collection.updateOne({ _id: account._id }, { $set: { passwordHash: hashPassword(newPassword), updatedAt: new Date() } });
+  return { ok: true };
+}
+
+export async function deleteAccount(accountId, currentPassword) {
+  if (!ObjectId.isValid(accountId)) return { error: 'Sign in to delete your account' };
+  if (!validPassword(currentPassword)) return { error: 'Enter your current password' };
+  const collection = await accounts();
+  const normalizedAccountId = new ObjectId(String(accountId));
+  const account = await collection.findOne({ _id: normalizedAccountId });
+  if (!account || !verifyPassword(currentPassword, account.passwordHash)) return { error: 'Current password is incorrect' };
+  await deleteAccountProfilesAndData(accountId);
+  await collection.deleteOne({ _id: normalizedAccountId });
+  for (const [code, session] of sessions) if (String(session.accountId || '') === String(accountId)) sessions.delete(code);
   return { ok: true };
 }
 

@@ -144,6 +144,31 @@ export async function deleteAccountProfile(accountId, profileId) {
   return { ok: true };
 }
 
+export async function deleteAccountProfilesAndData(accountId) {
+  if (!ObjectId.isValid(accountId)) throw Object.assign(new Error('Authentication required'), { status: 401 });
+  const normalizedAccountId = new ObjectId(String(accountId));
+  const collection = await profileCollection();
+  const rows = await collection.find({ accountId: normalizedAccountId }, { projection: { ownerId: 1 } }).toArray();
+  const ownerIds = [...new Set([accountOwnerId(accountId), ...rows.map(row => String(row.ownerId || '')).filter(Boolean)])];
+  const client = await clientPromise;
+  const database = client.db(databaseName);
+  const ownedCollections = [
+    process.env.MONGODB_XTREAM_COLLECTION || 'xtream_sources',
+    process.env.MONGODB_LIBRARY_CATEGORY_COLLECTION || 'library_categories',
+    process.env.MONGODB_PLAYBACK_COLLECTION || 'playback_progress',
+    process.env.MONGODB_STREAMING_HISTORY_COLLECTION || 'streaming_history',
+    process.env.MONGODB_FAVORITES_COLLECTION || 'favorites',
+    process.env.MONGODB_AI_RECOMMENDATIONS_COLLECTION || 'ai_recommendations',
+  ];
+  await Promise.all(ownedCollections.map(name => database.collection(name).deleteMany({ ownerId: { $in: ownerIds } })));
+  await database.collection(process.env.MONGODB_DEVICE_COLLECTION || 'device_profiles').updateMany(
+    { accountId: normalizedAccountId },
+    { $unset: { accountId: '', accountOwnerId: '', profileId: '' }, $set: { updatedAt: new Date() } },
+  );
+  await collection.deleteMany({ accountId: normalizedAccountId });
+  return { ownerIds };
+}
+
 export async function ensureDefaultProfile(accountId, preferredName = 'Main') {
   return ensureDefaultProfileRecord(accountId, preferredName);
 }

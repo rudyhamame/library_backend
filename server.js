@@ -1239,6 +1239,7 @@ app.get('/api/android/bootstrap', async (req, res) => {
       counts,
       recent: snapshot?.recent || { series: [], movie: [], channel: [] },
       recommendations: recommendation?.payload?.items || [],
+      recommendationVersion: AI_RECOMMENDATION_VERSION,
       devices,
       sources: sources.map(publicXtreamSource),
       snapshotUpdatedAt: snapshot?.updatedAt || null,

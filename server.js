@@ -1265,6 +1265,24 @@ function scheduleAndroidStartupRefresh(ownerId, language) {
   androidStartupRefreshes.set(key, pending);
 }
 
+// A full provider catalog can be hundreds of thousands of rows.  It is not a
+// safe background operation on the small Fly machine and it is not required
+// for opening Android: the app already receives its saved library counts,
+// latest snapshot, and saved AI rail from MongoDB.  An administrator can opt
+// in to provider refreshes on a larger server with this environment variable.
+const androidProviderRefreshEnabled = process.env.ANDROID_PROVIDER_REFRESH === 'true';
+
+function androidSavedCounts(sources) {
+  const counts = { series: 0, movie: 0, channel: 0 };
+  for (const source of sources) {
+    for (const item of Array.isArray(source.enabledItems) ? source.enabledItems : []) {
+      const kind = ['series', 'movie', 'channel'].includes(item.kind) ? item.kind : null;
+      if (kind) counts[kind] += 1;
+    }
+  }
+  return counts;
+}
+
 // Fast mobile startup payload sourced only from MongoDB. Provider catalogs and
 // Gemini are refreshed after the response and never block Android navigation.
 app.get('/api/android/bootstrap', async (req, res) => {
@@ -1279,14 +1297,7 @@ app.get('/api/android/bootstrap', async (req, res) => {
       getLatestRecommendationCache(ownerId, language, AI_RECOMMENDATION_VERSION),
       authorization?.accountId ? getLinkedDevices(authorization.accountId, authorization.profileId || '') : Promise.resolve([]),
     ]);
-    const counts = { series: 0, movie: 0, channel: 0 };
-    for (const source of sources) {
-      for (const item of Array.isArray(source.enabledItems) ? source.enabledItems : []) {
-        const kind = ['series', 'movie', 'channel'].includes(item.kind) ? item.kind : null;
-        if (!kind) continue;
-        counts[kind] += 1;
-      }
-    }
+    const counts = androidSavedCounts(sources);
     res.set('Cache-Control', 'no-store');
     res.json({
       counts,
@@ -1298,7 +1309,9 @@ app.get('/api/android/bootstrap', async (req, res) => {
       snapshotUpdatedAt: snapshot?.updatedAt || null,
     });
     const snapshotAge = snapshot?.updatedAt ? Date.now() - new Date(snapshot.updatedAt).getTime() : Number.POSITIVE_INFINITY;
-    if (snapshotAge > 15 * 60 * 1000 || !recommendation) scheduleAndroidStartupRefresh(ownerId, language);
+    if (androidProviderRefreshEnabled && (snapshotAge > 15 * 60 * 1000 || !recommendation)) {
+      scheduleAndroidStartupRefresh(ownerId, language);
+    }
   }
   catch (error) { res.status(500).json({ error: error.message }); }
 });
@@ -1323,11 +1336,26 @@ app.post('/api/recommendations/ai', async (req, res) => {
   }
 });
 
-// Return catalog sizes without sending or persisting provider catalogs on the
-// mobile device. Provider rows exist only long enough to count them here.
+// Periodic Android work must never download whole provider catalogs.  Return
+// the same persisted snapshot used by bootstrap.  This keeps notifications
+// useful without making a background worker exhaust the Fly VM.
 app.get('/api/xtream/catalog-counts', async (req, res) => {
   try {
-    res.json(await buildAndroidRecentSnapshot(requestOwner(req)));
+    const ownerId = requestOwner(req);
+    if (!ownerId) return res.status(401).json({ error: 'Authentication required' });
+    if (androidProviderRefreshEnabled && req.query.refresh === 'true') {
+      return res.json(await buildAndroidRecentSnapshot(ownerId));
+    }
+    const [snapshot, sources] = await Promise.all([
+      getAndroidStartupSnapshot(ownerId),
+      getAllXtreamSources(ownerId),
+    ]);
+    res.set('Cache-Control', 'no-store');
+    res.json({
+      counts: androidSavedCounts(sources),
+      recent: snapshot?.recent || { series: [], movie: [], channel: [] },
+      snapshotUpdatedAt: snapshot?.updatedAt || null,
+    });
   } catch (error) { res.status(502).json({ error: error.message }); }
 });
 

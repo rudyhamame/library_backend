@@ -91,6 +91,7 @@ const mediaStreamIdleTimeoutMs = Math.max(10_000, Number.parseInt(process.env.ME
 const libraryRevisions = new Map();
 const libraryRevisionWaiters = new Map();
 const androidStartupRefreshes = new Map();
+const androidRecentRefreshes = new Map();
 let activeDirectStreams = 0;
 let shuttingDown = false;
 let mediaRequestSequence = 0;
@@ -243,15 +244,12 @@ async function resolveMediaDuration(source, kind, id, extension, knownDuration =
 
 async function hydrateSeriesDurations(source, details) {
   const episodes = Array.isArray(details?.episodes) ? details.episodes : [];
-  const hydrated = await mapWithConcurrency(episodes, 3, async episode => {
-    if (durationSeconds(episode.duration) > 0) return { ...episode, duration: displayDuration(episode.duration) };
-    try {
-      const result = await resolveMediaDuration(source, 'series', episode.id, episode.extension, episode.duration);
-      return { ...episode, duration: result.duration };
-    } catch (error) {
-      console.warn(`[Duration] episode-probe-failed source=${source._id} id=${episode.id} error=${error.message}`);
-      return { ...episode, duration: '' };
-    }
+  const hydrated = episodes.map(episode => {
+    const knownSeconds = durationSeconds(episode.duration);
+    if (knownSeconds > 0) return { ...episode, duration: displayDuration(knownSeconds) };
+    const cached = mediaDurationCache.get(`${source._id}:series:${episode.id}`);
+    if (cached?.expiresAt > Date.now() && cached.seconds > 0) return { ...episode, duration: cached.duration };
+    return { ...episode, duration: '' };
   });
   return { ...details, episodes: hydrated };
 }
@@ -432,19 +430,6 @@ function cacheMediaDuration(key, seconds, source) {
   });
   while (mediaDurationCache.size > mediaDurationCacheMaxEntries) mediaDurationCache.delete(mediaDurationCache.keys().next().value);
   return { seconds, duration, source };
-}
-
-async function mapWithConcurrency(items, concurrency, mapper) {
-  const values = new Array(items.length);
-  let cursor = 0;
-  async function worker() {
-    while (cursor < items.length) {
-      const index = cursor++;
-      values[index] = await mapper(items[index], index);
-    }
-  }
-  await Promise.all(Array.from({ length: Math.min(Math.max(1, concurrency), Math.max(1, items.length)) }, worker));
-  return values;
 }
 
 async function getAllXtreamItems(kind) {
@@ -873,6 +858,8 @@ app.get('/api/xtream/series/:sourceId/:id', async (req, res) => {
     if (!ownerId) return res.status(401).json({ error: 'Authentication required' });
     const source = await getXtreamSource(req.params.sourceId, ownerId);
     if (!source) return res.sendStatus(404);
+    // Catalog responses must never wait for FFprobe across a whole season.
+    // Unknown durations are resolved through the dedicated media-duration API.
     const details = await hydrateSeriesDurations(source, await getXtreamSeriesEpisodes(source, req.params.id));
     res.set('Cache-Control', 'no-store');
     res.json(details);
@@ -1067,17 +1054,12 @@ app.get('/api/roku/series/detail', async (req, res) => {
 async function buildXtreamMoviesPayload({ limit, selected } = {}) {
   let movies = (selected || await getRokuSelectedItems('movie')).slice().sort((a, b) => Number(b.added || 0) - Number(a.added || 0));
   if (Number.isFinite(limit) && limit > 0) movies = movies.slice(0, limit);
-  const hydrated = await mapWithConcurrency(movies, 3, async item => {
-    if (durationSeconds(item.duration) > 0) return { ...item, duration: displayDuration(item.duration) };
-    try {
-      const source = await getXtreamSource(item.sourceId);
-      if (!source) return item;
-      const result = await resolveMediaDuration(source, 'movie', item.id, item.extension, item.duration);
-      return { ...item, duration: result.duration };
-    } catch (error) {
-      console.warn(`[Duration] movie-probe-failed source=${item.sourceId} id=${item.id} error=${error.message}`);
-      return { ...item, duration: '' };
-    }
+  const hydrated = movies.map(item => {
+    const knownSeconds = durationSeconds(item.duration);
+    if (knownSeconds > 0) return { ...item, duration: displayDuration(knownSeconds) };
+    const cached = mediaDurationCache.get(`${item.sourceId}:movie:${item.id}`);
+    if (cached?.expiresAt > Date.now() && cached.seconds > 0) return { ...item, duration: cached.duration };
+    return { ...item, duration: '' };
   });
   return hydrated.map(item => ({
     ...directXtreamItem(item),
@@ -1304,12 +1286,6 @@ async function buildAndroidRecentSnapshot(ownerId) {
   const sources = (await getAllXtreamSources(ownerId)).filter(source => source.connectionStatus !== 'offline');
   const recent = { series: [], movie: [], channel: [] };
   const counts = { series: 0, movie: 0, channel: 0 };
-  const addedTime = item => {
-    const numeric = Number(item.added);
-    if (Number.isFinite(numeric) && numeric > 0) return numeric;
-    const parsed = Date.parse(item.added);
-    return Number.isFinite(parsed) ? Math.floor(parsed / 1000) : 0;
-  };
   for (const source of sources) {
     for (const kind of ['series', 'movie', 'channel']) {
       let catalog;
@@ -1326,31 +1302,33 @@ async function buildAndroidRecentSnapshot(ownerId) {
           id: item.id, key: item.key, kind, title: item.title,
           categoryId: item.categoryId, logo: item.logo, rating: item.rating,
           duration: item.duration, extension: item.extension,
-          added: item.added, sourceId: String(source._id),
+          added: item.added, sourceId: String(source._id), providerName: source.name,
         };
         const group = recent[kind];
+        // Keep one provider-independent stream. The catalog's arrival order
+        // is authoritative: first item encountered is first item shown.
         if (group.length < 10) group.push(candidate);
-        else {
-          let oldest = 0;
-          for (let index = 1; index < group.length; index += 1) {
-            if (addedTime(group[index]) < addedTime(group[oldest])) oldest = index;
-          }
-          if (addedTime(candidate) > addedTime(group[oldest])) group[oldest] = candidate;
-        }
       }
     }
   }
-  for (const group of Object.values(recent)) group.sort((a, b) => addedTime(b) - addedTime(a)
-    || String(a.title || '').localeCompare(String(b.title || '')));
   await saveAndroidStartupSnapshot(ownerId, { recent, catalogCounts: counts });
   return { counts, recent };
+}
+
+function refreshAndroidRecentSnapshot(ownerId) {
+  const key = String(ownerId);
+  if (androidRecentRefreshes.has(key)) return androidRecentRefreshes.get(key);
+  const pending = buildAndroidRecentSnapshot(ownerId)
+    .finally(() => androidRecentRefreshes.delete(key));
+  androidRecentRefreshes.set(key, pending);
+  return pending;
 }
 
 function scheduleAndroidStartupRefresh(ownerId, language) {
   const key = `${ownerId}:${language}`;
   if (androidStartupRefreshes.has(key)) return;
   const pending = (async () => {
-    await buildAndroidRecentSnapshot(ownerId);
+    await refreshAndroidRecentSnapshot(ownerId);
     await getAiRecommendations({
       ownerId, language, forceRefresh: false,
       getSources: async requestedOwner => (await getAllXtreamSources(requestedOwner))
@@ -1407,6 +1385,7 @@ app.get('/api/android/bootstrap', async (req, res) => {
       devices,
       sources: sources.map(publicXtreamSource),
       snapshotUpdatedAt: snapshot?.updatedAt || null,
+      recentRefreshAvailable: androidProviderRefreshEnabled,
     });
     const snapshotAge = snapshot?.updatedAt ? Date.now() - new Date(snapshot.updatedAt).getTime() : Number.POSITIVE_INFINITY;
     if (androidProviderRefreshEnabled && (snapshotAge > 15 * 60 * 1000 || !recommendation)) {
@@ -1444,7 +1423,7 @@ app.get('/api/xtream/catalog-counts', async (req, res) => {
     const ownerId = requestOwner(req);
     if (!ownerId) return res.status(401).json({ error: 'Authentication required' });
     if (androidProviderRefreshEnabled && req.query.refresh === 'true') {
-      return res.json(await buildAndroidRecentSnapshot(ownerId));
+      return res.json(await refreshAndroidRecentSnapshot(ownerId));
     }
     const [snapshot, sources] = await Promise.all([
       getAndroidStartupSnapshot(ownerId),
@@ -2197,6 +2176,8 @@ async function buildXtreamSeriesPayload({ limit, selected: suppliedSelected } = 
       try {
         const source = await getXtreamSource(seriesItem.sourceId);
         if (!source) { groups[index] = items; continue; }
+        // Opening a Roku series must be bounded by the provider metadata call,
+        // not by one FFprobe process for every episode in the series.
         const details = await hydrateSeriesDurations(source, await getXtreamSeriesEpisodes(source, seriesItem.id));
         for (const episode of details.episodes) {
           const extension = String(episode.extension || '').toLowerCase();

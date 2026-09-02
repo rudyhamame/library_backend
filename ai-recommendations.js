@@ -8,7 +8,7 @@ export const AI_LIMITS = Object.freeze({
   output: 10,
   retries: Math.max(0, Math.min(2, Number.parseInt(process.env.MAX_GEMINI_RETRIES || '2', 10) || 0)),
 });
-export const AI_RECOMMENDATION_VERSION = 4;
+export const AI_RECOMMENDATION_VERSION = 5;
 
 const inFlight = new Map();
 const arabicText = /[\u0600-\u06ff\u0750-\u077f\u08a0-\u08ff]/;
@@ -50,6 +50,7 @@ function compactItem(item) {
   const description = String(item?.description || item?.plot || '').trim().slice(0, AI_LIMITS.description);
   return {
     id: String(item.id), sourceId: String(item.sourceId), type: item.type,
+    providerName: String(item.providerName || item.sourceName || 'Unknown provider'),
     title: String(item.title || 'Untitled'), genres: categoryGenres(item),
     category: String(item.category || item.categoryName || 'Other'),
     year: yearFrom(item), language: inferItemLanguage(item),
@@ -62,7 +63,7 @@ function canonicalSavedItems(sources) {
   const items = [];
   for (const source of sources) for (const item of Array.isArray(source.enabledItems) ? source.enabledItems : []) {
     if (!item || !['movie', 'series'].includes(item.kind) || !item.id) continue;
-    items.push({ ...item, id: String(item.id), sourceId: String(source._id), type: item.kind, category: item.category || item.categoryName || 'Other' });
+    items.push({ ...item, id: String(item.id), sourceId: String(source._id), sourceName: source.name, providerName: source.name, type: item.kind, category: item.category || item.categoryName || 'Other' });
   }
   return items;
 }
@@ -156,7 +157,7 @@ async function candidatePool({ sources, savedItems, evidence, language, getCatal
       let rows;
       try { rows = await getCatalog(source, type, category.id); } catch { continue; }
       for (const row of Array.isArray(rows) ? rows : []) {
-        const item = { ...row, id: String(row.id), sourceId: String(source._id), type, category: category.name || row.category || 'Other' };
+        const item = { ...row, id: String(row.id), sourceId: String(source._id), sourceName: source.name, providerName: source.name, type, category: category.name || row.category || 'Other' };
         const identity = itemIdentity(item);
         if (!item.id || saved.has(identity) || candidates.has(identity) || !languageCompatible(inferItemLanguage(item), language)) continue;
         item.localScore = candidateScore(item, evidence, language);
@@ -281,6 +282,7 @@ export function validateAndFillRecommendations(aiOutput, candidates, language = 
 function publicItem(item) {
   return {
     id: item.id, sourceId: item.sourceId, kind: item.type, type: item.type, key: item.key || `${item.type}:${item.id}`,
+    providerName: item.providerName || item.sourceName || 'Unknown provider',
     title: item.title, logo: item.logo || '', categoryId: item.categoryId || '', category: item.category || 'Other',
     language: inferItemLanguage(item), extension: item.extension || 'mp4', duration: item.duration || '', rating: item.rating || '', added: item.added || '',
     recommendationReason: item.recommendationReason || '', recommendationScore: item.recommendationScore || 0,

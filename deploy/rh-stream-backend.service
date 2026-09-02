@@ -5,8 +5,8 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=/media/rudy/PLUGIN/streaming/backend
-EnvironmentFile=/media/rudy/PLUGIN/streaming/backend/.env
+WorkingDirectory=/home/rudy/Documents/streaming/library_backend
+EnvironmentFile=/home/rudy/Documents/streaming/library_backend/.env
 Environment=NODE_ENV=production
 ExecStart=/home/rudy/.nvm/versions/node/v24.16.0/bin/node server.js
 Restart=on-failure

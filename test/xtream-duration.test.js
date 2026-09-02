@@ -20,3 +20,14 @@ test('episode duration skips zero placeholders and uses valid fallback fields', 
     global.fetch = originalFetch;
   }
 });
+
+test('episode duration does not expose a provider zero placeholder', async () => {
+  const originalFetch = global.fetch;
+  global.fetch = async () => new Response(JSON.stringify({ episodes: { 1: [
+    { id: 3, episode_num: 3, info: { duration: '00:00:00', duration_secs: 0 } },
+  ] } }), { status: 200 });
+  try {
+    const details = await getXtreamSeriesEpisodes({ _id: 'duration-zero-test', baseUrl: 'http://provider.test', username: 'u', password: 'p' }, 'series-2');
+    assert.equal(details.episodes[0].duration, '');
+  } finally { global.fetch = originalFetch; }
+});

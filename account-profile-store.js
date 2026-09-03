@@ -87,6 +87,8 @@ export async function createAccountProfile(accountId, input = {}) {
   if (count >= maxProfiles) return { error: `An account can have up to ${maxProfiles} profiles` };
   const name = normalizeProfileName(input.name);
   if (!name) return { error: 'Enter a profile name' };
+  const avatarImage = String(input.avatarImage || '');
+  if (avatarImage.length > 1_400_000 || (avatarImage && !/^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/.test(avatarImage))) return { error: 'Upload a valid profile image' };
   const duplicate = await collection.findOne({ accountId: normalizedAccountId, name: { $regex: `^${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, $options: 'i' } }, { projection: { _id: 1 } });
   if (duplicate) return { error: 'Choose a different profile name' };
   const id = randomUUID();
@@ -96,6 +98,7 @@ export async function createAccountProfile(accountId, input = {}) {
     ownerId: profileOwnerId(accountId, id),
     name,
     avatar: avatars.has(input.avatar) ? input.avatar : [...avatars][count % avatars.size],
+    avatarImage,
     isDefault: false,
     position: count,
     createdAt: new Date(),
@@ -138,6 +141,8 @@ export async function deleteAccountProfile(accountId, profileId) {
     process.env.MONGODB_FAVORITES_COLLECTION || 'favorites',
     process.env.MONGODB_AI_RECOMMENDATIONS_COLLECTION || 'ai_recommendations',
     process.env.MONGODB_ANDROID_STARTUP_COLLECTION || 'android_startup_snapshots',
+    process.env.MONGODB_PROVIDER_CATALOG_COLLECTION || 'provider_catalog_items',
+    process.env.MONGODB_PROVIDER_CATALOG_SYNC_COLLECTION || 'provider_catalog_syncs',
   ];
   await Promise.all(collectionNames.map(name => database.collection(name).deleteMany({ ownerId })));
   await database.collection(process.env.MONGODB_DEVICE_COLLECTION || 'device_profiles').updateMany(
@@ -164,6 +169,8 @@ export async function deleteAccountProfilesAndData(accountId) {
     process.env.MONGODB_FAVORITES_COLLECTION || 'favorites',
     process.env.MONGODB_AI_RECOMMENDATIONS_COLLECTION || 'ai_recommendations',
     process.env.MONGODB_ANDROID_STARTUP_COLLECTION || 'android_startup_snapshots',
+    process.env.MONGODB_PROVIDER_CATALOG_COLLECTION || 'provider_catalog_items',
+    process.env.MONGODB_PROVIDER_CATALOG_SYNC_COLLECTION || 'provider_catalog_syncs',
   ];
   await Promise.all(ownedCollections.map(name => database.collection(name).deleteMany({ ownerId: { $in: ownerIds } })));
   await database.collection(process.env.MONGODB_DEVICE_COLLECTION || 'device_profiles').updateMany(

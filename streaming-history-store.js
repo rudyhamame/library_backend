@@ -94,13 +94,17 @@ export async function getStreamingContinueWatching(ownerId, limit = 20) {
   const history = await getStreamingHistory(ownerId, 500);
   const latestByItem = new Map();
   for (const item of history) {
-    if (!item.sourceId || !item.itemId || item.kind === 'channel') continue;
+    if (!item.sourceId || !item.itemId) continue;
     const key = `${item.sourceId}:${item.kind}:${item.itemId}`;
     if (!latestByItem.has(key)) latestByItem.set(key, item);
   }
   return [...latestByItem.values()]
     .filter((item) => {
-      if (item.completed === true || milliseconds(item.endPositionMs) <= 5000) return false;
+      if (milliseconds(item.endPositionMs) <= 5000) return false;
+      // Live channels have no completion or run time - the most recent one
+      // watched always belongs in Continue Watching.
+      if (item.kind === 'channel') return true;
+      if (item.completed === true) return false;
       const duration = milliseconds(item.mediaDurationMs);
       return duration <= 0 || milliseconds(item.endPositionMs) < Math.max(duration - 30000, duration * 0.95);
     })

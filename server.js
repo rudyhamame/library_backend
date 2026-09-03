@@ -16,7 +16,7 @@ import { MediaCapacityError, MediaJobManager, defaultMediaLimits, memoryPressure
 import { HlsStrategy, PlaybackStrategy, choosePlaybackStrategy, determineHlsStrategy, hlsCodecArgs } from './playback-strategy.js';
 import { getStreamingContinueWatching, getStreamingHistory, getStreamingResume, saveStreamingHistory } from './streaming-history-store.js';
 import { getFavorites, toggleFavorite } from './favorites-store.js';
-import { authorizeDeviceSession, changeAccountPassword, claimAutomaticPairing, createDeviceSession, deleteAccount, getDeviceWeatherLocations, getLinkedDevices, getPairingInfo, getRokuDeviceSessionStatus, isRokuSessionLinked, loginAccount, loginDeviceSession, recordDeviceHeartbeat, registerAccount, resolveDeviceToken, saveDeviceWeatherLocations, selectAccountProfile, setupDeviceSession, unlinkAccountDevice } from './device-sessions.js';
+import { authorizeDeviceSession, changeAccountPassword, claimAutomaticPairing, createDeviceSession, deleteAccount, getDeviceWeatherLocations, getLinkedDevices, getPairingInfo, getRokuDeviceSessionStatus, getRokuSourcePreference, getRokuSourcePreferenceByOwner, isRokuSessionLinked, loginAccount, loginDeviceSession, recordDeviceHeartbeat, registerAccount, resolveDeviceToken, saveDeviceWeatherLocations, selectAccountProfile, setRokuSourcePreference, setupDeviceSession, unlinkAccountDevice } from './device-sessions.js';
 import { createAccountProfile, deleteAccountProfile, getAccountProfile, getAccountProfiles, updateAccountProfile } from './account-profile-store.js';
 import { createLibraryCategory, deleteLibraryCategory, getManagedLibrary, renameLibraryCategory, replaceLibraryCategoryItems } from './library-category-store.js';
 import { enforceLibraryOnly } from './library-route-policy.js';
@@ -24,6 +24,8 @@ import { checkPlaylistSources } from './playlist-health.js';
 import { AI_RECOMMENDATION_VERSION, getAiRecommendations } from './ai-recommendations.js';
 import { getLatestRecommendationCache } from './recommendations-store.js';
 import { getAndroidStartupSnapshot, saveAndroidStartupSnapshot } from './android-startup-store.js';
+import { deleteProviderCatalog, getProviderCatalogRails, replaceProviderCatalog } from './provider-catalog-store.js';
+import { getCatalogSummary } from './catalog-summary-store.js';
 import { normalizePlaylistRules, playlistRuleEnabled } from './playlist-rules.js';
 
 const app = express();
@@ -100,6 +102,8 @@ const mediaDurationCache = new Map();
 const mediaDurationInFlight = new Map();
 const mediaDurationCacheMaxEntries = 2_000;
 const mediaDurationCacheTtlMs = 7 * 24 * 60 * 60 * 1000;
+const providerCatalogRefreshes = new Map();
+const providerCatalogTtlMs = Math.max(5 * 60_000, Number.parseInt(process.env.PROVIDER_CATALOG_TTL_MS || '900000', 10) || 15 * 60_000);
 const streamTicketSecret = process.env.DEVICE_AUTH_SECRET || 'local-development-secret-change-before-production';
 
 function issueStreamTicket(ownerId, sourceId, kind, id) {
@@ -123,6 +127,25 @@ const sourceType = source => source?.type === 'm3u' ? 'm3u' : 'xtream';
 const getSourceCatalog = (source, kind, category = 'all') => sourceType(source) === 'm3u' ? getM3uCatalog(source, kind) : getXtreamCatalog(source, kind, category);
 const getSourceCategories = (source, kind) => sourceType(source) === 'm3u' ? getM3uCategories(source, kind) : getXtreamCategories(source, kind);
 const sourceProviderUrl = (source, kind, id, extension = '') => sourceType(source) === 'm3u' ? m3uProviderUrl(source, kind, id) : xtreamProviderUrl(source, kind, id, extension);
+
+async function syncProviderCatalog(ownerId, source) {
+  if (!ownerId || !source?._id) return;
+  for (const kind of ['series', 'movie', 'channel']) {
+    const catalog = await withCatalogMemorySlot(() => getSourceCatalog(source, kind), 'background');
+    await replaceProviderCatalog(ownerId, String(source._id), source.name, kind, catalog);
+  }
+}
+
+function scheduleProviderCatalogSync(ownerId, sourceId) {
+  const key = `${ownerId}:${sourceId}`;
+  if (!ownerId || !sourceId || providerCatalogRefreshes.has(key)) return providerCatalogRefreshes.get(key);
+  const pending = getXtreamSource(String(sourceId), ownerId)
+    .then(source => source && source.connectionStatus !== 'offline' ? syncProviderCatalog(ownerId, source) : null)
+    .catch(error => console.warn(`[ProviderCatalog] sync failed source=${sourceId}: ${error.message}`))
+    .finally(() => providerCatalogRefreshes.delete(key));
+  providerCatalogRefreshes.set(key, pending);
+  return pending;
+}
 
 function libraryRevision(ownerId) {
   return libraryRevisions.get(String(ownerId || '')) || 1;
@@ -501,11 +524,13 @@ async function getRokuSelectedItems(kind, ownerId = null) {
   if (!ownerId) return [];
   const suppliedItems = await getLibrarySelectedItems(ownerId, kind);
   const managed = await getManagedLibrary(ownerId, suppliedItems, kind);
+  const selectedSourcePreference = await getRokuSourcePreferenceByOwner(ownerId);
+  const selectedSourceId = selectedSourcePreference || String((await getAllXtreamSources(ownerId))[0]?._id || '');
   return managed.categories.flatMap(category => category.items.map(item => ({
     ...item,
     category: category.name,
     rokuCategory: rokuText(category.name),
-  })));
+  }))).filter(item => !selectedSourceId || String(item.sourceId || '') === selectedSourceId);
 }
 
 function directXtreamItem(item) {
@@ -811,6 +836,28 @@ app.post('/api/account/profiles/:profileId/select', async (req, res) => {
     res.json(result);
   } catch (error) { res.status(Number(error?.status) || 500).json({ error: error.message }); }
 });
+app.get('/api/account/roku-source', async (req, res) => {
+  try {
+    const accountId = requestAccount(req);
+    const ownerId = requestOwner(req);
+    if (!accountId || !ownerId) return res.status(401).json({ error: 'Authentication required' });
+    const sources = await getAllXtreamSources(ownerId);
+    const savedSourceId = await getRokuSourcePreference(accountId);
+    const sourceId = sources.some(source => String(source._id) === savedSourceId) ? savedSourceId : String(sources[0]?._id || '');
+    res.set('Cache-Control', 'no-store');
+    res.json({ sourceId, items: sources.map(source => ({ id: source._id, name: source.name, type: source.type || 'xtream' })) });
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+app.put('/api/account/roku-source', async (req, res) => {
+  try {
+    const accountId = requestAccount(req);
+    const ownerId = requestOwner(req);
+    const sourceId = String(req.body?.sourceId || '').trim();
+    if (!accountId || !ownerId) return res.status(401).json({ error: 'Authentication required' });
+    if (sourceId && !await getXtreamSource(sourceId, ownerId)) return res.status(404).json({ error: 'Playlist source not found' });
+    res.json({ sourceId: await setRokuSourcePreference(accountId, sourceId) });
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
 app.post('/api/account/password', async (req, res) => {
   try {
     const accountId = requestAccount(req);
@@ -839,6 +886,65 @@ app.get('/api/health', async (_, res) => {
   } catch (error) {
     res.status(503).json({ ok: false, source: 'catalog', storage: { type: 'mongodb', error: error.message } });
   }
+});
+
+app.get('/internal/catalog-summary', async (req, res) => {
+  const address = String(req.socket?.remoteAddress || '');
+  if (!['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(address)) return res.sendStatus(404);
+  try { res.set('Cache-Control', 'no-store'); res.json(await getCatalogSummary()); }
+  catch (error) { res.status(503).json({ error: error.message }); }
+});
+
+// Dashboard "refresh" must be a real re-sync against every provider, not a
+// re-read of whatever counts are already sitting in MongoDB, and the
+// dashboard polls this progress live so a multi-minute sync (a provider
+// whose VOD list is too large to finish inside the interactive timeout)
+// shows per-kind counts landing instead of a frozen spinner.
+let catalogRefreshState = null;
+
+async function runCatalogRefresh() {
+  const sources = (await getAllXtreamSources()).filter(source => source.connectionStatus !== 'offline');
+  const state = {
+    startedAt: new Date().toISOString(),
+    done: false,
+    sources: sources.map(source => ({
+      sourceId: String(source._id),
+      name: source.name,
+      kinds: { series: { status: 'pending' }, movie: { status: 'pending' }, channel: { status: 'pending' } },
+    })),
+  };
+  catalogRefreshState = state;
+  await Promise.allSettled(sources.map(async source => {
+    const entry = state.sources.find(row => row.sourceId === String(source._id));
+    for (const kind of ['series', 'movie', 'channel']) {
+      entry.kinds[kind] = { status: 'syncing' };
+      try {
+        const catalog = await withCatalogMemorySlot(() => getSourceCatalog(source, kind), 'background');
+        await replaceProviderCatalog(source.ownerId, String(source._id), source.name, kind, catalog);
+        entry.kinds[kind] = { status: 'done', count: catalog.length };
+      } catch (error) {
+        entry.kinds[kind] = { status: 'error', error: error.message };
+      }
+    }
+  }));
+  state.summary = await getCatalogSummary();
+  state.done = true;
+}
+
+app.post('/internal/catalog-refresh', async (req, res) => {
+  const address = String(req.socket?.remoteAddress || '');
+  if (!['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(address)) return res.sendStatus(404);
+  res.set('Cache-Control', 'no-store');
+  if (catalogRefreshState && !catalogRefreshState.done) return res.json({ ok: true, alreadyRunning: true });
+  runCatalogRefresh().catch(error => { if (catalogRefreshState) { catalogRefreshState.done = true; catalogRefreshState.error = error.message; } });
+  res.json({ ok: true, started: true });
+});
+
+app.get('/internal/catalog-refresh/status', (req, res) => {
+  const address = String(req.socket?.remoteAddress || '');
+  if (!['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(address)) return res.sendStatus(404);
+  res.set('Cache-Control', 'no-store');
+  res.json(catalogRefreshState || { done: true, sources: [] });
 });
 
 function diagnosticsAuthorized(req) {
@@ -1004,6 +1110,8 @@ app.get('/api/roku/bootstrap', async (req, res) => {
       getLatestRecommendationCache(ownerId, 'both', AI_RECOMMENDATION_VERSION),
       getAllXtreamSources(ownerId),
     ]);
+    const selectedSourcePreference = await getRokuSourcePreferenceByOwner(ownerId);
+    const selectedSourceId = selectedSourcePreference || String(sources[0]?._id || '');
     const newestFirst = (items) => [...items]
       .sort((a, b) => Number(b.added || 0) - Number(a.added || 0))
       .slice(0, 3);
@@ -1029,6 +1137,7 @@ app.get('/api/roku/bootstrap', async (req, res) => {
     }));
     const accountSourceIds = new Set(sources.map(source => String(source._id)));
     const discoveryItems = items => (Array.isArray(items) ? items : [])
+      .filter(item => !selectedSourceId || String(item?.sourceId || '') === selectedSourceId)
       .filter(item => accountSourceIds.has(String(item?.sourceId || '')))
       .map(rokuDiscoveryItem)
       .filter(Boolean)
@@ -1046,6 +1155,8 @@ app.get('/api/roku/bootstrap', async (req, res) => {
         series: selectedSeries.length,
         movies: selectedMovies.length,
         channels: selectedChannels.length,
+        selectedSourceId,
+        selectedSourceName: sources.find(source => String(source._id) === selectedSourceId)?.name || '',
       },
     });
   } catch (error) {
@@ -1079,7 +1190,23 @@ app.get('/api/roku/search', async (req, res) => {
   try {
     const kind = String(req.query.kind || '');
     const query = String(req.query.q || '').trim().toLocaleLowerCase();
-    if ((kind !== 'series' && kind !== 'movie') || !query) return res.status(400).json({ error: 'kind and q are required' });
+    if (!['series', 'movie', 'channel'].includes(kind) || !query) return res.status(400).json({ error: 'kind and q are required' });
+    if (String(req.query.librarySource || '') === 'server') {
+      const catalog = await getRokuServerCatalog(requestOwner(req), kind, 'all');
+      const matches = catalog.items.filter(item => String(item.title || '').toLocaleLowerCase().includes(query)).slice(0, 60);
+      if (kind === 'series') {
+        return res.json({ items: matches.map(item => ({
+          id: `series-search:${item.sourceId}:${item.id}`, title: item.title, rokuTitle: rokuText(item.title),
+          category: item.category, rokuCategory: rokuText(item.category), sourceId: String(item.sourceId), seriesId: item.id,
+          thumbnail: item.logo, contentKind: 'series-search',
+          originalFormat: String(item.extension || 'mp4').replace(/[^a-z0-9]/gi, '').toUpperCase(),
+        })) });
+      }
+      if (kind === 'movie') {
+        return res.json({ items: matches.map(item => ({ ...directXtreamItem(item), thumbnail: item.logo, duration: item.duration || '', kind: 'movie', contentKind: 'movie', rokuEnabled: true })) });
+      }
+      return res.json({ items: buildXtreamChannelsPayload(matches) });
+    }
     const matches = (await getRokuSelectedItems(kind, requestOwner(req)))
       .filter(item => item.title.toLocaleLowerCase().includes(query))
       .slice(0, 60);
@@ -1096,6 +1223,7 @@ app.get('/api/roku/search', async (req, res) => {
         originalFormat: String(item.extension || 'mp4').replace(/[^a-z0-9]/gi, '').toUpperCase(),
       })) });
     }
+    if (kind === 'channel') return res.json({ items: buildXtreamChannelsPayload(matches) });
     const items = matches.map(item => ({
       ...directXtreamItem(item),
       thumbnail: item.logo,
@@ -1111,7 +1239,15 @@ app.get('/api/roku/series/detail', async (req, res) => {
     const sourceId = String(req.query.sourceId || '');
     const seriesId = String(req.query.seriesId || '');
     if (!sourceId || !seriesId) return res.status(400).json({ error: 'sourceId and seriesId are required' });
-    const series = (await getRokuSelectedItems('series', requestOwner(req))).find(item => String(item.sourceId) === sourceId && item.id === seriesId);
+    let series;
+    if (String(req.query.librarySource || '') === 'server') {
+      const source = await getRokuServerProvider(requestOwner(req));
+      if (source && String(source._id) === sourceId) {
+        series = { id: seriesId, sourceId, title: String(req.query.title || 'Series'), category: String(req.query.category || 'Other') };
+      }
+    } else {
+      series = (await getRokuSelectedItems('series', requestOwner(req))).find(item => String(item.sourceId) === sourceId && item.id === seriesId);
+    }
     if (!series) return res.status(404).json({ error: 'Series not found' });
     res.json({ items: await buildXtreamSeriesPayload({ selected: [series] }) });
   } catch (error) { res.status(500).json({ error: error.message }); }
@@ -1146,9 +1282,49 @@ function buildXtreamChannelsPayload(items) {
   }));
 }
 
+async function getRokuServerProvider(ownerId) {
+  const sources = await getAllXtreamSources(ownerId);
+  const preferredId = await getRokuSourcePreferenceByOwner(ownerId);
+  return sources.find(source => String(source._id) === String(preferredId || '')) || sources[0] || null;
+}
+
+async function getRokuServerCatalog(ownerId, kind, requestedCategory) {
+  const source = await getRokuServerProvider(ownerId);
+  if (!source) return { source: null, category: '', items: [] };
+  const categories = await getSourceCategories(source, kind);
+  const category = String(requestedCategory || categories[0]?.id || 'all');
+  const categoryName = categories.find(entry => String(entry.id) === category)?.name || 'Other';
+  const catalog = await withCatalogMemorySlot(() => getSourceCatalog(source, kind, category), 'interactive');
+  const items = catalog
+    .map(item => selectedXtreamItem(source, { ...item, category: categoryName }))
+    .sort((a, b) => String(a.title || '').localeCompare(String(b.title || ''), undefined, { numeric: true, sensitivity: 'base' }));
+  return { source, category, items };
+}
+
+app.get('/api/roku/provider/categories', async (req, res) => {
+  try {
+    const ownerId = requestOwner(req);
+    if (!ownerId) return res.status(401).json({ error: 'Authentication required' });
+    const kind = ['series', 'movie', 'channel'].includes(String(req.query.kind)) ? String(req.query.kind) : '';
+    if (!kind) return res.status(400).json({ error: 'kind must be series, movie, or channel' });
+    const source = await getRokuServerProvider(ownerId);
+    if (!source) return res.json({ sourceId: '', categories: [] });
+    const categories = (await getSourceCategories(source, kind))
+      .map(entry => ({ id: String(entry.id), name: String(entry.name || 'Other'), rokuName: rokuText(entry.name || 'Other') }))
+      .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
+    res.set('Cache-Control', 'private, no-store');
+    res.json({ sourceId: String(source._id), sourceName: source.name, categories });
+  } catch (error) { res.status(502).json({ error: error.message }); }
+});
+
 app.get('/api/roku/movies', async (req, res) => {
   const startedAt = Date.now();
   try {
+    if (String(req.query.librarySource || '') === 'server') {
+      const catalog = await getRokuServerCatalog(requestOwner(req), 'movie', req.query.category);
+      const items = await buildXtreamMoviesPayload({ selected: catalog.items });
+      return res.json({ items, page: 0, total: items.length, hasMore: false });
+    }
     const pageInfo = rokuPage(req, rokuMoviePageLimit);
     // Roku movie pages are deliberately fixed at ten items per request.
     pageInfo.limit = rokuMoviePageLimit;
@@ -1185,8 +1361,12 @@ app.get('/api/streaming-history/continue-watching', async (req, res) => {
   try {
     const ownerId = requestOwner(req);
     if (!ownerId) return res.status(401).json({ error: 'Authentication required' });
+    // Continue Watching is a per-profile concept: the last Series, Movie, and
+    // Channel the profile watched on ANY platform (Android, Roku, browser) and
+    // from ANY playlist source. Never scope it to a single Roku provider.
+    const items = await getStreamingContinueWatching(ownerId, req.query.limit);
     res.set('Cache-Control', 'no-store');
-    res.json({ items: await getStreamingContinueWatching(ownerId, req.query.limit) });
+    res.json({ items });
   }
   catch (error) { res.status(500).json({ error: error.message }); }
 });
@@ -1367,6 +1547,7 @@ async function buildAndroidRecentSnapshot(ownerId) {
       let catalog;
       try {
         catalog = await withCatalogMemorySlot(() => getSourceCatalog(source, kind), 'background');
+        await replaceProviderCatalog(ownerId, String(source._id), source.name, kind, catalog);
       }
       catch (error) {
         console.warn(`[AndroidStartup] source-refresh-skipped source=${source._id} kind=${kind} error=${error.message}`);
@@ -1589,6 +1770,7 @@ function validateSavedPlaylistSource(source, sourceId, ownerId) {
       if (source.type === 'm3u') await validateM3uConnection(candidate, { timeoutMs: 8_000 });
       else await validateXtreamConnection(candidate, { attempts: 1, timeoutMs: 8_000 });
       await updateXtreamSource(sourceId, { connectionStatus: 'online', connectionMessage: '' }, ownerId);
+      scheduleProviderCatalogSync(ownerId, sourceId);
     } catch (error) {
       const connectionMessage = String(error?.message || error || 'Playlist provider is unavailable').slice(0, 240);
       await updateXtreamSource(sourceId, { connectionStatus: 'offline', connectionMessage }, ownerId).catch(() => {});
@@ -1632,6 +1814,7 @@ app.put('/api/xtream/sources/:id', async (req, res) => {
     const saved = await updateXtreamSource(req.params.id, changes, ownerId);
     playlistHealthCache.delete(ownerId);
     res.json(saved);
+    scheduleProviderCatalogSync(ownerId, req.params.id);
   } catch (error) { res.status(400).json({ error: error.message }); }
 });
 
@@ -1639,9 +1822,42 @@ app.delete('/api/xtream/sources/:id', async (req, res) => {
   try {
     const ownerId = requestOwner(req);
     if (!await deleteXtreamSource(req.params.id, ownerId)) return res.sendStatus(404);
+    await deleteProviderCatalog(ownerId, req.params.id);
     playlistHealthCache.delete(ownerId);
     bumpLibraryRevision(ownerId);
     res.sendStatus(204);
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+// Welcome must never make a phone download and sort a provider's complete
+// catalog. Serve the small persisted rails immediately and refresh stale or
+// missing snapshots once in the background for this canonical account owner.
+app.get('/api/xtream/sources/:id/rails', async (req, res) => {
+  try {
+    const ownerId = requestOwner(req);
+    if (!ownerId) return res.status(401).json({ error: 'Authentication required' });
+    const source = await getXtreamSource(req.params.id, ownerId);
+    if (!source) return res.status(404).json({ error: 'Playlist source not found' });
+    const rails = await getProviderCatalogRails(ownerId, String(source._id), req.query.limit || 10);
+    const ready = ['series', 'movie', 'channel'].every(kind => rails.sync?.[kind]?.syncedAt);
+    const stale = !ready || ['series', 'movie', 'channel'].some(kind => Date.now() - new Date(rails.sync[kind].syncedAt).getTime() > providerCatalogTtlMs);
+    const refresh = req.query.refresh === 'true' || stale;
+    if (refresh) scheduleProviderCatalogSync(ownerId, String(source._id));
+    const enabled = new Set(Array.isArray(source.enabledKeys) ? source.enabledKeys : []);
+    const markEnabled = items => items.map(item => ({ ...item, enabled: enabled.has(item.key) }));
+    res.set('Cache-Control', 'private, no-store');
+    res.json({
+      source: publicXtreamSource(source),
+      series: markEnabled(rails.series),
+      movie: markEnabled(rails.movie),
+      channel: markEnabled(rails.channel),
+      updatedAt: rails.updatedAt,
+      counts: Object.fromEntries(['series', 'movie', 'channel'].map(kind => [
+        kind, Number(rails.sync?.[kind]?.count) || 0,
+      ])),
+      syncing: refresh && providerCatalogRefreshes.has(`${ownerId}:${source._id}`),
+      ready,
+    });
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
@@ -1662,6 +1878,8 @@ app.get('/api/xtream/catalog', async (req, res) => {
     const allItems = await withCatalogMemorySlot(
       () => getSourceCatalog(source, kind, catalogCategory), 'interactive',
     );
+    if (catalogCategory === 'all') replaceProviderCatalog(source.ownerId, String(source._id), source.name, kind, allItems)
+      .catch(error => console.warn(`[ProviderCatalog] persist failed source=${source._id} kind=${kind}: ${error.message}`));
     const enabled = new Set(source.enabledKeys || []);
     const titleLanguage = String(req.query.titleLanguage || req.query.language || 'all').toUpperCase();
     const requestedPage = Math.max(1, Number.parseInt(req.query.page, 10) || 1);
@@ -2308,6 +2526,17 @@ app.get('/api/roku/library', async (req, res) => {
 });
 app.get('/api/roku/series', async (req, res) => {
   try {
+    if (String(req.query.librarySource || '') === 'server') {
+      const catalog = await getRokuServerCatalog(requestOwner(req), 'series', req.query.category);
+      const items = catalog.items.map(item => ({
+        id: `series-search:${item.sourceId}:${item.id}`,
+        title: item.title, rokuTitle: rokuText(item.title), category: item.category,
+        rokuCategory: rokuText(item.category), sourceId: String(item.sourceId), seriesId: item.id,
+        thumbnail: item.logo, added: item.added, contentKind: 'series-search',
+        originalFormat: String(item.extension || 'mp4').replace(/[^a-z0-9]/gi, '').toUpperCase(),
+      }));
+      return res.json({ items, page: 0, total: items.length, hasMore: false });
+    }
     const pageInfo = rokuPage(req, rokuCatalogPageLimit);
     pageInfo.limit = rokuCatalogPageLimit;
     pageInfo.offset = pageInfo.page * pageInfo.limit;
@@ -2345,6 +2574,11 @@ app.get('/api/roku/series', async (req, res) => {
 });
 app.get('/api/roku/channels', async (req, res) => {
   try {
+    if (String(req.query.librarySource || '') === 'server') {
+      const catalog = await getRokuServerCatalog(requestOwner(req), 'channel', req.query.category);
+      const items = buildXtreamChannelsPayload(catalog.items);
+      return res.json({ items, page: 0, total: items.length, hasMore: false });
+    }
     const pageInfo = rokuPage(req, rokuCatalogPageLimit);
     pageInfo.limit = rokuCatalogPageLimit;
     pageInfo.offset = pageInfo.page * pageInfo.limit;

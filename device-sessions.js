@@ -141,13 +141,34 @@ export async function createDeviceSession(deviceId, frontendUrl, deviceToken = '
   const pairUrl = pairUrlObject.toString();
   // Camera apps hand this Android intent URL to RH when it is installed. If
   // it is not installed, Chrome opens the existing web pairing page instead.
-  const downloadUrl = process.env.ANDROID_APP_DOWNLOAD_URL || 'https://github.com/rudyhamame/stream_front/releases/latest/download/RH-IPTV-Library.apk';
-  const appPairUrl = `intent://pair?pair=${encodeURIComponent(session.code)}#Intent;scheme=rhstream;package=com.rhstream.library;S.browser_fallback_url=${encodeURIComponent(downloadUrl)};end`;
+  // If the Android intent is unavailable, the scanner must still open the
+  // actual pairing page. Falling back to an APK download strands users before
+  // they can sign in, especially when scanning with a regular camera app.
+  const appPairUrl = `intent://pair?pair=${encodeURIComponent(session.code)}#Intent;scheme=rhstream;package=com.rhstream.library;S.browser_fallback_url=${encodeURIComponent(pairUrl)};end`;
   return {
     code: session.code, deviceId: session.deviceId, expiresAt: session.expiresAt,
     pairUrl, appPairUrl,
     qrImageUrl: `https://quickchart.io/qr?size=190&text=${encodeURIComponent(appPairUrl)}`,
   };
+}
+
+export async function getRokuSourcePreference(accountId) {
+  if (!accountId || !ObjectId.isValid(accountId)) return '';
+  const account = await (await accounts()).findOne({ _id: new ObjectId(accountId) }, { projection: { rokuSourceId: 1 } });
+  return String(account?.rokuSourceId || '');
+}
+
+export async function setRokuSourcePreference(accountId, sourceId) {
+  if (!accountId || !ObjectId.isValid(accountId)) throw new Error('Account authentication is required');
+  const value = String(sourceId || '').trim();
+  await (await accounts()).updateOne({ _id: new ObjectId(accountId) }, { $set: { rokuSourceId: value, updatedAt: new Date() } });
+  return value;
+}
+
+export async function getRokuSourcePreferenceByOwner(ownerId) {
+  if (!ownerId) return '';
+  const account = await (await accounts()).findOne({ ownerId: String(ownerId) }, { projection: { rokuSourceId: 1 } });
+  return String(account?.rokuSourceId || '');
 }
 
 export function getDeviceSession(code) { purge(); return sessions.get(String(code || '')); }

@@ -8,6 +8,12 @@ const inFlight = new Map();
 const maxInFlight = Math.max(4, Number.parseInt(process.env.XTREAM_MAX_IN_FLIGHT || '12', 10) || 12);
 const upstreamAttempts = Math.max(1, Math.min(3, Number.parseInt(process.env.XTREAM_REQUEST_ATTEMPTS || '3', 10) || 3));
 const upstreamTimeoutMs = Math.max(5_000, Math.min(30_000, Number.parseInt(process.env.XTREAM_REQUEST_TIMEOUT_MS || '18000', 10) || 18_000));
+// Bulk catalog lists (get_vod_streams/get_series/get_live_streams) scale with
+// provider size, not user wait tolerance — some providers return well past
+// 50MB/200k rows, which can take over a minute to download. These need a much
+// longer allowance than the interactive default above, which stays tight so a
+// truly dead provider fails fast on connection checks and single-item lookups.
+const catalogTimeoutMs = Math.max(upstreamTimeoutMs, Math.min(120_000, Number.parseInt(process.env.XTREAM_CATALOG_TIMEOUT_MS || '120000', 10) || 120_000));
 const wait = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
 
 export function evictXtreamCache(now = Date.now(), aggressive = false) {
@@ -29,7 +35,7 @@ function apiUrl(source, params = {}) {
 async function fetchXtream(url, { attempts = upstreamAttempts, timeoutMs = upstreamTimeoutMs } = {}) {
   let lastError;
   const boundedAttempts = Math.max(1, Math.min(3, Number(attempts) || 1));
-  const boundedTimeoutMs = Math.max(2_000, Math.min(30_000, Number(timeoutMs) || upstreamTimeoutMs));
+  const boundedTimeoutMs = Math.max(2_000, Math.min(120_000, Number(timeoutMs) || upstreamTimeoutMs));
   for (let attempt = 1; attempt <= boundedAttempts; attempt += 1) {
     try {
       return await fetch(url, { signal: AbortSignal.timeout(boundedTimeoutMs) });
@@ -113,7 +119,7 @@ export async function getXtreamCatalog(source, kind, categoryId = 'all') {
       rating: String(row.rating || ''),
       added: String(row.added || row.last_modified || ''),
     };
-  }));
+  }), { timeoutMs: catalogTimeoutMs });
 }
 
 export async function getXtreamMovieInfo(source, movieId) {

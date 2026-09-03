@@ -24,6 +24,7 @@ import { checkPlaylistSources } from './playlist-health.js';
 import { AI_RECOMMENDATION_VERSION, getAiRecommendations } from './ai-recommendations.js';
 import { getLatestRecommendationCache } from './recommendations-store.js';
 import { getAndroidStartupSnapshot, saveAndroidStartupSnapshot } from './android-startup-store.js';
+import { normalizePlaylistRules, playlistRuleEnabled } from './playlist-rules.js';
 
 const app = express();
 app.use(enforceLibraryOnly);
@@ -525,6 +526,42 @@ function directXtreamItem(item) {
   };
 }
 
+function rokuDiscoveryItem(item) {
+  const kind = item?.kind === 'movie' || item?.kind === 'channel' ? item.kind : 'series';
+  const sourceId = String(item?.sourceId || '');
+  const id = String(item?.id || '');
+  if (!sourceId || !id) return null;
+  const common = {
+    ...item,
+    id,
+    sourceId,
+    kind,
+    title: String(item.title || 'Untitled'),
+    thumbnail: item.logo || item.thumbnail || '',
+    category: item.category || 'Other',
+    rokuCategory: rokuText(item.category || 'Other'),
+  };
+  if (kind === 'series') {
+    return {
+      ...common,
+      seriesId: id,
+      contentKind: 'series-search',
+      rokuTitle: rokuText(common.title),
+      originalFormat: String(item.extension || 'mp4').replace(/[^a-z0-9]/gi, '').toLowerCase(),
+    };
+  }
+  const direct = directXtreamItem(common);
+  return {
+    ...direct,
+    thumbnail: common.thumbnail,
+    kind,
+    contentKind: kind,
+    group: kind === 'channel' ? common.category : undefined,
+    rokuGroup: kind === 'channel' ? common.rokuCategory : undefined,
+    rokuEnabled: true,
+  };
+}
+
 function rokuXtreamStreamFormat(extension = '') {
   return ['mp4', 'm4v', 'mov'].includes(String(extension).toLowerCase()) ? 'mp4' : 'hls';
 }
@@ -560,15 +597,29 @@ app.get('/api/roku/auth-health', async (req, res) => {
 async function ownerPlaylistHealth(ownerId, { force = false } = {}) {
   const cached = playlistHealthCache.get(ownerId);
   if (!force && cached?.expiresAt > Date.now()) return cached.payload;
+  if (!force) {
+    const sources = await getAllXtreamSources(ownerId);
+    const results = sources.map(source => ({ sourceId: String(source._id), ok: source.connectionStatus === 'online', error: source.connectionMessage || '' }));
+    const online = results.filter(result => result.ok).length;
+    return { ok: sources.length > 0 && online === sources.length, status: sources.length === 0 ? 'not_saved' : online === sources.length ? 'online' : online ? 'degraded' : 'offline', total: sources.length, online, failed: sources.length - online, results, checkedAt: null };
+  }
   if (playlistHealthInFlight.has(ownerId)) return playlistHealthInFlight.get(ownerId);
   const request = (async () => {
     const sources = await getAllXtreamSources(ownerId);
-    const health = await checkPlaylistSources(sources, source => (
+    const checkedSources = sources.filter(source => !playlistRuleEnabled(source, 'suppressAutomaticHealthChecks'));
+    const health = await checkPlaylistSources(checkedSources, source => (
       sourceType(source) === 'm3u' ? validateM3uConnection(source) : validateXtreamConnection(source)
     ));
+    const skippedSources = sources.filter(source => playlistRuleEnabled(source, 'suppressAutomaticHealthChecks'));
+    const online = health.online + skippedSources.length;
+    const status = sources.length === 0 ? 'not_saved' : health.failed > 0 ? (online > 0 ? 'degraded' : 'offline') : 'online';
     const payload = {
       ...health,
-      results: health.results.map(({ sourceId, ok }) => ({ sourceId, ok })),
+      ok: status === 'online', status, total: sources.length, online,
+      results: [
+        ...health.results.map(({ sourceId, ok }) => ({ sourceId, ok })),
+        ...skippedSources.map(source => ({ sourceId: String(source._id), ok: true, skipped: true })),
+      ],
       checkedAt: new Date().toISOString(),
     };
     playlistHealthCache.set(ownerId, { payload, expiresAt: Date.now() + playlistHealthTtlMs });
@@ -945,10 +996,13 @@ app.get('/api/roku/bootstrap', async (req, res) => {
     // Home needs a very small, fast catalog only. Return the newest saved
     // Roku entries without expanding every series into episodes.
     const ownerId = requestOwner(req);
-    const [selectedSeries, selectedMovies, selectedChannels] = await Promise.all([
+    const [selectedSeries, selectedMovies, selectedChannels, snapshot, recommendation, sources] = await Promise.all([
       getRokuSelectedItems('series', ownerId),
       getRokuSelectedItems('movie', ownerId),
       getRokuSelectedItems('channel', ownerId),
+      getAndroidStartupSnapshot(ownerId),
+      getLatestRecommendationCache(ownerId, 'both', AI_RECOMMENDATION_VERSION),
+      getAllXtreamSources(ownerId),
     ]);
     const newestFirst = (items) => [...items]
       .sort((a, b) => Number(b.added || 0) - Number(a.added || 0))
@@ -973,9 +1027,21 @@ app.get('/api/roku/bootstrap', async (req, res) => {
       contentKind: 'movie',
       rokuEnabled: true,
     }));
+    const accountSourceIds = new Set(sources.map(source => String(source._id)));
+    const discoveryItems = items => (Array.isArray(items) ? items : [])
+      .filter(item => accountSourceIds.has(String(item?.sourceId || '')))
+      .map(rokuDiscoveryItem)
+      .filter(Boolean)
+      .slice(0, 10);
     res.set('Cache-Control', 'no-store');
     res.json({
       items: [...series, ...movies],
+      recommendations: discoveryItems(recommendation?.payload?.items),
+      newReleases: {
+        series: discoveryItems(snapshot?.recent?.series),
+        movies: discoveryItems(snapshot?.recent?.movie),
+        channels: discoveryItems(snapshot?.recent?.channel),
+      },
       stats: {
         series: selectedSeries.length,
         movies: selectedMovies.length,
@@ -1280,10 +1346,20 @@ app.get('/api/xtream/sources', async (req, res) => {
   catch (error) { res.status(500).json({ error: error.message }); }
 });
 
+app.put('/api/xtream/sources/:id/rules', async (req, res) => {
+  try {
+    const ownerId = requestOwner(req);
+    if (!ownerId) return res.status(401).json({ error: 'Authentication required' });
+    const source = await getXtreamSource(req.params.id, ownerId);
+    if (!source) return res.status(404).json({ error: 'Playlist source not found' });
+    res.json(await updateXtreamSource(source._id, { rules: normalizePlaylistRules(req.body?.rules) }, ownerId));
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
 async function buildAndroidRecentSnapshot(ownerId) {
   // Sources saved while their provider was unreachable must not turn a
   // background refresh into a minute-long chain of connection timeouts.
-  const sources = (await getAllXtreamSources(ownerId)).filter(source => source.connectionStatus !== 'offline');
+  const sources = (await getAllXtreamSources(ownerId)).filter(source => source.connectionStatus !== 'offline' && !playlistRuleEnabled(source, 'suppressBackgroundRefresh'));
   const recent = { series: [], movie: [], channel: [] };
   const counts = { series: 0, movie: 0, channel: 0 };
   for (const source of sources) {
@@ -1332,7 +1408,7 @@ function scheduleAndroidStartupRefresh(ownerId, language) {
     await getAiRecommendations({
       ownerId, language, forceRefresh: false,
       getSources: async requestedOwner => (await getAllXtreamSources(requestedOwner))
-        .filter(source => source.connectionStatus !== 'offline'),
+        .filter(source => source.connectionStatus !== 'offline' && !playlistRuleEnabled(source, 'suppressBackgroundRefresh')),
       getCatalog: (source, kind, category) => withCatalogMemorySlot(
         () => getSourceCatalog(source, kind, category), 'background',
       ),

@@ -37,6 +37,7 @@ function publicProfile(profile) {
     id: profile.id,
     name: profile.name,
     avatar: profile.avatar || 'lime',
+    avatarImage: typeof profile.avatarImage === 'string' ? profile.avatarImage : '',
     isDefault: profile.isDefault === true,
     position: Number(profile.position) || 0,
   };
@@ -113,11 +114,13 @@ export async function updateAccountProfile(accountId, profileId, input = {}) {
   const duplicate = await (await profileCollection()).findOne({ accountId: normalizedAccountId, id: { $ne: String(profileId) }, name: { $regex: `^${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, $options: 'i' } }, { projection: { _id: 1 } });
   if (duplicate) return { error: 'Choose a different profile name' };
   const avatar = avatars.has(input.avatar) ? input.avatar : profile.avatar || 'lime';
+  const avatarImage = input.avatarImage === undefined ? (profile.avatarImage || '') : String(input.avatarImage || '');
+  if (avatarImage.length > 1_400_000 || (avatarImage && !/^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/.test(avatarImage))) return { error: 'Upload a valid profile image' };
   await (await profileCollection()).updateOne(
     { accountId: normalizedAccountId, id: String(profileId) },
-    { $set: { name, avatar, updatedAt: new Date() } },
+    { $set: { name, avatar, avatarImage, updatedAt: new Date() } },
   );
-  return { profile: publicProfile({ ...profile, name, avatar }) };
+  return { profile: publicProfile({ ...profile, name, avatar, avatarImage }) };
 }
 
 export async function deleteAccountProfile(accountId, profileId) {

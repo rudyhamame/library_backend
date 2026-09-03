@@ -1,4 +1,7 @@
+import { normalizePlaylistRules, PlaylistRuleRuntime } from './playlist-rules.js';
+
 const cache = new Map();
+const playlistRuleRuntime = new PlaylistRuleRuntime();
 const cacheTtl = 5 * 60 * 1000;
 const cacheMaxEntries = 6;
 const inFlight = new Map();
@@ -53,7 +56,9 @@ async function request(source, params, transform = value => value, options = {})
   if (inFlight.has(key)) return inFlight.get(key);
   if (inFlight.size >= maxInFlight) throw new Error('Xtream provider request capacity is full');
   const pending = (async () => {
-    const response = await fetchXtream(apiUrl(source, params), options);
+    playlistRuleRuntime.checkApiRequest(source);
+    const retryRule = normalizePlaylistRules(source.rules).retryLimit;
+    const response = await fetchXtream(apiUrl(source, params), { ...options, attempts: retryRule.enabled ? retryRule.attempts : options.attempts });
     if (!response.ok) throw new Error(`Xtream server returned HTTP ${response.status}`);
     const data = transform(await response.json());
     if (cacheable) {

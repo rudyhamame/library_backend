@@ -356,23 +356,26 @@ export async function getLinkedDevices(accountId, profileId = '') {
     { accountId: new ObjectId(accountId), profileId: { $exists: false } },
     { $set: { profileId: defaultProfile.id, updatedAt: new Date() } },
   );
+  // The "Linked Roku devices" list (Android + browser Settings, Android welcome
+  // page) is Roku-only and scoped to the profile the caller's token carries -
+  // browser tabs and the Android app's own presence heartbeat (kind 'browser' /
+  // 'android') do not belong here. The dashboard's Connected Devices page uses
+  // listAllLinkedDevices() instead and still shows every kind.
   const rows = await (await profiles()).find(
-    { accountId: new ObjectId(accountId), profileId: selectedProfileId },
+    { accountId: new ObjectId(accountId), profileId: selectedProfileId, kind: { $nin: ['browser', 'android'] } },
     { projection: { deviceId: 1, profileId: 1, linkedAt: 1, updatedAt: 1, lastSeenAt: 1, lastStreamingSeenAt: 1, lastClientIp: 1, kind: 1, label: 1 } },
   ).sort({ linkedAt: 1 }).toArray();
   return rows.map(device => ({
     id: String(device._id),
     deviceId: device.deviceId,
     profileId: device.profileId,
-    kind: device.kind === 'browser' || device.kind === 'android' ? device.kind : 'roku',
+    kind: 'roku',
     linkedAt: device.linkedAt || device.updatedAt || null,
     lastSeenAt: device.lastSeenAt || null,
     lastClientIp: device.lastClientIp || '',
     running: Boolean(device.lastSeenAt && Date.now() - new Date(device.lastSeenAt).getTime() <= runningWindowMs),
     streaming: Boolean(device.lastStreamingSeenAt && Date.now() - new Date(device.lastStreamingSeenAt).getTime() <= streamingWindowMs),
-    label: device.kind === 'browser' || device.kind === 'android'
-      ? (device.label || (device.kind === 'android' ? 'Android' : 'Browser'))
-      : `Roku ${String(device.deviceId || '').replace(/^roku-/, '').slice(-8).toUpperCase()}`,
+    label: `Roku ${String(device.deviceId || '').replace(/^roku-/, '').slice(-8).toUpperCase()}`,
   }));
 }
 

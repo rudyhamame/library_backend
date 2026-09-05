@@ -3,8 +3,17 @@ const boundedInteger = (value, fallback, minimum, maximum) => {
   return Math.min(maximum, Math.max(minimum, Number.isFinite(parsed) ? parsed : fallback));
 };
 
+// The provider line allows a single connection. This cap is enforced at server
+// level (a cross-process Mongo lease) so a second stream never reaches the
+// provider. Override the ceiling with PROVIDER_STREAM_LIMIT; set it to 0 to make
+// the rule opt-in per source again.
+export const PROVIDER_STREAM_LIMIT = (() => {
+  const parsed = Number.parseInt(process.env.PROVIDER_STREAM_LIMIT, 10);
+  return Number.isFinite(parsed) ? Math.min(10, Math.max(0, parsed)) : 1;
+})();
+
 export const defaultPlaylistRules = () => ({
-  maxConcurrentStreams: { enabled: false, limit: 1 },
+  maxConcurrentStreams: { enabled: PROVIDER_STREAM_LIMIT > 0, limit: PROVIDER_STREAM_LIMIT || 1 },
   streamStartCooldown: { enabled: false, seconds: 5 },
   streamStartRate: { enabled: false, limit: 6, windowSeconds: 60 },
   apiRequestRate: { enabled: false, limit: 30, windowSeconds: 60 },
@@ -17,7 +26,12 @@ export const defaultPlaylistRules = () => ({
 export function normalizePlaylistRules(value = {}) {
   const rule = name => value?.[name] && typeof value[name] === 'object' ? value[name] : {};
   return {
-    maxConcurrentStreams: { enabled: rule('maxConcurrentStreams').enabled === true, limit: boundedInteger(rule('maxConcurrentStreams').limit, 1, 1, 10) },
+    maxConcurrentStreams: {
+      enabled: PROVIDER_STREAM_LIMIT > 0 ? rule('maxConcurrentStreams').enabled !== false : rule('maxConcurrentStreams').enabled === true,
+      limit: PROVIDER_STREAM_LIMIT > 0
+        ? Math.min(PROVIDER_STREAM_LIMIT, boundedInteger(rule('maxConcurrentStreams').limit, PROVIDER_STREAM_LIMIT, 1, 10))
+        : boundedInteger(rule('maxConcurrentStreams').limit, 1, 1, 10),
+    },
     streamStartCooldown: { enabled: rule('streamStartCooldown').enabled === true, seconds: boundedInteger(rule('streamStartCooldown').seconds, 5, 1, 300) },
     streamStartRate: { enabled: rule('streamStartRate').enabled === true, limit: boundedInteger(rule('streamStartRate').limit, 6, 1, 120), windowSeconds: boundedInteger(rule('streamStartRate').windowSeconds, 60, 10, 3600) },
     apiRequestRate: { enabled: rule('apiRequestRate').enabled === true, limit: boundedInteger(rule('apiRequestRate').limit, 30, 1, 600), windowSeconds: boundedInteger(rule('apiRequestRate').windowSeconds, 60, 10, 3600) },

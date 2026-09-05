@@ -311,18 +311,41 @@ export async function getLinkedDevices(accountId, profileId = '') {
   );
   const rows = await (await profiles()).find(
     { accountId: new ObjectId(accountId), profileId: selectedProfileId },
-    { projection: { deviceId: 1, profileId: 1, linkedAt: 1, updatedAt: 1, lastSeenAt: 1, lastStreamingSeenAt: 1 } },
+    { projection: { deviceId: 1, profileId: 1, linkedAt: 1, updatedAt: 1, lastSeenAt: 1, lastStreamingSeenAt: 1, lastClientIp: 1, kind: 1, label: 1 } },
   ).sort({ linkedAt: 1 }).toArray();
   return rows.map(device => ({
     id: String(device._id),
     deviceId: device.deviceId,
     profileId: device.profileId,
+    kind: device.kind === 'browser' ? 'browser' : 'roku',
     linkedAt: device.linkedAt || device.updatedAt || null,
     lastSeenAt: device.lastSeenAt || null,
+    lastClientIp: device.lastClientIp || '',
     running: Boolean(device.lastSeenAt && Date.now() - new Date(device.lastSeenAt).getTime() <= runningWindowMs),
     streaming: Boolean(device.lastStreamingSeenAt && Date.now() - new Date(device.lastStreamingSeenAt).getTime() <= streamingWindowMs),
-    label: `Roku ${String(device.deviceId || '').replace(/^roku-/, '').slice(-8).toUpperCase()}`,
+    label: device.kind === 'browser'
+      ? (device.label || 'Browser')
+      : `Roku ${String(device.deviceId || '').replace(/^roku-/, '').slice(-8).toUpperCase()}`,
   }));
+}
+
+// A browser tab is not paired like a Roku — it just carries a client-generated
+// deviceId (persisted in localStorage) so its presence/streaming heartbeats
+// have somewhere to land. Upserted on every heartbeat; linkedAt is set once.
+export async function registerBrowserDevice(accountId, profileId, deviceId, label = '') {
+  if (!ObjectId.isValid(accountId)) return;
+  const normalizedDeviceId = String(deviceId || '').trim();
+  if (!normalizedDeviceId) return;
+  const selectedProfileId = await accountProfileId(accountId, profileId);
+  const deviceOwnerId = ownerIdFor(normalizedDeviceId);
+  await (await profiles()).updateOne(
+    { deviceId: normalizedDeviceId },
+    {
+      $setOnInsert: { ownerId: deviceOwnerId, deviceId: normalizedDeviceId, createdAt: new Date(), linkedAt: new Date() },
+      $set: { accountId: new ObjectId(accountId), profileId: selectedProfileId, kind: 'browser', label: String(label || '').trim().slice(0, 120) || 'Browser', updatedAt: new Date() },
+    },
+    { upsert: true },
+  );
 }
 
 function linkedProfileFilter(ownerId, accountId = '', deviceId = '') {
@@ -372,21 +395,52 @@ export async function saveDeviceWeatherLocations(ownerId, locations, accountId =
   return result.matchedCount ? { locations: weatherLocations } : { error: 'Linked Roku profile not found' };
 }
 
-export async function recordDeviceHeartbeat(deviceId, streaming = false) {
+export async function recordDeviceHeartbeat(deviceId, streaming = false, clientIp = '') {
   const normalized = String(deviceId || '').trim();
   if (!normalized) return;
   const now = Date.now();
-  const previous = heartbeatCache.get(normalized) || { at: 0, streaming: false };
-  if (now - previous.at < heartbeatIntervalMs && previous.streaming === Boolean(streaming)) return;
-  heartbeatCache.set(normalized, { at: now, streaming: Boolean(streaming) });
+  const ip = String(clientIp || '').replace(/^::ffff:/, '').trim();
+  const previous = heartbeatCache.get(normalized) || { at: 0, streaming: false, ip: '' };
+  if (now - previous.at < heartbeatIntervalMs && previous.streaming === Boolean(streaming) && previous.ip === ip) return;
+  heartbeatCache.set(normalized, { at: now, streaming: Boolean(streaming), ip });
   try {
     const update = { $set: { lastSeenAt: new Date(now) } };
+    if (ip) update.$set.lastClientIp = ip;
     if (streaming) update.$set.lastStreamingSeenAt = new Date(now);
     else update.$unset = { lastStreamingSeenAt: '' };
     await (await profiles()).updateOne({ deviceId: normalized }, update);
   } catch {
     heartbeatCache.delete(normalized);
   }
+}
+
+// Every linked device across all accounts, for the local operations dashboard.
+export async function listAllLinkedDevices() {
+  const [deviceRows, accountRows] = await Promise.all([
+    (await profiles()).find({}, {
+      projection: {
+        deviceId: 1, accountId: 1, profileId: 1, linkedAt: 1, updatedAt: 1,
+        lastSeenAt: 1, lastStreamingSeenAt: 1, lastClientIp: 1,
+      },
+    }).sort({ lastSeenAt: -1 }).toArray(),
+    (await accounts()).find({}, { projection: { email: 1, rokuSourceId: 1, ownerId: 1 } }).toArray(),
+  ]);
+  const accountById = new Map(accountRows.map(row => [String(row._id), row]));
+  return deviceRows.map(row => {
+    const account = accountById.get(String(row.accountId || '')) || null;
+    return {
+      deviceId: row.deviceId,
+      accountId: String(row.accountId || ''),
+      accountEmail: account?.email || '',
+      accountOwnerId: account?.ownerId || (row.accountId ? accountOwnerId(row.accountId) : ''),
+      rokuSourceId: account?.rokuSourceId || '',
+      profileId: row.profileId || '',
+      linkedAt: row.linkedAt || null,
+      lastSeenAt: row.lastSeenAt || null,
+      lastStreamingSeenAt: row.lastStreamingSeenAt || null,
+      lastClientIp: row.lastClientIp || '',
+    };
+  });
 }
 
 export async function unlinkAccountDevice(accountId, deviceId, profileId = '') {

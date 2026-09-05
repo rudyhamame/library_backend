@@ -111,8 +111,14 @@ export async function getXtreamCatalog(source, kind, categoryId = 'all') {
       key: `${kind}:${id}`,
       id,
       kind,
+      // Keep the complete provider row in the server-side catalog snapshot.
+      // The normalized fields below are for filtering/playback; metadata is
+      // retained so future clients do not need another provider request just
+      // to use a field Xtream returned that we do not currently know about.
+      metadata: row,
       title: String(row.name || `${kind} ${id}`),
       categoryId: stringId(row.category_id),
+      category: String(row.category_name || ''),
       logo: String(row.stream_icon || row.cover || ''),
       extension: String(row.container_extension || (kind === 'channel' ? 'm3u8' : 'mp4')),
       duration: String(row.duration || row.duration_secs || ''),

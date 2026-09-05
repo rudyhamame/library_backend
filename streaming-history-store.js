@@ -1,4 +1,5 @@
 import { MongoClient } from 'mongodb';
+import { getSeriesWatchOverridesByOwner } from './series-watch-overrides.js';
 
 const mongoUri = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017';
 const databaseName = process.env.MONGODB_DB || 'rh_stream';
@@ -27,7 +28,7 @@ const streamingKind = (value) => {
   return 'movie';
 };
 
-export async function saveStreamingHistory({ ownerId, sessionId, itemId, title, kind, sourceId, extension, poster, startedAt, endedAt, startPositionMs, endPositionMs, streamingDurationMs, mediaDurationMs, completed }) {
+export async function saveStreamingHistory({ ownerId, sessionId, itemId, title, kind, sourceId, seriesId, extension, poster, startedAt, endedAt, startPositionMs, endPositionMs, streamingDurationMs, mediaDurationMs, completed }) {
   if (!ownerId || !sessionId) throw new Error('Account owner and streaming session ID are required');
   const now = new Date();
   const startDate = startedAt ? new Date(startedAt) : now;
@@ -37,6 +38,7 @@ export async function saveStreamingHistory({ ownerId, sessionId, itemId, title, 
     title: String(title || ''),
     kind: streamingKind(kind),
     sourceId: String(sourceId || ''),
+    seriesId: String(seriesId || ''),
     extension: String(extension || '').replace(/[^a-z0-9]/gi, '').toLowerCase(),
     poster: String(poster || ''),
     startPositionMs: milliseconds(startPositionMs),
@@ -91,14 +93,18 @@ export async function getStreamingResume(ownerId, { sourceId, itemId, kind }) {
 
 export async function getStreamingContinueWatching(ownerId, limit = 20) {
   const safeLimit = Math.min(100, Math.max(1, Number.parseInt(limit, 10) || 20));
-  const history = await getStreamingHistory(ownerId, 500);
+  const [history, overrides] = await Promise.all([
+    getStreamingHistory(ownerId, 500),
+    getSeriesWatchOverridesByOwner(ownerId).catch(() => []),
+  ]);
+  const overrideBySeries = new Map(overrides.map(entry => [`${entry.sourceId}:${entry.seriesId}`, entry]));
   const latestByItem = new Map();
   for (const item of history) {
     if (!item.sourceId || !item.itemId) continue;
     const key = `${item.sourceId}:${item.kind}:${item.itemId}`;
     if (!latestByItem.has(key)) latestByItem.set(key, item);
   }
-  return [...latestByItem.values()]
+  const filtered = [...latestByItem.values()]
     .filter((item) => {
       if (milliseconds(item.endPositionMs) <= 5000) return false;
       // Live channels have no completion or run time - the most recent one
@@ -107,8 +113,33 @@ export async function getStreamingContinueWatching(ownerId, limit = 20) {
       if (item.completed === true) return false;
       const duration = milliseconds(item.mediaDurationMs);
       return duration <= 0 || milliseconds(item.endPositionMs) < Math.max(duration - 30000, duration * 0.95);
-    })
-    .slice(0, safeLimit);
+    });
+  // A manually-marked "last watched" episode ('*' on Roku) overrides whichever
+  // episode of that series would otherwise show here, and collapses multiple
+  // recently-watched episodes of the same series down to that one row.
+  const merged = [];
+  const seenSeries = new Set();
+  for (const item of filtered) {
+    if (item.kind === 'series' && item.seriesId) {
+      const seriesKey = `${item.sourceId}:${item.seriesId}`;
+      if (seenSeries.has(seriesKey)) continue;
+      seenSeries.add(seriesKey);
+      const override = overrideBySeries.get(seriesKey);
+      if (override) {
+        merged.push({
+          ...item,
+          itemId: override.episodeId,
+          title: override.episodeTitle || item.title,
+          seasonNumber: override.seasonNumber || 0,
+          episodeNumber: override.episodeNumber || 0,
+          watchOverride: true,
+        });
+        continue;
+      }
+    }
+    merged.push(item);
+  }
+  return merged.slice(0, safeLimit);
 }
 
 export async function moveStreamingHistoryOwners(fromOwnerIds, toOwnerId) {

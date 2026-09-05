@@ -30,8 +30,10 @@ The default API address is `http://0.0.0.0:8787`. Check `GET /api/health`.
 Run `npm test` to verify both application behavior and the rule that this
 service never delivers streaming media.
 
-## Render
+## Self-hosted deployment
 
-The repository includes `render.yaml` and a Dockerfile. Configure `MONGODB_URI`
-and `DEVICE_AUTH_SECRET` with the same secret values used by the Roku backend.
+This service runs on the local machine only, managed by the systemd units in
+`../deploy/` and exposed to clients over the Tailscale network. Set
+`MONGODB_URI`, `DEVICE_AUTH_SECRET`, `PUBLIC_BASE_URL`, and `FRONTEND_URL` in
+`.env` (see `.env.example`); use the same secret values as the Roku backend.
 Never commit `.env` or provider credentials.

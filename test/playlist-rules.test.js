@@ -2,13 +2,20 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { PlaylistRuleRuntime, defaultPlaylistRules, normalizePlaylistRules } from '../playlist-rules.js';
 
-test('playlist rules default to disabled and clamp numeric values', () => {
-  assert.ok(Object.values(defaultPlaylistRules()).every(rule => rule.enabled === false));
+test('playlist rules default to disabled (except the hard one-stream-per-provider rule) and clamp numeric values', () => {
+  const defaults = defaultPlaylistRules();
+  assert.ok(Object.entries(defaults).every(([name, rule]) => name === 'maxConcurrentStreams' || rule.enabled === false));
+  // Server-level rule: a provider line permits one connection, enforced by a
+  // cross-process lease, so this defaults ON (see PROVIDER_STREAM_LIMIT).
+  assert.equal(defaults.maxConcurrentStreams.enabled, true);
+  assert.equal(defaults.maxConcurrentStreams.limit, 1);
+  // A per-source override can never exceed the global PROVIDER_STREAM_LIMIT
+  // ceiling (1 by default) - that ceiling is the whole point of the rule.
   const rules = normalizePlaylistRules({
     maxConcurrentStreams: { enabled: true, limit: 99 },
     retryLimit: { enabled: true, attempts: 0 },
   });
-  assert.equal(rules.maxConcurrentStreams.limit, 10);
+  assert.equal(rules.maxConcurrentStreams.limit, 1);
   assert.equal(rules.retryLimit.attempts, 1);
 });
 

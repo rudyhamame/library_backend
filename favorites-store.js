@@ -25,7 +25,7 @@ export async function getFavorites(ownerId) {
     .map(({ _id, ownerId: _ownerId, itemId, ...item }) => ({ id: itemId, ...item }));
 }
 
-export async function toggleFavorite({ ownerId, id, title, kind }) {
+export async function toggleFavorite({ ownerId, id, title, kind, sourceId = '', logo = '', category = '', extension = '' }) {
   if (!ownerId || !id) throw new Error('Account owner and item ID are required');
   const collection = await favoritesCollection();
   const key = { ownerId: String(ownerId), itemId: String(id) };
@@ -34,9 +34,18 @@ export async function toggleFavorite({ ownerId, id, title, kind }) {
     await collection.deleteOne(key);
     return { id, favorite: false };
   }
-  const item = { ...key, title: String(title || ''), kind: String(kind || ''), updatedAt: new Date() };
+  const item = {
+    ...key,
+    title: String(title || ''),
+    kind: String(kind || ''),
+    sourceId: String(sourceId || ''),
+    logo: String(logo || ''),
+    category: String(category || ''),
+    extension: String(extension || ''),
+    updatedAt: new Date(),
+  };
   await collection.insertOne(item);
-  return { id, title: item.title, kind: item.kind, favorite: true };
+  return { id, title: item.title, kind: item.kind, sourceId: item.sourceId, favorite: true };
 }
 
 export async function moveFavoriteOwners(fromOwnerIds, toOwnerId) {

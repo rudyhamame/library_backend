@@ -1,12 +1,12 @@
 import { createHash } from 'node:crypto';
 import { getRecommendationCache, saveRecommendationCache } from './recommendations-store.js';
+import { callGemini } from './gemini-client.js';
 
 export const AI_LIMITS = Object.freeze({
   savedSample: Math.max(8, Number.parseInt(process.env.MAX_SAVED_AI_SAMPLE || '32', 10) || 32),
   candidates: Math.max(10, Number.parseInt(process.env.MAX_AI_CANDIDATES || '100', 10) || 100),
   description: Math.max(0, Number.parseInt(process.env.MAX_DESCRIPTION_LENGTH || '200', 10) || 200),
   output: 10,
-  retries: Math.max(0, Math.min(2, Number.parseInt(process.env.MAX_GEMINI_RETRIES || '2', 10) || 0)),
 });
 export const AI_RECOMMENDATION_VERSION = 5;
 
@@ -207,36 +207,9 @@ const responseSchema = {
 };
 
 async function geminiRequest(input) {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) throw Object.assign(new Error('Gemini API key is unavailable'), { noRetry: true });
-  const model = process.env.GEMINI_MODEL || 'gemini-3.7-flash';
   const bilingualRule = input.languagePreference === 'both' ? ' For BOTH mode, select exactly 5 Arabic and 5 English items when at least five valid candidates exist in each language.' : '';
   const instruction = `You are a recommendation-ranking engine for an IPTV library. Study the supplied representative saved sample and local preference evidence. Infer broad genres, themes, tone, content type, language, cultural/origin, era and storytelling patterns without overfitting to titles. Rank ONLY the supplied candidates. Never invent an item. Preserve candidate id, sourceId and type exactly. The selected language mode is ${input.languagePreference.toUpperCase()}.${bilingualRule} Return exactly 10 recommendations when at least 10 candidates exist. Movies and series may appear in any ratio; do not force a split. Favor relevance with useful diversity. Return JSON only.`;
-  const body = {
-    systemInstruction: { parts: [{ text: instruction }] },
-    contents: [{ role: 'user', parts: [{ text: JSON.stringify(input) }] }],
-    generationConfig: { temperature: .2, maxOutputTokens: 1800, responseMimeType: 'application/json', responseJsonSchema: responseSchema },
-  };
-  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
-  let lastError;
-  for (let attempt = 0; attempt <= AI_LIMITS.retries; attempt += 1) {
-    try {
-      const response = await fetch(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey }, body: JSON.stringify(body), signal: AbortSignal.timeout(25_000) });
-      if (!response.ok) {
-        const error = new Error(`Gemini returned HTTP ${response.status}`); error.status = response.status;
-        if (response.status < 500 && response.status !== 429) error.noRetry = true;
-        throw error;
-      }
-      const data = await response.json();
-      const text = data?.candidates?.[0]?.content?.parts?.map(part => part.text || '').join('') || '';
-      return JSON.parse(text);
-    } catch (error) {
-      lastError = error;
-      if (error.noRetry || attempt >= AI_LIMITS.retries) break;
-      await new Promise(resolve => setTimeout(resolve, 350 * (2 ** attempt)));
-    }
-  }
-  throw lastError || new Error('Gemini request failed');
+  return callGemini({ instruction, input, schema: responseSchema, maxOutputTokens: 1800 });
 }
 
 export function validateAndFillRecommendations(aiOutput, candidates, language = 'both') {

@@ -171,6 +171,40 @@ export async function getRokuSourcePreferenceByOwner(ownerId) {
   return String(account?.rokuSourceId || '');
 }
 
+export async function getPartnerEmail(accountId) {
+  if (!accountId || !ObjectId.isValid(accountId)) return '';
+  const account = await (await accounts()).findOne({ _id: new ObjectId(accountId) }, { projection: { partnerEmail: 1 } });
+  return String(account?.partnerEmail || '');
+}
+
+export async function setPartnerEmail(accountId, email) {
+  if (!accountId || !ObjectId.isValid(accountId)) throw new Error('Account authentication is required');
+  const value = normalizeEmail(email);
+  if (value && !validEmail(value)) throw new Error('Enter a valid email address');
+  await (await accounts()).updateOne({ _id: new ObjectId(accountId) }, { $set: { partnerEmail: value, updatedAt: new Date() } });
+  return value;
+}
+
+// The inverse of resolveAccountByEmail - used to show the host's own name on
+// the invite the partner receives.
+export async function getAccountBasicInfo(accountId) {
+  if (!accountId || !ObjectId.isValid(accountId)) return null;
+  const account = await (await accounts()).findOne({ _id: new ObjectId(accountId) }, { projection: { email: 1, firstName: 1, lastName: 1 } });
+  if (!account) return null;
+  return { email: account.email, name: [account.firstName, account.lastName].filter(Boolean).join(' ').trim() };
+}
+
+// Read-only lookup used to route a Watch with Partner invite - no password
+// check, unlike loginAccount. Returns null rather than throwing so callers
+// can turn a missing/typo'd partner email into a clear user-facing error.
+export async function resolveAccountByEmail(email) {
+  const normalizedEmail = normalizeEmail(email);
+  if (!validEmail(normalizedEmail)) return null;
+  const account = await (await accounts()).findOne({ email: normalizedEmail }, { projection: { _id: 1, email: 1, firstName: 1, lastName: 1 } });
+  if (!account) return null;
+  return { accountId: String(account._id), ownerId: accountOwnerId(account._id), email: account.email, name: [account.firstName, account.lastName].filter(Boolean).join(' ').trim() };
+}
+
 export function getDeviceSession(code) { purge(); return sessions.get(String(code || '')); }
 
 export async function getPairingInfo(code, token = '') {
@@ -317,32 +351,34 @@ export async function getLinkedDevices(accountId, profileId = '') {
     id: String(device._id),
     deviceId: device.deviceId,
     profileId: device.profileId,
-    kind: device.kind === 'browser' ? 'browser' : 'roku',
+    kind: device.kind === 'browser' || device.kind === 'android' ? device.kind : 'roku',
     linkedAt: device.linkedAt || device.updatedAt || null,
     lastSeenAt: device.lastSeenAt || null,
     lastClientIp: device.lastClientIp || '',
     running: Boolean(device.lastSeenAt && Date.now() - new Date(device.lastSeenAt).getTime() <= runningWindowMs),
     streaming: Boolean(device.lastStreamingSeenAt && Date.now() - new Date(device.lastStreamingSeenAt).getTime() <= streamingWindowMs),
-    label: device.kind === 'browser'
-      ? (device.label || 'Browser')
+    label: device.kind === 'browser' || device.kind === 'android'
+      ? (device.label || (device.kind === 'android' ? 'Android' : 'Browser'))
       : `Roku ${String(device.deviceId || '').replace(/^roku-/, '').slice(-8).toUpperCase()}`,
   }));
 }
 
-// A browser tab is not paired like a Roku — it just carries a client-generated
-// deviceId (persisted in localStorage) so its presence/streaming heartbeats
-// have somewhere to land. Upserted on every heartbeat; linkedAt is set once.
-export async function registerBrowserDevice(accountId, profileId, deviceId, label = '') {
+// A browser tab or the Android app is not paired like a Roku — it just carries
+// a client-generated deviceId (persisted in localStorage / SharedPreferences)
+// so its presence/streaming heartbeats have somewhere to land. Upserted on
+// every heartbeat; linkedAt is set once.
+export async function registerBrowserDevice(accountId, profileId, deviceId, label = '', kind = 'browser') {
   if (!ObjectId.isValid(accountId)) return;
   const normalizedDeviceId = String(deviceId || '').trim();
   if (!normalizedDeviceId) return;
+  const normalizedKind = kind === 'android' ? 'android' : 'browser';
   const selectedProfileId = await accountProfileId(accountId, profileId);
   const deviceOwnerId = ownerIdFor(normalizedDeviceId);
   await (await profiles()).updateOne(
     { deviceId: normalizedDeviceId },
     {
       $setOnInsert: { ownerId: deviceOwnerId, deviceId: normalizedDeviceId, createdAt: new Date(), linkedAt: new Date() },
-      $set: { accountId: new ObjectId(accountId), profileId: selectedProfileId, kind: 'browser', label: String(label || '').trim().slice(0, 120) || 'Browser', updatedAt: new Date() },
+      $set: { accountId: new ObjectId(accountId), profileId: selectedProfileId, kind: normalizedKind, label: String(label || '').trim().slice(0, 120) || (normalizedKind === 'android' ? 'Android' : 'Browser'), updatedAt: new Date() },
     },
     { upsert: true },
   );
@@ -435,8 +471,8 @@ export async function listAllLinkedDevices() {
       accountOwnerId: account?.ownerId || (row.accountId ? accountOwnerId(row.accountId) : ''),
       rokuSourceId: account?.rokuSourceId || '',
       profileId: row.profileId || '',
-      kind: row.kind === 'browser' ? 'browser' : 'roku',
-      label: row.kind === 'browser' ? (row.label || 'Browser') : '',
+      kind: row.kind === 'browser' || row.kind === 'android' ? row.kind : 'roku',
+      label: row.kind === 'browser' || row.kind === 'android' ? (row.label || (row.kind === 'android' ? 'Android' : 'Browser')) : '',
       linkedAt: row.linkedAt || null,
       lastSeenAt: row.lastSeenAt || null,
       lastStreamingSeenAt: row.lastStreamingSeenAt || null,

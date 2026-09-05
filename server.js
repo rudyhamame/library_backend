@@ -4,7 +4,7 @@ import cors from 'cors';
 import { Readable, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { spawn } from 'node:child_process';
-import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -17,7 +17,7 @@ import { HlsStrategy, PlaybackStrategy, choosePlaybackStrategy, determineHlsStra
 import { getStreamingContinueWatching, getStreamingHistory, getStreamingResume, saveStreamingHistory } from './streaming-history-store.js';
 import { getFavorites, toggleFavorite } from './favorites-store.js';
 import { getSeriesWatchOverride, toggleSeriesWatchOverride } from './series-watch-overrides.js';
-import { authorizeDeviceSession, changeAccountPassword, claimAutomaticPairing, createDeviceSession, deleteAccount, getDeviceWeatherLocations, getLinkedDevices, getPairingInfo, getRokuDeviceSessionStatus, getRokuSourcePreference, getRokuSourcePreferenceByOwner, isRokuSessionLinked, listAllLinkedDevices, loginAccount, loginDeviceSession, recordDeviceHeartbeat, registerAccount, registerBrowserDevice, resolveDeviceToken, saveDeviceWeatherLocations, selectAccountProfile, setRokuSourcePreference, setupDeviceSession, unlinkAccountDevice } from './device-sessions.js';
+import { authorizeDeviceSession, changeAccountPassword, claimAutomaticPairing, createDeviceSession, deleteAccount, getAccountBasicInfo, getDeviceWeatherLocations, getLinkedDevices, getPairingInfo, getPartnerEmail, getRokuDeviceSessionStatus, getRokuSourcePreference, getRokuSourcePreferenceByOwner, isRokuSessionLinked, listAllLinkedDevices, loginAccount, loginDeviceSession, recordDeviceHeartbeat, registerAccount, registerBrowserDevice, resolveAccountByEmail, resolveDeviceToken, saveDeviceWeatherLocations, selectAccountProfile, setPartnerEmail, setRokuSourcePreference, setupDeviceSession, unlinkAccountDevice } from './device-sessions.js';
 import { getTailscalePeersByIp } from './tailscale-devices.js';
 import { createAccountProfile, deleteAccountProfile, getAccountProfile, getAccountProfiles, updateAccountProfile } from './account-profile-store.js';
 import { createLibraryCategory, deleteLibraryCategory, getManagedLibrary, renameLibraryCategory, replaceLibraryCategoryItems } from './library-category-store.js';
@@ -29,6 +29,7 @@ import { backdropVideoFile, ensureBackdropRoot, getRecommendationBackdrop } from
 import { getAndroidStartupSnapshot, saveAndroidStartupSnapshot } from './android-startup-store.js';
 import { normalizePlaylistRules, playlistRuleEnabled } from './playlist-rules.js';
 import { acquireProviderStreamLease } from './provider-stream-leases.js';
+import { aiSearchQueryVariants, combinedVariantRegex } from './ai-search.js';
 import { deleteProviderCatalog, getProviderCatalogCategories, getProviderCatalogItems, getProviderCatalogItemsForCategory, getProviderCatalogLanguagePrefixes, getProviderCatalogMeta, getProviderCatalogRails, listProviderCatalogMeta, queryProviderCatalogItems, replaceProviderCatalog, replaceProviderCatalogCategories } from './provider-catalog-store.js';
 
 const app = express();
@@ -118,6 +119,13 @@ const hlsMaxSegments = Math.max(12, Number.parseInt(process.env.HLS_MAX_SEGMENTS
 const mediaStreamIdleTimeoutMs = Math.max(10_000, Number.parseInt(process.env.MEDIA_STREAM_IDLE_TIMEOUT_MS || '45000', 10) || 45_000);
 const libraryRevisions = new Map();
 const libraryRevisionWaiters = new Map();
+// Watch with Partner: a pending invite, keyed by the invited partner's
+// accountOwnerId, plus the same revision/waiter long-poll trio used for
+// library changes below - one invite in flight per partner at a time.
+const partnerInvites = new Map();
+const partnerInviteRevisions = new Map();
+const partnerInviteWaiters = new Map();
+const wwpStreamTicketTtlMs = 6 * 60 * 60 * 1000;
 const androidStartupRefreshes = new Map();
 const androidRecentRefreshes = new Map();
 let activeDirectStreams = 0;
@@ -129,8 +137,8 @@ const mediaDurationCacheMaxEntries = 2_000;
 const mediaDurationCacheTtlMs = 7 * 24 * 60 * 60 * 1000;
 const streamTicketSecret = process.env.DEVICE_AUTH_SECRET || 'local-development-secret-change-before-production';
 
-function issueStreamTicket(ownerId, sourceId, kind, id) {
-  const payload = Buffer.from(JSON.stringify({ ownerId, sourceId, kind, id, exp: Date.now() + 5 * 60_000 })).toString('base64url');
+function issueStreamTicket(ownerId, sourceId, kind, id, ttlMs = 5 * 60_000) {
+  const payload = Buffer.from(JSON.stringify({ ownerId, sourceId, kind, id, exp: Date.now() + ttlMs })).toString('base64url');
   const signature = createHmac('sha256', streamTicketSecret).update(payload).digest('base64url');
   return `${payload}.${signature}`;
 }
@@ -165,7 +173,10 @@ function refreshCatalogSnapshot(ownerId, source, kind) {
   const job = (async () => {
     const [catalog, categories] = await Promise.all([
       withCatalogMemorySlot(() => getSourceCatalog(source, kind), 'interactive'),
-      getSourceCategories(source, kind).catch(() => null),
+      getSourceCategories(source, kind).catch(error => {
+        console.warn(`[Catalog] category fetch failed source=${source._id} kind=${kind}: ${error.message} - items will save without category names`);
+        return null;
+      }),
     ]);
     await replaceProviderCatalog(ownerId, String(source._id), source.name, kind, catalog);
     if (Array.isArray(categories)) {
@@ -245,6 +256,41 @@ function waitForLibraryRevision(ownerId, since, timeoutMs = 25_000) {
     waiters.add(finish);
     libraryRevisionWaiters.set(key, waiters);
     timer = setTimeout(() => finish(libraryRevision(key)), timeoutMs);
+    timer.unref?.();
+  });
+}
+
+function partnerInviteRevision(ownerId) {
+  return partnerInviteRevisions.get(String(ownerId || '')) || 1;
+}
+
+function bumpPartnerInviteRevision(ownerId) {
+  const key = String(ownerId || '');
+  if (!key) return;
+  const revision = partnerInviteRevision(key) + 1;
+  partnerInviteRevisions.set(key, revision);
+  const waiters = partnerInviteWaiters.get(key);
+  if (!waiters) return;
+  partnerInviteWaiters.delete(key);
+  for (const waiter of waiters) waiter(revision);
+}
+
+function waitForPartnerInvite(ownerId, since, timeoutMs = 25_000) {
+  const key = String(ownerId || '');
+  const current = partnerInviteRevision(key);
+  if (current !== since) return Promise.resolve(current);
+  return new Promise(resolve => {
+    const waiters = partnerInviteWaiters.get(key) || new Set();
+    let timer;
+    const finish = revision => {
+      clearTimeout(timer);
+      waiters.delete(finish);
+      if (!waiters.size) partnerInviteWaiters.delete(key);
+      resolve(revision);
+    };
+    waiters.add(finish);
+    partnerInviteWaiters.set(key, waiters);
+    timer = setTimeout(() => finish(partnerInviteRevision(key)), timeoutMs);
     timer.unref?.();
   });
 }
@@ -873,7 +919,8 @@ app.post('/api/account/heartbeat', async (req, res) => {
     if (!authorization || !authorization.accountId) return res.status(401).json({ error: 'Sign in required' });
     const deviceId = String(req.body?.deviceId || '').trim();
     if (!deviceId) return res.status(400).json({ error: 'deviceId is required' });
-    await registerBrowserDevice(authorization.accountId, authorization.profileId || '', deviceId, String(req.body?.label || ''));
+    const kind = req.body?.kind === 'android' ? 'android' : 'browser';
+    await registerBrowserDevice(authorization.accountId, authorization.profileId || '', deviceId, String(req.body?.label || ''), kind);
     await recordDeviceHeartbeat(deviceId, req.body?.streaming === true, clientAddress(req));
     res.json({ ok: true });
   } catch (error) { res.status(500).json({ error: error.message }); }
@@ -973,6 +1020,76 @@ async function saveRokuSourceRequest(req, res) {
 }
 app.put('/api/account/roku-source', saveRokuSourceRequest);
 app.post('/api/account/roku-source', saveRokuSourceRequest);
+app.get('/api/account/partner', async (req, res) => {
+  try {
+    const accountId = requestAccount(req);
+    if (!accountId) return res.status(401).json({ error: 'Authentication required' });
+    res.set('Cache-Control', 'no-store');
+    res.json({ partnerEmail: await getPartnerEmail(accountId) });
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+app.put('/api/account/partner', async (req, res) => {
+  try {
+    const accountId = requestAccount(req);
+    if (!accountId) return res.status(401).json({ error: 'Authentication required' });
+    res.json({ partnerEmail: await setPartnerEmail(accountId, req.body?.partnerEmail) });
+  } catch (error) { res.status(400).json({ error: error.message }); }
+});
+
+// Watch with Partner: send an invite for the exact title/position/quality the
+// host is currently watching. The partner joins the SAME provider connection
+// via a stream ticket (see /api/xtream/stream-ticket above) rather than
+// opening a second one - the whole point of this feature.
+app.post('/api/partner/invite', async (req, res) => {
+  try {
+    const accountId = requestAccount(req);
+    const ownerId = requestOwner(req);
+    if (!accountId || !ownerId) return res.status(401).json({ error: 'Authentication required' });
+    const { sourceId, kind, id, extension = '', title = '' } = req.body || {};
+    if (!sourceId || !['channel', 'movie', 'series'].includes(kind) || !id) {
+      return res.status(400).json({ error: 'sourceId, kind, and id are required' });
+    }
+    const partnerEmail = await getPartnerEmail(accountId);
+    if (!partnerEmail) return res.status(400).json({ error: 'Set a partner in Settings before inviting them' });
+    const partner = await resolveAccountByEmail(partnerEmail);
+    if (!partner) return res.status(404).json({ error: `No RH account found for ${partnerEmail}` });
+    const source = await getXtreamSource(sourceId, ownerId);
+    if (!source) return res.status(404).json({ error: 'Playlist source not found' });
+    const hostAccount = await getAccountBasicInfo(accountId);
+    const wwpSessionId = randomBytes(12).toString('base64url');
+    const streamTicket = issueStreamTicket(ownerId, String(sourceId), kind, String(id), wwpStreamTicketTtlMs);
+    const invite = {
+      wwpSessionId,
+      hostOwnerId: ownerId,
+      hostName: hostAccount?.name || hostAccount?.email || 'Your partner',
+      title: String(title || '').slice(0, 200),
+      sourceId: String(sourceId),
+      kind,
+      id: String(id),
+      extension: String(extension || ''),
+      streamTicket,
+      start: Math.max(0, Number(req.body?.start) || 0),
+      quality: String(req.body?.quality || ''),
+      expiresAt: Date.now() + wwpStreamTicketTtlMs,
+    };
+    partnerInvites.set(partner.ownerId, invite);
+    bumpPartnerInviteRevision(partner.ownerId);
+    res.json({ ok: true, wwpSessionId, partnerEmail: partner.email });
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+app.get('/api/partner/invite', async (req, res) => {
+  try {
+    const ownerId = requestOwner(req);
+    if (!ownerId) return res.status(401).json({ error: 'Authentication required' });
+    const since = Number.parseInt(String(req.query.since || '0'), 10) || 0;
+    const revision = await waitForPartnerInvite(ownerId, since);
+    const invite = partnerInvites.get(ownerId) || null;
+    if (invite && invite.expiresAt < Date.now()) partnerInvites.delete(ownerId);
+    res.set('Cache-Control', 'no-store');
+    res.json({ revision, invite: invite && invite.expiresAt >= Date.now() ? invite : null });
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
 app.post('/api/account/password', async (req, res) => {
   try {
     const accountId = requestAccount(req);
@@ -1067,7 +1184,7 @@ app.get('/internal/devices', async (req, res) => {
       const streamAgoMs = device.lastStreamingSeenAt ? Date.now() - new Date(device.lastStreamingSeenAt).getTime() : null;
       return {
         deviceId: device.deviceId,
-        label: device.kind === 'browser' ? device.label : `Roku ${String(device.deviceId || '').replace(/^roku-/, '').slice(-8).toUpperCase()}`,
+        label: device.kind === 'browser' || device.kind === 'android' ? device.label : `Roku ${String(device.deviceId || '').replace(/^roku-/, '').slice(-8).toUpperCase()}`,
         kind: device.kind,
         accountEmail: device.accountEmail,
         providerId: device.rokuSourceId,
@@ -1371,9 +1488,24 @@ app.get('/api/roku/search', async (req, res) => {
       // silently hid almost everything in a 200k+ item movie catalog. Query
       // Mongo directly, independent of any category filter.
       const escapedQuery = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      const result = await queryProviderCatalogItems(requestOwner(req), String(source._id), kind, {
+      let result = await queryProviderCatalogItems(requestOwner(req), String(source._id), kind, {
         categoryId: '', page: 1, limit: 60, extraFilters: [{ title: { $regex: escapedQuery, $options: 'i' } }],
       });
+      // A literal search found nothing for this exact text - ask Gemini for a
+      // handful of alternate search strings (typo fix, official title, or the
+      // same title in the other script) and retry once with all of them
+      // folded into a single regex alternation.
+      if (result.total === 0) {
+        const uiLanguage = /[\u0600-\u06FF]/.test(query) ? 'ar' : 'en';
+        const variants = await aiSearchQueryVariants({ query, kind, uiLanguage });
+        const combined = combinedVariantRegex(variants);
+        if (combined) {
+          const boosted = await queryProviderCatalogItems(requestOwner(req), String(source._id), kind, {
+            categoryId: '', page: 1, limit: 60, extraFilters: [{ title: { $regex: combined, $options: 'i' } }],
+          });
+          if (boosted.total > 0) result = boosted;
+        }
+      }
       const matches = result.items.map(item => selectedXtreamItem(source, item));
       if (kind === 'series') {
         return res.json({ items: matches.map(item => ({
@@ -1388,9 +1520,19 @@ app.get('/api/roku/search', async (req, res) => {
       }
       return res.json({ items: buildXtreamChannelsPayload(matches) });
     }
-    const matches = (await getRokuSelectedItems(kind, requestOwner(req)))
-      .filter(item => item.title.toLocaleLowerCase().includes(query))
-      .slice(0, 60);
+    const selectedItems = await getRokuSelectedItems(kind, requestOwner(req));
+    let matches = selectedItems.filter(item => item.title.toLocaleLowerCase().includes(query)).slice(0, 60);
+    if (!matches.length) {
+      const uiLanguage = /[\u0600-\u06FF]/.test(query) ? 'ar' : 'en';
+      const variants = await aiSearchQueryVariants({ query, kind, uiLanguage });
+      if (variants.length) {
+        const needles = variants.map(value => value.toLocaleLowerCase());
+        matches = selectedItems.filter(item => {
+          const title = item.title.toLocaleLowerCase();
+          return needles.some(needle => title.includes(needle));
+        }).slice(0, 60);
+      }
+    }
     if (kind === 'series') {
       return res.json({ items: matches.map(item => ({
         id: `series-search:${item.sourceId}:${item.id}`,
@@ -2107,7 +2249,7 @@ app.delete('/api/xtream/sources/:id', async (req, res) => {
 
 async function checkDiagnosticStep(task) {
   const startedAt = Date.now();
-  try { await task(); return { ok: true, ms: Date.now() - startedAt }; }
+  try { const result = await task(); return { ok: true, ms: Date.now() - startedAt, result }; }
   catch (error) { return { ok: false, ms: Date.now() - startedAt, error: String(error.message || error).slice(0, 200) }; }
 }
 
@@ -2197,8 +2339,15 @@ app.get('/api/xtream/sources/:id/diagnostics', async (req, res) => {
       isM3u ? notApplicable : (auth.ok ? vodStep('movie') : skipped),
       auth.ok ? checkDiagnosticStep(() => getSourceCategories(source, 'channel')) : skipped,
     ]);
+    // The provider's own connection counter (Xtream's base auth response) is
+    // ground truth for "is this playlist streaming right now" — it reflects
+    // every device using these credentials, not just the ones this app knows
+    // about, and catches a provider-side lock our own tracking cannot see.
+    const connections = !isM3u && auth.result
+      ? { active: Number(auth.result.active_cons) || 0, max: Number(auth.result.max_connections) || 0 }
+      : null;
     res.set('Cache-Control', 'no-store');
-    res.json({ sourceId: String(source._id), checkedAt: new Date().toISOString(), steps: { auth, series, movie, channel } });
+    res.json({ sourceId: String(source._id), checkedAt: new Date().toISOString(), connections, steps: { auth, series, movie, channel } });
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
@@ -2263,16 +2412,36 @@ app.get('/api/xtream/catalog', async (req, res) => {
     const filters = [];
     if (query) filters.push({ title: { $regex: query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), $options: 'i' } });
     if (titleLanguage !== 'ALL') filters.push({ title: { $regex: `^\\s*${titleLanguage.replace(/[^A-Z]/gi, '')}\\s*[-|:]`, $options: 'i' } });
-    const result = await queryProviderCatalogItems(ownerId, String(source._id), kind, {
+    let result = await queryProviderCatalogItems(ownerId, String(source._id), kind, {
       categoryId: query ? '' : category,
       page: requestedPage,
       limit: pageSize,
       extraFilters: filters,
     });
+    let searchOrigin;
+    // A literal search found nothing for this exact text - ask Gemini for a
+    // handful of alternate search strings (typo fix, official title, or the
+    // same title in the other script) and retry once with all of them folded
+    // into a single regex alternation, instead of just showing "no results"
+    // for a real title the viewer typed imperfectly.
+    if (query && result.total === 0) {
+      const uiLanguage = /[\u0600-\u06FF]/.test(query) ? 'ar' : 'en';
+      const variants = await aiSearchQueryVariants({ query, kind, uiLanguage });
+      const combined = combinedVariantRegex(variants);
+      if (combined) {
+        const boostedFilters = [{ title: { $regex: combined, $options: 'i' } }];
+        if (titleLanguage !== 'ALL') boostedFilters.push({ title: { $regex: `^\\s*${titleLanguage.replace(/[^A-Z]/gi, '')}\\s*[-|:]`, $options: 'i' } });
+        const boosted = await queryProviderCatalogItems(ownerId, String(source._id), kind, {
+          categoryId: '', page: requestedPage, limit: pageSize, extraFilters: boostedFilters,
+        });
+        if (boosted.total > 0) { result = boosted; searchOrigin = 'ai-search'; }
+      }
+    }
     res.json({
       source: publicXtreamSource(source), languages,
       items: result.items.map(item => ({ ...item, languageCode: titleLanguageCode(item), titleLanguage: titleLanguageCode(item), enabled: enabled.has(item.key) })),
       pagination: { page: result.page, pageSize: result.limit, pageCount: result.pageCount, total: result.total },
+      ...(searchOrigin ? { origin: searchOrigin } : {}),
     });
   } catch (error) { res.status(502).json({ error: error.message }); }
 });
@@ -2287,8 +2456,16 @@ app.get('/api/xtream/categories', async (req, res) => {
     const kind = aliases[String(req.query.kind || '')];
     if (!kind) return res.status(400).json({ error: 'kind must be channel, movie, or series' });
     const sortByName = list => [...list].sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''), undefined, { numeric: true, sensitivity: 'base' }));
-    // Stored snapshot only - no provider call.
+    // Stored snapshot only - this request never calls the provider. If the
+    // snapshot has items but no category names (a prior category fetch failed
+    // and was silently dropped, or hasn't run yet), kick one background retry
+    // so a later request has a chance to succeed - still doesn't block this
+    // response, and refreshCatalogSnapshot's own in-flight map keeps concurrent
+    // requests from piling up retries.
     const stored = await getProviderCatalogCategories(ownerId, String(source._id), kind).catch(() => []);
+    if (!stored.length && await catalogSnapshotHasKind(ownerId, source._id, kind)) {
+      void refreshCatalogSnapshot(ownerId, source, kind);
+    }
     res.json({ categories: sortByName(stored), origin: stored.length ? 'storage' : 'unavailable' });
   } catch (error) { res.status(502).json({ error: error.message }); }
 });

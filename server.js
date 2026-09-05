@@ -1438,7 +1438,11 @@ app.get('/api/roku/bootstrap', async (req, res) => {
     res.set('Cache-Control', 'no-store');
     res.json({
       items: [...series, ...movies],
-      favorites: favorites.map(rokuDiscoveryItem).filter(Boolean).slice(0, 30),
+      // Favorites saved from a server-catalog rail can arrive without a
+      // sourceId (that catalog has one implicit provider). rokuDiscoveryItem
+      // drops any item with no sourceId, which silently hid the whole
+      // Favorites rail on the next launch - fall back to the selected source.
+      favorites: favorites.map(favorite => rokuDiscoveryItem({ ...favorite, sourceId: favorite.sourceId || selectedSourceId })).filter(Boolean).slice(0, 30),
       recommendations: discoveryItems(recommendation?.payload?.items),
       newReleases: {
         series: railItems(rails.series),

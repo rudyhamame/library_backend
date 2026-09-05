@@ -29,7 +29,6 @@ import { backdropVideoFile, ensureBackdropRoot, getRecommendationBackdrop } from
 import { getAndroidStartupSnapshot, saveAndroidStartupSnapshot } from './android-startup-store.js';
 import { normalizePlaylistRules, playlistRuleEnabled } from './playlist-rules.js';
 import { acquireProviderStreamLease } from './provider-stream-leases.js';
-import { aiSearchQueryVariants, combinedVariantRegex } from './ai-search.js';
 import { deleteProviderCatalog, getProviderCatalogCategories, getProviderCatalogItems, getProviderCatalogItemsForCategory, getProviderCatalogLanguagePrefixes, getProviderCatalogMeta, getProviderCatalogRails, listProviderCatalogMeta, queryProviderCatalogItems, replaceProviderCatalog, replaceProviderCatalogCategories } from './provider-catalog-store.js';
 
 const app = express();
@@ -1488,24 +1487,9 @@ app.get('/api/roku/search', async (req, res) => {
       // silently hid almost everything in a 200k+ item movie catalog. Query
       // Mongo directly, independent of any category filter.
       const escapedQuery = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      let result = await queryProviderCatalogItems(requestOwner(req), String(source._id), kind, {
+      const result = await queryProviderCatalogItems(requestOwner(req), String(source._id), kind, {
         categoryId: '', page: 1, limit: 60, extraFilters: [{ title: { $regex: escapedQuery, $options: 'i' } }],
       });
-      // A literal search found nothing for this exact text - ask Gemini for a
-      // handful of alternate search strings (typo fix, official title, or the
-      // same title in the other script) and retry once with all of them
-      // folded into a single regex alternation.
-      if (result.total === 0) {
-        const uiLanguage = /[\u0600-\u06FF]/.test(query) ? 'ar' : 'en';
-        const variants = await aiSearchQueryVariants({ query, kind, uiLanguage });
-        const combined = combinedVariantRegex(variants);
-        if (combined) {
-          const boosted = await queryProviderCatalogItems(requestOwner(req), String(source._id), kind, {
-            categoryId: '', page: 1, limit: 60, extraFilters: [{ title: { $regex: combined, $options: 'i' } }],
-          });
-          if (boosted.total > 0) result = boosted;
-        }
-      }
       const matches = result.items.map(item => selectedXtreamItem(source, item));
       if (kind === 'series') {
         return res.json({ items: matches.map(item => ({
@@ -1520,19 +1504,9 @@ app.get('/api/roku/search', async (req, res) => {
       }
       return res.json({ items: buildXtreamChannelsPayload(matches) });
     }
-    const selectedItems = await getRokuSelectedItems(kind, requestOwner(req));
-    let matches = selectedItems.filter(item => item.title.toLocaleLowerCase().includes(query)).slice(0, 60);
-    if (!matches.length) {
-      const uiLanguage = /[\u0600-\u06FF]/.test(query) ? 'ar' : 'en';
-      const variants = await aiSearchQueryVariants({ query, kind, uiLanguage });
-      if (variants.length) {
-        const needles = variants.map(value => value.toLocaleLowerCase());
-        matches = selectedItems.filter(item => {
-          const title = item.title.toLocaleLowerCase();
-          return needles.some(needle => title.includes(needle));
-        }).slice(0, 60);
-      }
-    }
+    const matches = (await getRokuSelectedItems(kind, requestOwner(req)))
+      .filter(item => item.title.toLocaleLowerCase().includes(query))
+      .slice(0, 60);
     if (kind === 'series') {
       return res.json({ items: matches.map(item => ({
         id: `series-search:${item.sourceId}:${item.id}`,
@@ -2412,36 +2386,16 @@ app.get('/api/xtream/catalog', async (req, res) => {
     const filters = [];
     if (query) filters.push({ title: { $regex: query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), $options: 'i' } });
     if (titleLanguage !== 'ALL') filters.push({ title: { $regex: `^\\s*${titleLanguage.replace(/[^A-Z]/gi, '')}\\s*[-|:]`, $options: 'i' } });
-    let result = await queryProviderCatalogItems(ownerId, String(source._id), kind, {
+    const result = await queryProviderCatalogItems(ownerId, String(source._id), kind, {
       categoryId: query ? '' : category,
       page: requestedPage,
       limit: pageSize,
       extraFilters: filters,
     });
-    let searchOrigin;
-    // A literal search found nothing for this exact text - ask Gemini for a
-    // handful of alternate search strings (typo fix, official title, or the
-    // same title in the other script) and retry once with all of them folded
-    // into a single regex alternation, instead of just showing "no results"
-    // for a real title the viewer typed imperfectly.
-    if (query && result.total === 0) {
-      const uiLanguage = /[\u0600-\u06FF]/.test(query) ? 'ar' : 'en';
-      const variants = await aiSearchQueryVariants({ query, kind, uiLanguage });
-      const combined = combinedVariantRegex(variants);
-      if (combined) {
-        const boostedFilters = [{ title: { $regex: combined, $options: 'i' } }];
-        if (titleLanguage !== 'ALL') boostedFilters.push({ title: { $regex: `^\\s*${titleLanguage.replace(/[^A-Z]/gi, '')}\\s*[-|:]`, $options: 'i' } });
-        const boosted = await queryProviderCatalogItems(ownerId, String(source._id), kind, {
-          categoryId: '', page: requestedPage, limit: pageSize, extraFilters: boostedFilters,
-        });
-        if (boosted.total > 0) { result = boosted; searchOrigin = 'ai-search'; }
-      }
-    }
     res.json({
       source: publicXtreamSource(source), languages,
       items: result.items.map(item => ({ ...item, languageCode: titleLanguageCode(item), titleLanguage: titleLanguageCode(item), enabled: enabled.has(item.key) })),
       pagination: { page: result.page, pageSize: result.limit, pageCount: result.pageCount, total: result.total },
-      ...(searchOrigin ? { origin: searchOrigin } : {}),
     });
   } catch (error) { res.status(502).json({ error: error.message }); }
 });

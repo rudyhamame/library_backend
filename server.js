@@ -1067,7 +1067,8 @@ app.get('/internal/devices', async (req, res) => {
       const streamAgoMs = device.lastStreamingSeenAt ? Date.now() - new Date(device.lastStreamingSeenAt).getTime() : null;
       return {
         deviceId: device.deviceId,
-        label: `Roku ${String(device.deviceId || '').replace(/^roku-/, '').slice(-8).toUpperCase()}`,
+        label: device.kind === 'browser' ? device.label : `Roku ${String(device.deviceId || '').replace(/^roku-/, '').slice(-8).toUpperCase()}`,
+        kind: device.kind,
         accountEmail: device.accountEmail,
         providerId: device.rokuSourceId,
         providerName,
@@ -1075,7 +1076,7 @@ app.get('/internal/devices', async (req, res) => {
         lastStreamingSeenAt: device.lastStreamingSeenAt,
         lastClientIp: device.lastClientIp,
         online: seenAgoMs != null && seenAgoMs <= 90_000,
-        streamingHeartbeat: streamAgoMs != null && streamAgoMs <= 45_000,
+        streamingHeartbeat: streamAgoMs != null && streamAgoMs <= 15_000,
         linkedAt: device.linkedAt,
       };
     }));

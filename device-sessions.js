@@ -420,7 +420,7 @@ export async function listAllLinkedDevices() {
     (await profiles()).find({}, {
       projection: {
         deviceId: 1, accountId: 1, profileId: 1, linkedAt: 1, updatedAt: 1,
-        lastSeenAt: 1, lastStreamingSeenAt: 1, lastClientIp: 1,
+        lastSeenAt: 1, lastStreamingSeenAt: 1, lastClientIp: 1, kind: 1, label: 1,
       },
     }).sort({ lastSeenAt: -1 }).toArray(),
     (await accounts()).find({}, { projection: { email: 1, rokuSourceId: 1, ownerId: 1 } }).toArray(),
@@ -435,6 +435,8 @@ export async function listAllLinkedDevices() {
       accountOwnerId: account?.ownerId || (row.accountId ? accountOwnerId(row.accountId) : ''),
       rokuSourceId: account?.rokuSourceId || '',
       profileId: row.profileId || '',
+      kind: row.kind === 'browser' ? 'browser' : 'roku',
+      label: row.kind === 'browser' ? (row.label || 'Browser') : '',
       linkedAt: row.linkedAt || null,
       lastSeenAt: row.lastSeenAt || null,
       lastStreamingSeenAt: row.lastStreamingSeenAt || null,

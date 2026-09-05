@@ -29,7 +29,7 @@ import { backdropVideoFile, ensureBackdropRoot, getRecommendationBackdrop } from
 import { getAndroidStartupSnapshot, saveAndroidStartupSnapshot } from './android-startup-store.js';
 import { normalizePlaylistRules, playlistRuleEnabled } from './playlist-rules.js';
 import { acquireProviderStreamLease } from './provider-stream-leases.js';
-import { deleteProviderCatalog, getProviderCatalogCategories, getProviderCatalogItems, getProviderCatalogItemsForCategory, getProviderCatalogLanguagePrefixes, getProviderCatalogMeta, getProviderCatalogRails, listProviderCatalogMeta, queryProviderCatalogItems, replaceProviderCatalog, replaceProviderCatalogCategories } from './provider-catalog-store.js';
+import { deleteProviderCatalog, getProviderCatalogCategories, getProviderCatalogItems, getProviderCatalogItemsByIds, getProviderCatalogItemsForCategory, getProviderCatalogLanguagePrefixes, getProviderCatalogMeta, getProviderCatalogRails, listProviderCatalogMeta, queryProviderCatalogItems, replaceProviderCatalog, replaceProviderCatalogCategories } from './provider-catalog-store.js';
 
 const app = express();
 app.use(enforceLibraryOnly);
@@ -1435,14 +1435,31 @@ app.get('/api/roku/bootstrap', async (req, res) => {
       .map(item => rokuDiscoveryItem({ ...item, sourceId: selectedSourceId }))
       .filter(Boolean)
       .slice(0, 10);
+    // Favorites store only id/title/kind - re-hydrate each one against the
+    // catalog snapshot for its real logo/category, and fall back to the
+    // selected source when the saved favorite has no sourceId (that snapshot
+    // has one implicit provider). Without the sourceId, rokuDiscoveryItem
+    // drops the item and the whole Favorites rail silently disappears.
+    const favoriteSnapshot = new Map();
+    if (selectedSourceId && favorites.length) {
+      for (const row of await getProviderCatalogItemsByIds(ownerId, selectedSourceId, favorites.map(favorite => favorite.id)).catch(() => [])) {
+        favoriteSnapshot.set(`${row.kind}:${row.id}`, row);
+      }
+    }
+    const hydratedFavorites = favorites.map(favorite => {
+      const match = favoriteSnapshot.get(`${favorite.kind}:${favorite.id}`);
+      return rokuDiscoveryItem({
+        ...favorite,
+        sourceId: favorite.sourceId || match?.sourceId || selectedSourceId,
+        logo: favorite.logo || match?.logo || '',
+        category: (favorite.category && favorite.category !== 'Other' ? favorite.category : match?.category) || favorite.category || 'Other',
+        extension: favorite.extension || match?.extension || 'mp4',
+      });
+    }).filter(Boolean).slice(0, 30);
     res.set('Cache-Control', 'no-store');
     res.json({
       items: [...series, ...movies],
-      // Favorites saved from a server-catalog rail can arrive without a
-      // sourceId (that catalog has one implicit provider). rokuDiscoveryItem
-      // drops any item with no sourceId, which silently hid the whole
-      // Favorites rail on the next launch - fall back to the selected source.
-      favorites: favorites.map(favorite => rokuDiscoveryItem({ ...favorite, sourceId: favorite.sourceId || selectedSourceId })).filter(Boolean).slice(0, 30),
+      favorites: hydratedFavorites,
       recommendations: discoveryItems(recommendation?.payload?.items),
       newReleases: {
         series: railItems(rails.series),

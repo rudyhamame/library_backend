@@ -117,6 +117,19 @@ export async function getProviderCatalogItems(ownerId, sourceId, kind) {
     .toArray();
 }
 
+// Look a handful of stored items up by their provider ids, across kinds -
+// used to re-hydrate favorites (which store only id/title) with the real
+// logo/category from the snapshot at read time.
+export async function getProviderCatalogItemsByIds(ownerId, sourceId, ids) {
+  const wanted = [...new Set((Array.isArray(ids) ? ids : []).map(String).filter(Boolean))];
+  if (!ownerId || !sourceId || wanted.length === 0) return [];
+  const { items } = await collections();
+  return items
+    .find({ ownerId: String(ownerId), sourceId: String(sourceId), id: { $in: wanted } })
+    .project({ _id: 0, ownerId: 0, syncToken: 0, syncedAt: 0 })
+    .toArray();
+}
+
 // Distinct two-letter title-prefix language codes ("DE - ...", "AR | ..."),
 // computed entirely in MongoDB so the huge item set is never pulled into Node
 // just to populate the language filter.

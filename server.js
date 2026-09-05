@@ -1507,10 +1507,16 @@ app.get('/api/roku/search', async (req, res) => {
   try {
     const kind = String(req.query.kind || '');
     const query = String(req.query.q || '').trim().toLocaleLowerCase();
-    if (!['series', 'movie', 'channel'].includes(kind) || !query) return res.status(400).json({ error: 'kind and q are required' });
+    if (!['series', 'movie', 'channel'].includes(kind) || !query) {
+      console.warn(`[Roku search] rejected kind="${kind}" q="${query}" librarySource="${String(req.query.librarySource || '')}" - kind and q are required`);
+      return res.status(400).json({ error: 'kind and q are required' });
+    }
     if (String(req.query.librarySource || '') === 'server') {
       const source = await getRokuServerProvider(requestOwner(req));
-      if (!source) return res.json({ items: [] });
+      if (!source) {
+        console.warn(`[Roku search] kind=${kind} q="${query}" -> no server provider for owner`);
+        return res.json({ items: [] });
+      }
       // Search must cover the WHOLE stored snapshot, not a category-bounded
       // slice: getRokuServerCatalog(...,'all') truncates at 1500 items, which
       // silently hid almost everything in a 200k+ item movie catalog. Query
@@ -1519,6 +1525,7 @@ app.get('/api/roku/search', async (req, res) => {
       const result = await queryProviderCatalogItems(requestOwner(req), String(source._id), kind, {
         categoryId: '', page: 1, limit: 60, extraFilters: [{ title: { $regex: escapedQuery, $options: 'i' } }],
       });
+      console.log(`[Roku search] kind=${kind} q="${query}" source=${String(source._id).slice(0, 8)} matches=${result.total}`);
       const matches = result.items.map(item => selectedXtreamItem(source, item));
       if (kind === 'series') {
         return res.json({ items: matches.map(item => ({

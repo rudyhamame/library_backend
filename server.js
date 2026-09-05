@@ -323,9 +323,24 @@ async function resolveMediaDuration(source, kind, id, extension, knownDuration =
       }
     }
     if (seconds <= 0) {
-      const inputUrl = await sourceProviderUrl(source, kind, id, extension);
-      seconds = await probeMediaDuration(inputUrl);
-      durationSource = 'probe';
+      // The ffprobe fallback opens a real connection to the provider - never
+      // let it contend with an active playback job on the same line. If the
+      // one-stream-per-provider slot is taken, skip probing this time WITHOUT
+      // caching the miss (the cache TTL is 7 days; caching a "busy" 0 would
+      // poison the duration for a week instead of just retrying next play).
+      const rules = normalizePlaylistRules(source?.rules);
+      let releaseLease;
+      if (rules.maxConcurrentStreams.enabled) {
+        releaseLease = await acquireProviderStreamLease(source._id, rules.maxConcurrentStreams.limit);
+        if (!releaseLease) return { seconds: 0, duration: '', source: 'busy' };
+      }
+      try {
+        const inputUrl = await sourceProviderUrl(source, kind, id, extension);
+        seconds = await probeMediaDuration(inputUrl);
+        durationSource = 'probe';
+      } finally {
+        await releaseLease?.();
+      }
     }
     return cacheMediaDuration(cacheKey, seconds, durationSource);
   })().finally(() => mediaDurationInFlight.delete(cacheKey));

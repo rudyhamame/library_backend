@@ -2751,6 +2751,25 @@ app.get('/api/xtream/hls/:sourceId/:kind/:id/:segment', async (req, res) => {
   } catch { res.sendStatus(404); }
 });
 
+// Explicit teardown when a client closes its player. Android has no stable
+// per-device identity to key the "one active job per device" cleanup that
+// runs when a *new* job starts, so a closed item's ffmpeg job/provider lease
+// would otherwise sit alive for MEDIA_STREAM_IDLE_TIMEOUT_MS - long enough for
+// the very next item's connection to be rejected by a single-connection
+// provider. The client already knows exactly which item it is leaving.
+app.post('/api/xtream/hls/:sourceId/:kind/:id/stop', async (req, res) => {
+  try {
+    const ownerId = requestOwner(req);
+    for (const [key, job] of mediaJobs.entries()) {
+      if (job.sourceId === req.params.sourceId && job.kind === req.params.kind && job.mediaId === req.params.id
+        && (!job.userId || !ownerId || job.userId === ownerId)) {
+        await mediaJobs.remove(key, 'client-stopped');
+      }
+    }
+    res.sendStatus(204);
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
 app.get('/api/xtream/roku/:sourceId/:kind/:id', async (req, res) => {
   return res.status(410).json({ error: 'Movie and series playback is HLS-only. Use /api/xtream/hls.' });
   let job;

@@ -205,6 +205,19 @@ export async function resolveAccountByEmail(email) {
   return { accountId: String(account._id), ownerId: accountOwnerId(account._id), email: account.email, name: [account.firstName, account.lastName].filter(Boolean).join(' ').trim() };
 }
 
+// True when the account has at least one device (Roku / browser / Android)
+// that checked in within the presence window - used for the Watch with Partner
+// status indicator.
+export async function isAccountOnline(accountId) {
+  if (!accountId || !ObjectId.isValid(accountId)) return false;
+  const since = new Date(Date.now() - runningWindowMs);
+  const device = await (await profiles()).findOne(
+    { accountId: new ObjectId(accountId), lastSeenAt: { $gte: since } },
+    { projection: { _id: 1 } },
+  );
+  return Boolean(device);
+}
+
 export function getDeviceSession(code) { purge(); return sessions.get(String(code || '')); }
 
 export async function getPairingInfo(code, token = '') {

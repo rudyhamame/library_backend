@@ -17,7 +17,7 @@ import { HlsStrategy, PlaybackStrategy, choosePlaybackStrategy, determineHlsStra
 import { getStreamingContinueWatching, getStreamingHistory, getStreamingResume, saveStreamingHistory } from './streaming-history-store.js';
 import { getFavorites, toggleFavorite } from './favorites-store.js';
 import { getSeriesWatchOverride, toggleSeriesWatchOverride } from './series-watch-overrides.js';
-import { authorizeDeviceSession, changeAccountPassword, claimAutomaticPairing, createDeviceSession, deleteAccount, getAccountBasicInfo, getDeviceWeatherLocations, getLinkedDevices, getPairingInfo, getPartnerEmail, getRokuDeviceSessionStatus, getRokuSourcePreference, getRokuSourcePreferenceByOwner, isRokuSessionLinked, listAllLinkedDevices, loginAccount, loginDeviceSession, recordDeviceHeartbeat, registerAccount, registerBrowserDevice, resolveAccountByEmail, resolveDeviceToken, saveDeviceWeatherLocations, selectAccountProfile, setPartnerEmail, setRokuSourcePreference, setupDeviceSession, unlinkAccountDevice } from './device-sessions.js';
+import { authorizeDeviceSession, changeAccountPassword, claimAutomaticPairing, createDeviceSession, deleteAccount, getAccountBasicInfo, getDeviceWeatherLocations, getLinkedDevices, getPairingInfo, getPartnerEmail, getRokuDeviceSessionStatus, getRokuSourcePreference, getRokuSourcePreferenceByOwner, isAccountOnline, isRokuSessionLinked, listAllLinkedDevices, loginAccount, loginDeviceSession, recordDeviceHeartbeat, registerAccount, registerBrowserDevice, resolveAccountByEmail, resolveDeviceToken, saveDeviceWeatherLocations, selectAccountProfile, setPartnerEmail, setRokuSourcePreference, setupDeviceSession, unlinkAccountDevice } from './device-sessions.js';
 import { getTailscalePeersByIp } from './tailscale-devices.js';
 import { createAccountProfile, deleteAccountProfile, getAccountProfile, getAccountProfiles, updateAccountProfile } from './account-profile-store.js';
 import { createLibraryCategory, deleteLibraryCategory, getManagedLibrary, renameLibraryCategory, replaceLibraryCategoryItems } from './library-category-store.js';
@@ -1024,7 +1024,15 @@ app.get('/api/account/partner', async (req, res) => {
     const accountId = requestAccount(req);
     if (!accountId) return res.status(401).json({ error: 'Authentication required' });
     res.set('Cache-Control', 'no-store');
-    res.json({ partnerEmail: await getPartnerEmail(accountId) });
+    const partnerEmail = await getPartnerEmail(accountId);
+    if (!partnerEmail) return res.json({ partnerEmail: '', linked: false, online: false, name: '' });
+    const partner = await resolveAccountByEmail(partnerEmail);
+    res.json({
+      partnerEmail,
+      linked: Boolean(partner),
+      online: partner ? await isAccountOnline(partner.accountId) : false,
+      name: partner?.name || '',
+    });
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 app.put('/api/account/partner', async (req, res) => {

@@ -2517,10 +2517,25 @@ app.get('/api/xtream/play/:sourceId/:kind/:id', async (req, res) => {
   }
 });
 
-function rokuHlsKey(sourceId, kind, id, extension, startSeconds = 0) {
+// Forced transcode ladder for client-chosen quality. Streams are otherwise
+// copied as-is (whatever the provider sends); picking a quality here forces a
+// real re-encode at that resolution/bitrate so it is an actual choice.
+const HLS_QUALITY_PRESETS = {
+  '1080': { height: 1080, videoBitrate: '5000k', maxrate: '5350k', bufsize: '10000k' },
+  '720': { height: 720, videoBitrate: '2800k', maxrate: '3000k', bufsize: '5600k' },
+  '480': { height: 480, videoBitrate: '1400k', maxrate: '1500k', bufsize: '2800k' },
+  '360': { height: 360, videoBitrate: '800k', maxrate: '900k', bufsize: '1600k' },
+};
+function normalizeHlsQuality(value) {
+  const key = String(value || 'auto').trim();
+  return HLS_QUALITY_PRESETS[key] ? key : 'auto';
+}
+
+function rokuHlsKey(sourceId, kind, id, extension, startSeconds = 0, quality = 'auto') {
   // Segment URLs in an HLS manifest do not retain the manifest query string,
-  // so every seek offset must be carried onto segment URLs and job identity.
-  return createHash('sha256').update(`${sourceId}:${kind}:${id}:${startSeconds}`).digest('hex').slice(0, 24);
+  // so every seek offset and quality choice must be carried onto segment URLs
+  // and job identity - a different quality is a different ffmpeg job.
+  return createHash('sha256').update(`${sourceId}:${kind}:${id}:${startSeconds}:${quality}`).digest('hex').slice(0, 24);
 }
 
 function hlsStartSeconds(value) {
@@ -2541,10 +2556,11 @@ async function waitForHlsManifest(filename, timeoutMs = 15_000, signal) {
   return false;
 }
 
-async function getOrStartRokuHls(source, kind, id, extension, requestedStart = 0, identity = {}) {
+async function getOrStartRokuHls(source, kind, id, extension, requestedStart = 0, identity = {}, quality = 'auto') {
   const seekableVod = kind === 'movie' || kind === 'series';
   const startSeconds = seekableVod ? hlsStartSeconds(requestedStart) : 0;
-  const key = rokuHlsKey(source._id, kind, id, extension, startSeconds);
+  const normalizedQuality = normalizeHlsQuality(quality);
+  const key = rokuHlsKey(source._id, kind, id, extension, startSeconds, normalizedQuality);
   const existing = mediaJobs.get(key);
   if (existing) {
     if (existing.finished || existing.child?.exitCode !== null) {
@@ -2586,7 +2602,9 @@ async function getOrStartRokuHls(source, kind, id, extension, requestedStart = 0
   }
 
   const decision = determineHlsStrategy();
-  const mode = decision.strategy === HlsStrategy.FULL_TRANSCODE ? 'transcode' : 'remux';
+  const qualityPreset = HLS_QUALITY_PRESETS[normalizedQuality] || null;
+  if (qualityPreset) decision.videoMode = 'transcode';
+  const mode = decision.strategy === HlsStrategy.FULL_TRANSCODE || qualityPreset ? 'transcode' : 'remux';
   const { job } = await mediaJobs.getOrCreate({
     key, mode, hlsStrategy: decision.strategy, hlsVideoMode: decision.videoMode, hlsAudioMode: decision.audioMode, persistent: true, sourceId: String(source._id), mediaId: String(id), kind,
     startSeconds, userId: identity.userId, deviceId: identity.deviceId, viewerId: identity.viewerId,
@@ -2613,7 +2631,7 @@ async function getOrStartRokuHls(source, kind, id, extension, requestedStart = 0
     // freeze the first short manifest, while EVENT retains an unbounded history.
     // Keep ffmpeg near playback speed so it cannot run far ahead of Roku.
                   '-re', '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '5', '-i', inputUrl,
-    '-map', '0:v:0?', '-map', '0:a:0?', ...hlsCodecArgs(decision), '-sn', '-dn',
+    '-map', '0:v:0?', '-map', '0:a:0?', ...hlsCodecArgs(decision, qualityPreset), '-sn', '-dn',
                   '-f', 'hls', '-hls_time', '2', '-hls_list_size', '30', '-hls_delete_threshold', '6',
                   '-hls_flags', 'independent_segments+temp_file+delete_segments',
     '-hls_segment_filename', path.join(directory, 'segment-%06d.ts'), manifest,
@@ -2681,8 +2699,9 @@ app.get('/api/xtream/hls/:sourceId/:kind/:id/master.m3u8', async (req, res) => {
     if (!source) return res.sendStatus(404);
     const seekableVod = req.params.kind === 'movie' || req.params.kind === 'series';
     const startSeconds = seekableVod ? hlsStartSeconds(req.query.start) : 0;
+    const quality = normalizeHlsQuality(req.query.quality);
     const identity = mediaIdentity(req);
-    const job = await getOrStartRokuHls(source, req.params.kind, req.params.id, req.query.ext, startSeconds, identity);
+    const job = await getOrStartRokuHls(source, req.params.kind, req.params.id, req.query.ext, startSeconds, identity, quality);
     if (!await waitForHlsManifest(job.manifest, 15_000, requestAbort.signal)) {
       return res.status(504).json({ error: job.error.trim().slice(-240) || 'HLS manifest is still being prepared' });
     }
@@ -2700,6 +2719,7 @@ app.get('/api/xtream/hls/:sourceId/:kind/:id/master.m3u8', async (req, res) => {
     const streamTicket = String(req.query.streamTicket || '').trim();
     if (streamTicket) segmentQuery.set('streamTicket', streamTicket);
     if (startSeconds > 0) segmentQuery.set('start', String(startSeconds));
+    if (quality !== 'auto') segmentQuery.set('quality', quality);
     if ([...segmentQuery].length > 0) {
       const query = segmentQuery.toString();
       manifestText = manifestText.split('\n').map(line => (
@@ -2717,7 +2737,8 @@ app.get('/api/xtream/hls/:sourceId/:kind/:id/:segment', async (req, res) => {
     if (!/^segment-\d{6}\.ts$/.test(req.params.segment)) return res.sendStatus(404);
     const seekableVod = req.params.kind === 'movie' || req.params.kind === 'series';
     const startSeconds = seekableVod ? hlsStartSeconds(req.query.start) : 0;
-    const key = rokuHlsKey(req.params.sourceId, req.params.kind, req.params.id, req.query.ext, startSeconds);
+    const quality = normalizeHlsQuality(req.query.quality);
+    const key = rokuHlsKey(req.params.sourceId, req.params.kind, req.params.id, req.query.ext, startSeconds, quality);
     const job = mediaJobs.get(key);
     if (!job) return res.sendStatus(404);
     if (job.userId && job.userId !== mediaOwner(req)) return res.sendStatus(404);

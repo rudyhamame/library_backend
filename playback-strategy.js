@@ -17,10 +17,16 @@ export function determineHlsStrategy(sourceMetadata = {}, clientCapabilities = {
   return { videoMode: 'transcode', audioMode: 'transcode', reason: 'Video and audio codecs require conversion', outputProtocol: 'hls', strategy: HlsStrategy.FULL_TRANSCODE };
 }
 
-export function hlsCodecArgs(decision) {
+// qualityPreset (optional): {height, videoBitrate, maxrate, bufsize} - forces a
+// real re-encode at that resolution/bitrate instead of the default CRF pass.
+export function hlsCodecArgs(decision, qualityPreset = null) {
   const args = decision.videoMode === 'copy'
     ? ['-c:v', 'copy']
-    : ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-pix_fmt', 'yuv420p', '-profile:v', 'main', '-level', '4.0'];
+    : qualityPreset
+      ? ['-c:v', 'libx264', '-preset', 'veryfast', '-vf', `scale=-2:${qualityPreset.height}`,
+          '-b:v', qualityPreset.videoBitrate, '-maxrate', qualityPreset.maxrate, '-bufsize', qualityPreset.bufsize,
+          '-pix_fmt', 'yuv420p', '-profile:v', 'main', '-level', '4.0']
+      : ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-pix_fmt', 'yuv420p', '-profile:v', 'main', '-level', '4.0'];
   args.push(...(decision.audioMode === 'copy' ? ['-c:a', 'copy'] : ['-c:a', 'aac', '-b:a', '128k', '-ar', '48000', '-ac', '2']));
   return args;
 }

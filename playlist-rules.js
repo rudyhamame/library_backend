@@ -21,17 +21,29 @@ export const defaultPlaylistRules = () => ({
   suppressAutomaticHealthChecks: { enabled: false },
   suppressBackgroundRefresh: { enabled: false },
   forceServerProxy: { enabled: false },
+  strictSharedLine: { enabled: false },
 });
 
 export function normalizePlaylistRules(value = {}) {
   const rule = name => value?.[name] && typeof value[name] === 'object' ? value[name] : {};
+  // A provider "line" is the actual Xtream connection (host + account), not a
+  // source document - two different app users can each save their own source
+  // pointing at the same line, and the provider only ever grants it one
+  // connection either way. strictSharedLine is opt-in per source (never
+  // assumed) because most sources are not known to be shared; when set, it
+  // hard-forces maxConcurrentStreams to a single slot regardless of whatever
+  // limit/enabled value is otherwise stored, and the caller groups the lease
+  // and active-job count by the shared line identity instead of source._id.
+  const strictSharedLine = { enabled: rule('strictSharedLine').enabled === true };
   return {
-    maxConcurrentStreams: {
-      enabled: PROVIDER_STREAM_LIMIT > 0 ? rule('maxConcurrentStreams').enabled !== false : rule('maxConcurrentStreams').enabled === true,
-      limit: PROVIDER_STREAM_LIMIT > 0
-        ? Math.min(PROVIDER_STREAM_LIMIT, boundedInteger(rule('maxConcurrentStreams').limit, PROVIDER_STREAM_LIMIT, 1, 10))
-        : boundedInteger(rule('maxConcurrentStreams').limit, 1, 1, 10),
-    },
+    maxConcurrentStreams: strictSharedLine.enabled
+      ? { enabled: true, limit: 1 }
+      : {
+        enabled: PROVIDER_STREAM_LIMIT > 0 ? rule('maxConcurrentStreams').enabled !== false : rule('maxConcurrentStreams').enabled === true,
+        limit: PROVIDER_STREAM_LIMIT > 0
+          ? Math.min(PROVIDER_STREAM_LIMIT, boundedInteger(rule('maxConcurrentStreams').limit, PROVIDER_STREAM_LIMIT, 1, 10))
+          : boundedInteger(rule('maxConcurrentStreams').limit, 1, 1, 10),
+      },
     streamStartCooldown: { enabled: rule('streamStartCooldown').enabled === true, seconds: boundedInteger(rule('streamStartCooldown').seconds, 5, 1, 300) },
     streamStartRate: { enabled: rule('streamStartRate').enabled === true, limit: boundedInteger(rule('streamStartRate').limit, 6, 1, 120), windowSeconds: boundedInteger(rule('streamStartRate').windowSeconds, 60, 10, 3600) },
     apiRequestRate: { enabled: rule('apiRequestRate').enabled === true, limit: boundedInteger(rule('apiRequestRate').limit, 30, 1, 600), windowSeconds: boundedInteger(rule('apiRequestRate').windowSeconds, 60, 10, 3600) },
@@ -39,7 +51,17 @@ export function normalizePlaylistRules(value = {}) {
     suppressAutomaticHealthChecks: { enabled: rule('suppressAutomaticHealthChecks').enabled === true },
     suppressBackgroundRefresh: { enabled: rule('suppressBackgroundRefresh').enabled === true },
     forceServerProxy: { enabled: rule('forceServerProxy').enabled === true },
+    strictSharedLine,
   };
+}
+
+// The shared-line identity a strictSharedLine source is grouped by: the
+// provider host + account, normalized so trivial formatting differences
+// (trailing slash, case) do not split one real line into two lease keys.
+export function providerLineIdentity(source) {
+  const host = String(source?.baseUrl || source?.host || '').trim().toLowerCase().replace(/\/+$/, '');
+  const username = String(source?.username || '').trim().toLowerCase();
+  return `line:${host}::${username}`;
 }
 
 export const playlistRuleEnabled = (source, name) => normalizePlaylistRules(source?.rules)[name]?.enabled === true;

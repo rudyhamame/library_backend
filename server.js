@@ -4256,7 +4256,7 @@ setInterval(async () => {
   } catch (error) { console.warn(`[Media health] snapshot failed: ${error.message}`); }
 }, resourceLogIntervalMs).unref();
 
-const server = app.listen(port, '127.0.0.1', () => {
+const server = app.listen(port, '0.0.0.0', () => {
   console.log(`RH Stream API listening on http://127.0.0.1:${port}`);
 });
 

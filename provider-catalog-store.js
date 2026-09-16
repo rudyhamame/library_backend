@@ -226,9 +226,25 @@ export async function hydrateContinueWatchingArtwork(ownerId, historyItems) {
     .filter(query => query.title.$regex);
   const queries = [...exactQueries, ...titleQueries];
   if (queries.length === 0) return history;
-  const { items } = await collections();
+  const { items, seriesEpisodes } = await collections();
   const rows = await items.find({ ownerId: String(ownerId), $or: queries }).project({ _id: 0, sourceId: 1, kind: 1, id: 1, title: 1, logo: 1 }).toArray();
   const catalogByItem = new Map(rows.map(row => [`${row.sourceId}:${row.kind}:${row.id}`, row]));
+  const episodeRefs = history
+    .filter(item => String(item?.kind || '') === 'series' && item?.sourceId && item?.seriesId && item?.itemId)
+    .map(item => ({ sourceId: String(item.sourceId), seriesId: String(item.seriesId), itemId: String(item.itemId) }));
+  const episodeDocs = episodeRefs.length > 0
+    ? await seriesEpisodes.find({
+      ownerId: String(ownerId),
+      $or: [...new Map(episodeRefs.map(ref => [`${ref.sourceId}:${ref.seriesId}`, ref])).values()]
+        .map(ref => ({ sourceId: ref.sourceId, seriesId: ref.seriesId })),
+    }).project({ _id: 0, sourceId: 1, seriesId: 1, episodes: 1 }).toArray()
+    : [];
+  const episodeById = new Map();
+  for (const doc of episodeDocs) {
+    for (const episode of Array.isArray(doc.episodes) ? doc.episodes : []) {
+      episodeById.set(`${doc.sourceId}:${doc.seriesId}:${String(episode.id || '')}`, episode);
+    }
+  }
   const unwrapSavedProxy = value => {
     const raw = String(value || '').trim();
     if (!raw) return '';
@@ -249,6 +265,15 @@ export async function hydrateContinueWatchingArtwork(ownerId, historyItems) {
     const catalogLogo = String(catalog?.logo || '').trim();
     const logo = catalogLogo || unwrapSavedProxy(item?.logo || item?.poster);
     const enriched = logo ? { ...item, logo, poster: logo } : { ...item };
+    if (String(item?.kind || '') === 'series') {
+      const episode = episodeById.get(`${item.sourceId}:${item.seriesId}:${item.itemId}`);
+      if (episode) {
+        const seasonNumber = Number.parseInt(String(episode.seasonNumber || ''), 10);
+        const episodeNumber = Number.parseInt(String(episode.episodeNumber || ''), 10);
+        if (seasonNumber > 0) enriched.seasonNumber = seasonNumber;
+        if (episodeNumber > 0) enriched.episodeNumber = episodeNumber;
+      }
+    }
     if (String(item?.kind || '') === 'series' && catalog) {
       enriched.seriesId = String(catalog.id || item.seriesId || '');
       if (String(catalog.title || '').trim()) enriched.seriesTitle = String(catalog.title).trim();

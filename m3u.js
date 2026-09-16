@@ -101,17 +101,40 @@ async function loadM3u(source, { timeoutMs = 25_000 } = {}) {
 }
 
 export async function validateM3uConnection(source, options = {}) {
-  await loadM3u(source, options);
+  const attempts = Math.max(1, Math.min(3, Number.parseInt(options.attempts || '2', 10) || 2));
+  let lastError;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      await loadM3u(source, options);
+      return;
+    } catch (error) {
+      lastError = error;
+      if (attempt < attempts) await new Promise(resolve => setTimeout(resolve, 350 * attempt));
+    }
+  }
+  const cause = lastError?.cause?.message || lastError?.cause?.code || '';
+  if (cause && !String(lastError?.message || '').includes(cause)) {
+    throw new Error(`${lastError?.message || 'M3U request failed'}: ${cause}`);
+  }
+  throw lastError;
 }
 
 export async function getM3uCatalog(source, kind) {
   return kind === 'channel' ? loadM3u(source) : [];
 }
 
+// Adult/18+ category names are dropped so they never appear as a browsable
+// folder - Play Store policy: this is a general streaming app, not one whose
+// purpose is adult material.
+const ADULT_CATEGORY_RE = /adult|\bxxx\b|(?:^|\D)18\s*\+|\+\s*18|\bporn|erotic|\bsex\b|hentai|onlyfans|للكبار|للبالغين|إباح/i;
+
 export async function getM3uCategories(source, kind) {
   if (kind !== 'channel') return [];
   const items = await loadM3u(source);
-  return [...new Set(items.map(item => item.category))].sort().map(name => ({ id: name, name }));
+  return [...new Set(items.map(item => item.category))]
+    .filter(name => !ADULT_CATEGORY_RE.test(name))
+    .sort()
+    .map(name => ({ id: name, name }));
 }
 
 export async function m3uProviderUrl(source, kind, id) {

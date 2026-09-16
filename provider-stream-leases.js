@@ -5,11 +5,21 @@ const mongoUri = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017';
 const databaseName = process.env.MONGODB_DB || 'rh_stream';
 const collectionName = process.env.MONGODB_PROVIDER_LEASE_COLLECTION || 'provider_stream_leases';
 const leaseTtlMs = 30_000;
+const holderId = randomUUID();
 let collectionPromise;
 
 async function leaseCollection() {
   if (!collectionPromise) collectionPromise = new MongoClient(mongoUri, { serverSelectionTimeoutMS: 5000 }).connect().then(client => client.db(databaseName).collection(collectionName)).catch(error => { collectionPromise = undefined; throw error; });
   return collectionPromise;
+}
+
+// The provider connection cap is per real line = baseUrl + username, not per
+// stored source row. Two RH accounts that added the same credential must share
+// one lease; keying by source._id let each of them hold a slot independently.
+export function providerLeaseKey(source) {
+  const base = String(source?.baseUrl || '').replace(/\/+$/, '').toLowerCase();
+  const user = String(source?.username || '').toLowerCase();
+  return base && user ? `${base}|${user}` : String(source?._id || '');
 }
 
 export async function acquireProviderStreamLease(sourceId, limit) {
@@ -23,7 +33,7 @@ export async function acquireProviderStreamLease(sourceId, limit) {
     try {
       const result = await collection.findOneAndUpdate(
         { _id: id, $or: [{ expiresAt: { $lte: now } }, { token }] },
-        { $set: { sourceId: sourceKey, slot, token, expiresAt: new Date(now.getTime() + leaseTtlMs), updatedAt: now } },
+        { $set: { sourceId: sourceKey, slot, token, holderId, expiresAt: new Date(now.getTime() + leaseTtlMs), updatedAt: now } },
         { upsert: true, returnDocument: 'after' },
       );
       const document = result?.value || result;
@@ -38,6 +48,10 @@ export async function acquireProviderStreamLease(sourceId, limit) {
         if (released) return;
         released = true;
         clearInterval(heartbeat);
+        await collection.updateOne(
+          { _id: id, token },
+          { $set: { expiresAt: new Date(0), updatedAt: new Date() } },
+        ).catch(() => {});
         await collection.deleteOne({ _id: id, token }).catch(() => {});
       };
     } catch (error) {
@@ -45,4 +59,14 @@ export async function acquireProviderStreamLease(sourceId, limit) {
     }
   }
   return null;
+}
+
+export async function releaseOrphanedProviderStreamLeases(sourceId) {
+  const collection = await leaseCollection();
+  const sourceKey = String(sourceId);
+  await collection.updateMany(
+    { sourceId: sourceKey, holderId },
+    { $set: { expiresAt: new Date(0), updatedAt: new Date() } },
+  ).catch(() => {});
+  await collection.deleteMany({ sourceId: sourceKey, holderId }).catch(() => {});
 }

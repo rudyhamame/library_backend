@@ -1,8 +1,8 @@
-// Builds a short "living wallpaper" video for the RH browser home screen by
-// grabbing a single real frame from each of the ten AI-recommendation items and
-// gluing them into one Ken-Burns montage. Runs entirely in the background; the
-// home page polls for it and plays it once when it is ready. If the provider
-// blocks every stream (no frames), nothing is produced and we retry later.
+// Builds a short "living wallpaper" video for the RH browser Welcome page by
+// grabbing a few seconds of real footage from the NEWEST Series & Movies in the
+// catalog (adult / 18+ categories excluded) and splicing the clips into one
+// muted montage. Runs entirely in the background; the Welcome page polls for it
+// and loops it. Provider blocks every stream (no clips) -> nothing, retry later.
 
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -10,16 +10,22 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { getXtreamSeriesEpisodes, xtreamProviderUrl } from './xtream.js';
+import { ADULT_RE, getProviderCatalogCategories, getProviderCatalogRails } from './provider-catalog-store.js';
 
-const BACKDROP_VERSION = 1;
+const BACKDROP_VERSION = 4; // v4 = 10 items x 10s from the middle
 const ROOT = path.join(os.tmpdir(), 'rh-stream-backdrop');
 const MAX_ITEMS = 10;
-const FRAME_TIMESTAMPS = [90, 420];
-const GRAB_TIMEOUT_MS = 20_000;
-const ENCODE_TIMEOUT_MS = 90_000;
-const BUILD_DEADLINE_MS = 4 * 60 * 1000;
+const CLIP_SECONDS = 10;
+// These lines 302-redirect every request to a short-lived token URL. The token
+// URL (82.115.12.250/...) IS byte-range capable, so once we resolve the redirect
+// in Node an input `-ss` seek to the middle works cleanly and only downloads the
+// clip's worth of bytes - the raw provider URL with `-ss` before it does not.
+const GRAB_TIMEOUT_MS = 45_000;
+const PROBE_TIMEOUT_MS = 20_000;
+const ENCODE_TIMEOUT_MS = 180_000;
+const BUILD_DEADLINE_MS = 7 * 60 * 1000;
 const FAIL_RETRY_MS = 30 * 60 * 1000;
-const PER_IMAGE_SECONDS = 2.6;
+const XFADE_SECONDS = 0.9; // black fade-in at start and fade-out at the end/loop seam
 
 const building = new Map();
 const short = value => String(value || '').slice(0, 8);
@@ -41,34 +47,95 @@ export function backdropVideoFile(ownerId, hash) {
   return videoPath(ownerId, hash);
 }
 
-function itemsHash(items) {
+// Every built backdrop currently on disk, for the ops dashboard's preview
+// page - reads the meta sidecars directly rather than needing an ownerId, so
+// it works across every account without looping getAllXtreamSources per one.
+export async function listBackdrops() {
+  const names = await fs.readdir(ROOT).catch(() => []);
+  const out = [];
+  for (const name of names) {
+    if (!name.endsWith('.json')) continue;
+    const match = name.match(/^(.+)__([a-f0-9]{24})\.mp4\.json$/);
+    if (!match) continue;
+    const [, ownerId, hash] = match;
+    const meta = await fs.readFile(path.join(ROOT, name), 'utf8').then(JSON.parse).catch(() => null);
+    if (!meta) continue;
+    out.push({ ownerId, hash, createdAt: meta.createdAt || null, clips: meta.clips || 0, items: meta.items || [], url: `/internal/backdrop.mp4?owner=${encodeURIComponent(ownerId)}&h=${hash}` });
+  }
+  out.sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
+  return out;
+}
+
+function itemsHash(items, scope = '') {
   const ids = items.slice(0, MAX_ITEMS)
     .map(item => `${item.sourceId}:${item.kind || item.type}:${item.id}`)
     .sort();
-  return createHash('sha256').update(`v${BACKDROP_VERSION}\n${ids.join('\n')}`).digest('hex').slice(0, 24);
+  return createHash('sha256').update(`v${BACKDROP_VERSION}\n${scope}\n${ids.join('\n')}`).digest('hex').slice(0, 24);
 }
 
 // The provider line allows exactly ONE concurrent connection. This montage is a
 // throwaway nicety - it must never open a second stream. It takes the SAME
 // server-level provider lease that real playback uses (`acquireLease`), so a
-// frame grab simply cannot run while anyone is streaming. `providerBusy()` is a
+// clip grab simply cannot run while anyone is streaming. `providerBusy()` is a
 // fast pre-check and `activeGrab` stops two builds overlapping.
 let activeGrab = false;
 
-export async function getRecommendationBackdrop(ownerId, items, sources, { providerBusy, acquireLease } = {}) {
-  const list = Array.isArray(items) ? items.filter(item => item && item.id && item.sourceId) : [];
-  if (!ownerId || list.length === 0) return { ready: false, building: false, hash: '', url: null, updatedAt: null };
-  const hash = itemsHash(list);
+// Newest non-adult Series & Movies across every source, best-first, capped.
+async function latestBackdropItems(ownerId, sources) {
+  const picks = [];
+  for (const source of sources) {
+    const sid = String(source._id);
+    let rails;
+    try { rails = await getProviderCatalogRails(ownerId, sid, 24); } catch { continue; }
+    const nameById = new Map();
+    for (const kind of ['series', 'movie']) {
+      try {
+        for (const category of await getProviderCatalogCategories(ownerId, sid, kind)) {
+          nameById.set(`${kind}:${category.id}`, category.name);
+        }
+      } catch { /* names optional - fall back to the row's own category */ }
+    }
+    for (const kind of ['series', 'movie']) {
+      let taken = 0;
+      for (const item of (rails?.[kind] || [])) {
+        if (taken >= 8) break;
+        const categoryName = item.category || nameById.get(`${kind}:${item.categoryId}`) || '';
+        if (ADULT_RE.test(categoryName) || ADULT_RE.test(item.title || '')) continue;
+        picks.push({ id: String(item.id), kind, title: item.title, extension: item.extension, sourceId: sid });
+        taken += 1;
+      }
+    }
+  }
+  // Interleave series/movies so the montage is not all one kind.
+  const series = picks.filter(item => item.kind === 'series');
+  const movies = picks.filter(item => item.kind === 'movie');
+  const merged = [];
+  for (let i = 0; i < Math.max(series.length, movies.length); i += 1) {
+    if (series[i]) merged.push(series[i]);
+    if (movies[i]) merged.push(movies[i]);
+  }
+  return merged.slice(0, MAX_ITEMS);
+}
+
+// sourceId narrows the montage to ONE playlist provider (the one the Welcome
+// page currently has selected); empty = the newest across every provider.
+export async function getRecommendationBackdrop(ownerId, sourceId, sources, { providerBusy, acquireLease } = {}) {
+  if (!ownerId || !Array.isArray(sources) || sources.length === 0) return { ready: false, building: false, hash: '', url: null, updatedAt: null };
+  const scoped = sourceId ? sources.filter(source => String(source._id) === String(sourceId)) : sources;
+  const useSources = scoped.length ? scoped : sources;
+  const list = await latestBackdropItems(ownerId, useSources).catch(() => []);
+  if (list.length === 0) return { ready: false, building: false, hash: '', url: null, updatedAt: null };
+  const hash = itemsHash(list, scoped.length ? String(sourceId) : 'all');
   const video = videoPath(ownerId, hash);
   if (await pathExists(video)) {
     const stat = await fs.stat(video).catch(() => null);
     return { ready: true, building: false, hash, url: `/api/recommendations/ai/backdrop.mp4?h=${hash}`, updatedAt: stat ? stat.mtime.toISOString() : null };
   }
-  if (!building.has(hash) && !activeGrab && Array.isArray(sources) && sources.length) {
+  if (!building.has(hash) && !activeGrab && useSources.length) {
     const failedAt = await fs.readFile(failPath(ownerId, hash), 'utf8').then(value => Number(value) || 0).catch(() => 0);
     const busy = typeof providerBusy === 'function' ? await providerBusy().catch(() => true) : false;
     if (!busy && Date.now() - failedAt > FAIL_RETRY_MS) {
-      const job = buildBackdrop(ownerId, hash, list, sources, { providerBusy, acquireLease }).finally(() => building.delete(hash));
+      const job = buildBackdrop(ownerId, hash, list, useSources, { providerBusy, acquireLease }).finally(() => building.delete(hash));
       job.catch(error => console.warn(`[Backdrop] owner=${short(ownerId)} build failed: ${error.message}`));
       building.set(hash, job);
     }
@@ -88,37 +155,78 @@ async function resolveProviderUrl(item, source) {
   return { url: xtreamProviderUrl(source, 'movie', item.id, item.extension || 'mp4'), live: false };
 }
 
-function grabFrame(url, seconds, live, outFile) {
+// Follow the provider's 302 to the range-capable direct URL. Every request gets
+// a fresh token, and the token allows the couple of sequential opens (probe +
+// grab) we need. Returns the original url on any failure / no redirect.
+async function resolveDirect(url) {
+  try {
+    const res = await fetch(url, { redirect: 'manual', signal: AbortSignal.timeout(10_000) });
+    const location = res.headers.get('location');
+    return (res.status >= 300 && res.status < 400 && location) ? location : url;
+  } catch { return url; }
+}
+
+// Container duration in seconds, or 0 if unknown (e.g. a live-style TS stream).
+function probeDuration(url) {
   return new Promise(resolve => {
-    const args = ['-y', '-nostdin', '-loglevel', 'error', '-rw_timeout', '12000000', '-analyzeduration', '4000000', '-probesize', '4000000'];
-    if (!live && seconds > 0) args.push('-ss', String(seconds));
-    args.push('-i', url, '-map', '0:v:0', '-frames:v', '1', '-q:v', '4',
-      '-vf', 'scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,setsar=1', outFile);
+    const child = spawn('ffprobe', ['-v', 'error', '-rw_timeout', '12000000',
+      '-show_entries', 'format=duration', '-of', 'default=nw=1:nk=1', url],
+      { stdio: ['ignore', 'pipe', 'ignore'] });
+    let out = '';
+    const timer = setTimeout(() => { try { child.kill('SIGKILL'); } catch { /* gone */ } resolve(0); }, PROBE_TIMEOUT_MS);
+    child.stdout.on('data', chunk => { out += chunk; });
+    child.on('error', () => { clearTimeout(timer); resolve(0); });
+    child.on('close', () => { clearTimeout(timer); resolve(Number.parseFloat(out) || 0); });
+  });
+}
+
+// Pull CLIP_SECONDS of footage starting at `seekSeconds` (input seek) and
+// normalise it to a 1920x1080 30fps H.264 clip with no audio.
+function grabClip(url, seekSeconds, outFile) {
+  return new Promise(resolve => {
+    const args = ['-y', '-nostdin', '-loglevel', 'error', '-rw_timeout', '15000000',
+      '-analyzeduration', '4000000', '-probesize', '4000000'];
+    if (seekSeconds > 0) args.push('-ss', String(Math.round(seekSeconds)));
+    args.push('-i', url,
+      '-t', String(CLIP_SECONDS),
+      '-an', '-map', '0:v:0',
+      '-vf', 'scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,setsar=1,fps=30',
+      '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '25', '-pix_fmt', 'yuv420p',
+      '-g', '60', '-movflags', '+faststart', outFile);
     const child = spawn('ffmpeg', args, { stdio: ['ignore', 'ignore', 'ignore'] });
     const timer = setTimeout(() => { try { child.kill('SIGKILL'); } catch { /* already gone */ } }, GRAB_TIMEOUT_MS);
     child.on('error', () => { clearTimeout(timer); resolve(false); });
     child.on('close', async code => {
       clearTimeout(timer);
       if (code !== 0) return resolve(false);
-      resolve(await fs.stat(outFile).then(stat => stat.size > 3072).catch(() => false));
+      // A real 10s 1080p clip is comfortably over 300 KB and ~CLIP_SECONDS long;
+      // anything tiny/short is a seek-past-the-end or a broken stream.
+      const stat = await fs.stat(outFile).catch(() => null);
+      if (!stat || stat.size < 300_000) return resolve(false);
+      const seconds = await probeDuration(outFile);
+      resolve(seconds === 0 || seconds >= CLIP_SECONDS * 0.6);
     });
   });
 }
 
-function encodeMontage(dir, count, outFile) {
+// Splice the normalised clips end-to-end (concat demuxer - same codec/res/fps),
+// re-encoding once to add a black fade-in at the start and fade-out at the end
+// so the client's `loop` seam is not a hard cut.
+async function spliceClips(dir, clipNames, outFile) {
+  const listFile = path.join(dir, 'clips.txt');
+  await fs.writeFile(listFile, clipNames.map(name => `file '${name}'`).join('\n'));
   return new Promise((resolve, reject) => {
-    const duration = (count * PER_IMAGE_SECONDS).toFixed(2);
-    const fadeOutStart = Math.max(0, count * PER_IMAGE_SECONDS - 1).toFixed(2);
+    const total = clipNames.length * CLIP_SECONDS;
+    const fadeOutStart = Math.max(0, total - XFADE_SECONDS).toFixed(2);
     const args = ['-y', '-nostdin', '-loglevel', 'error',
-      '-framerate', `1/${PER_IMAGE_SECONDS}`, '-i', path.join(dir, 'f%02d.jpg'),
+      '-f', 'concat', '-safe', '0', '-i', listFile,
       '-vf', [
-        `zoompan=z='min(zoom+0.0015,1.2)':d=${Math.round(PER_IMAGE_SECONDS * 30)}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1920x1080:fps=30`,
-        'format=yuv420p',
-        'fade=t=in:st=0:d=1',
-        `fade=t=out:st=${fadeOutStart}:d=1`,
+        'fps=30', 'format=yuv420p',
+        `fade=t=in:st=0:d=${XFADE_SECONDS}`,
+        `fade=t=out:st=${fadeOutStart}:d=${XFADE_SECONDS}`,
       ].join(','),
-      '-t', duration,
-      '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '28', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', '-an', outFile];
+      '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '26', '-pix_fmt', 'yuv420p',
+      '-movflags', '+faststart', '-an', outFile];
     const child = spawn('ffmpeg', args, { stdio: ['ignore', 'ignore', 'pipe'] });
     let stderr = '';
     child.stderr.on('data', chunk => { stderr = (stderr + chunk).slice(-2000); });
@@ -127,16 +235,25 @@ function encodeMontage(dir, count, outFile) {
     child.on('close', code => {
       clearTimeout(timer);
       if (code === 0) resolve();
-      else reject(new Error(`ffmpeg montage exit ${code}: ${stderr}`));
+      else reject(new Error(`ffmpeg splice exit ${code}: ${stderr}`));
     });
   });
 }
 
-async function cleanupOldBackdrops(ownerId, keepHash) {
+// Backdrops are per playlist provider now (one hash each), so we cannot delete
+// "everything but keepHash" - that would wipe the other providers' montages and
+// force a rebuild on every provider switch. Drop only files older than a day
+// (their item set changed so the hash is dead, or the provider is gone); an
+// idle-but-still-current provider just rebuilds once/day.
+const STALE_BACKDROP_MS = 24 * 60 * 60 * 1000;
+async function cleanupOldBackdrops(ownerId) {
   const prefix = `${ownerSlug(ownerId)}__`;
+  const now = Date.now();
   for (const name of await fs.readdir(ROOT).catch(() => [])) {
-    if (!name.startsWith(prefix) || name.includes(keepHash)) continue;
-    await fs.rm(path.join(ROOT, name), { force: true }).catch(() => {});
+    if (!name.startsWith(prefix)) continue;
+    const target = path.join(ROOT, name);
+    const stat = await fs.stat(target).catch(() => null);
+    if (stat && now - stat.mtimeMs > STALE_BACKDROP_MS) await fs.rm(target, { force: true }).catch(() => {});
   }
 }
 
@@ -147,57 +264,61 @@ async function buildBackdrop(ownerId, hash, items, sources, { providerBusy, acqu
   const work = path.join(ROOT, `build-${hash}-${Date.now()}`);
   await fs.mkdir(work, { recursive: true });
   const sourceById = new Map(sources.map(source => [String(source._id), source]));
-  const frames = [];
+  const clips = [];
+  const usedItems = [];
   const startedAt = Date.now();
   let yielded = false;
-  const leases = new Map();
   const busyNow = async () => (typeof providerBusy === 'function' ? Boolean(await providerBusy().catch(() => true)) : false);
-  // Take the real server-level provider lease before touching a stream. If the
-  // slot is held (someone is watching), we get null and stand down entirely.
-  const claimSlot = async sourceId => {
-    if (typeof acquireLease !== 'function') return true;
-    if (leases.has(sourceId)) return leases.get(sourceId) !== null;
-    const release = await acquireLease(sourceId).catch(() => null);
-    leases.set(sourceId, release || null);
-    return Boolean(release);
-  };
   try {
     for (const item of items.slice(0, MAX_ITEMS)) {
       if (Date.now() - startedAt > BUILD_DEADLINE_MS) break;
-      // Never hold a provider connection while a real stream is playing.
+      // Never touch the provider while a real stream is playing.
       if (await busyNow()) { yielded = true; break; }
       const source = sourceById.get(String(item.sourceId));
       if (!source) continue;
-      if (!await claimSlot(String(item.sourceId))) { yielded = true; break; }
       const resolved = await resolveProviderUrl(item, source).catch(() => null);
       if (!resolved) continue;
-      const timestamps = resolved.live ? [0] : FRAME_TIMESTAMPS;
-      for (const seconds of timestamps) {
-        const candidate = path.join(work, `raw-${frames.length}-${seconds}.jpg`);
-        if (await grabFrame(resolved.url, seconds, resolved.live, candidate)) { frames.push(candidate); break; }
+      // Take the ONE provider slot, grab this single clip, release immediately -
+      // a viewer is never locked out for longer than one clip grab, and the
+      // loop's busyNow() check above stops the next clip if they start.
+      const release = typeof acquireLease === 'function'
+        ? await acquireLease(String(item.sourceId)).catch(() => null)
+        : async () => {};
+      if (!release) { yielded = true; break; }
+      const outFile = path.join(work, `c${String(clips.length).padStart(2, '0')}.mp4`);
+      try {
+        const direct = await resolveDirect(resolved.url);
+        const duration = resolved.live ? 0 : await probeDuration(direct);
+        // Middle of the runtime, leaving room for the full CLIP_SECONDS. Falls
+        // back to a quarter-in, then the start, if the provider truncates.
+        const mid = duration > CLIP_SECONDS * 3 ? Math.min(duration / 2, duration - CLIP_SECONDS - 15) : 0;
+        const seeks = [...new Set([Math.round(mid), Math.round(mid / 2), 0])];
+        for (const seek of seeks) {
+          if (await grabClip(direct, seek, outFile)) { clips.push(path.basename(outFile)); usedItems.push({ title: item.title || '', kind: item.kind, id: item.id, sourceId: item.sourceId }); break; }
+        }
+      } finally {
+        await Promise.resolve(release()).catch(() => {});
       }
     }
     if (yielded) {
-      console.info(`[Backdrop] owner=${short(ownerId)} yielded - provider slot in use (frames so far=${frames.length})`);
+      console.info(`[Backdrop] owner=${short(ownerId)} yielded - provider slot in use (clips so far=${clips.length})`);
       return;
     }
-    if (frames.length === 0) {
+    if (clips.length === 0) {
       await fs.writeFile(failPath(ownerId, hash), String(Date.now())).catch(() => {});
-      console.info(`[Backdrop] owner=${short(ownerId)} no frames available`);
+      console.info(`[Backdrop] owner=${short(ownerId)} no clips available`);
       return;
-    }
-    for (let index = 0; index < frames.length; index += 1) {
-      await fs.rename(frames[index], path.join(work, `f${String(index).padStart(2, '0')}.jpg`));
     }
     const tmpVideo = path.join(work, 'backdrop.mp4');
-    await encodeMontage(work, frames.length, tmpVideo);
+    await spliceClips(work, clips, tmpVideo);
     await fs.rename(tmpVideo, videoPath(ownerId, hash));
-    await fs.writeFile(metaPath(ownerId, hash), JSON.stringify({ hash, createdAt: new Date().toISOString(), frames: frames.length })).catch(() => {});
+    await fs.writeFile(metaPath(ownerId, hash), JSON.stringify({ hash, createdAt: new Date().toISOString(), clips: clips.length, items: usedItems })).catch(() => {});
     await fs.rm(failPath(ownerId, hash), { force: true }).catch(() => {});
-    await cleanupOldBackdrops(ownerId, hash);
-    console.info(`[Backdrop] owner=${short(ownerId)} built frames=${frames.length}`);
+    // Touch this build so cleanup keeps it, then GC only genuinely stale files.
+    await fs.utimes(videoPath(ownerId, hash), new Date(), new Date()).catch(() => {});
+    await cleanupOldBackdrops(ownerId);
+    console.info(`[Backdrop] owner=${short(ownerId)} built clips=${clips.length}`);
   } finally {
-    for (const release of leases.values()) await release?.().catch(() => {});
     activeGrab = false;
     await fs.rm(work, { recursive: true, force: true }).catch(() => {});
   }

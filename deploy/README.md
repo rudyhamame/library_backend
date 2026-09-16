@@ -11,7 +11,8 @@ journalctl --user -u rh-stream-backend.service -f
 ```
 
 The service reads secrets and runtime settings from `backend/.env`. Its Roku/LAN
-address is `http://192.168.68.60:8787`.
+public Roku address is `https://roku-api.mctoshs.ca`; Cloudflare Tunnel connects
+to the local origin at `http://127.0.0.1:8787`.
 
 The user service starts automatically when the user session starts. To start it
 at boot before login, an administrator can enable lingering once:

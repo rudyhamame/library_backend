@@ -6,7 +6,8 @@ import { moveLibraryCategories } from './library-category-store.js';
 import { movePlaybackOwners } from './playback-store.js';
 import { moveFavoriteOwners } from './favorites-store.js';
 import { moveStreamingHistoryOwners } from './streaming-history-store.js';
-import { deleteAccountProfilesAndData, ensureDefaultProfile, getAccountProfile } from './account-profile-store.js';
+import { deleteAccountProfilesAndData, ensureDefaultProfile, getAccountProfile, getProfileRokuSourcePreferenceByOwner, verifyProfilePin } from './account-profile-store.js';
+import { sendPasswordResetEmail } from './email.js';
 
 const sessions = new Map();
 const pairingTtlMs = 15 * 60 * 1000;
@@ -14,11 +15,13 @@ const maxPairingSessions = Math.max(50, Number.parseInt(process.env.MAX_PAIRING_
 const tokenTtlMs = 365 * 24 * 60 * 60 * 1000;
 const mongoUri = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017';
 const databaseName = process.env.MONGODB_DB || 'rh_stream';
+const generalDatabaseName = process.env.MONGODB_GENERAL_DB || 'rh_general';
 const collectionName = process.env.MONGODB_DEVICE_COLLECTION || 'device_profiles';
 const accountCollectionName = process.env.MONGODB_ACCOUNT_COLLECTION || 'accounts';
 const signingSecret = process.env.DEVICE_AUTH_SECRET || 'local-development-secret-change-before-production';
+const frontendUrl = process.env.FRONTEND_URL || 'http://127.0.0.1:8787';
 let profilesPromise;
-let accountsPromise;
+const accountsPromises = new Map();
 const heartbeatCache = new Map();
 const heartbeatIntervalMs = 10_000;
 const runningWindowMs = 30_000;
@@ -37,17 +40,28 @@ async function profiles() {
   return profilesPromise;
 }
 
-async function accounts() {
-  if (!accountsPromise) {
-    accountsPromise = new MongoClient(mongoUri, { serverSelectionTimeoutMS: 5000 }).connect()
+function normalizeAccountRealm(realm) { return realm === 'general' ? 'general' : 'roku'; }
+
+async function accounts(realm = 'roku') {
+  const normalizedRealm = normalizeAccountRealm(realm);
+  let promise = accountsPromises.get(normalizedRealm);
+  if (!promise) {
+    promise = new MongoClient(mongoUri, { serverSelectionTimeoutMS: 5000 }).connect()
       .then(async client => {
-        const collection = client.db(databaseName).collection(accountCollectionName);
+        const dbName = normalizedRealm === 'general' ? generalDatabaseName : databaseName;
+        const collection = client.db(dbName).collection(accountCollectionName);
         await collection.createIndex({ email: 1 }, { unique: true });
         return collection;
       })
-      .catch(error => { accountsPromise = undefined; throw error; });
+      .catch(error => { accountsPromises.delete(normalizedRealm); throw error; });
+    accountsPromises.set(normalizedRealm, promise);
   }
-  return accountsPromise;
+  return promise;
+}
+
+export async function initializeAccountDatabases() {
+  await Promise.all([accounts('roku'), accounts('general')]);
+  return { roku: databaseName, general: generalDatabaseName };
 }
 
 function purge(reserveSlot = false) {
@@ -62,11 +76,11 @@ function encode(value) { return Buffer.from(value).toString('base64url'); }
 function sign(value) { return createHmac('sha256', signingSecret).update(value).digest('base64url'); }
 
 function issueToken(session, type) {
-  const payload = encode(JSON.stringify({ ownerId: canonicalSessionOwner(session), deviceId: session.deviceId, accountId: session.accountId || null, profileId: session.profileId || null, type, exp: Date.now() + tokenTtlMs }));
+  const payload = encode(JSON.stringify({ ownerId: canonicalSessionOwner(session), deviceId: session.deviceId, accountId: session.accountId || null, profileId: session.profileId || null, realm: normalizeAccountRealm(session.realm), type, exp: Date.now() + tokenTtlMs }));
   return `${payload}.${sign(payload)}`;
 }
 
-async function consolidateAccountLibrary(accountId) {
+async function consolidateAccountLibrary(accountId, realm = 'roku') {
   if (!ObjectId.isValid(accountId)) return null;
   const canonicalOwnerId = accountOwnerId(accountId);
   const linkedProfiles = await (await profiles()).find(
@@ -76,7 +90,7 @@ async function consolidateAccountLibrary(accountId) {
   const legacyWeather = linkedProfiles.find(profile => Array.isArray(profile.weatherLocations) && profile.weatherLocations.length)?.weatherLocations?.slice(0, 1);
   const accountUpdate = { ownerId: canonicalOwnerId, dataVersion: 2, updatedAt: new Date() };
   if (legacyWeather) accountUpdate.weatherLocations = legacyWeather;
-  await (await accounts()).updateOne({ _id: new ObjectId(accountId) }, { $set: accountUpdate });
+  await (await accounts(realm)).updateOne({ _id: new ObjectId(accountId) }, { $set: accountUpdate });
   await (await profiles()).updateMany(
     { accountId: new ObjectId(accountId) },
     { $set: { accountOwnerId: canonicalOwnerId, updatedAt: new Date() }, $unset: { weatherLocations: '' } },
@@ -108,7 +122,45 @@ function validPassword(password) { return typeof password === 'string' && passwo
 function normalizeEmail(email) { return String(email || '').trim().toLowerCase(); }
 function validEmail(email) { return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) && email.length <= 254; }
 
-export async function createDeviceSession(deviceId, frontendUrl, deviceToken = '') {
+const resetCodes = new Map();
+const resetCodeTtlMs = 15 * 60 * 1000;
+function purgeResetCodes() {
+  const now = Date.now();
+  for (const [code, entry] of resetCodes) if (entry.expiresAt < now) resetCodes.delete(code);
+}
+
+// Always returns { ok: true } regardless of whether the email has an
+// account, so the response can never be used to discover which emails are
+// registered. The Roku login page just tells the user to check their inbox.
+export async function requestPasswordReset(email, realm = 'roku') {
+  purgeResetCodes();
+  const normalizedEmail = normalizeEmail(email);
+  if (!validEmail(normalizedEmail)) return { error: 'Enter a valid email address' };
+  const account = await (await accounts(realm)).findOne({ email: normalizedEmail }, { projection: { _id: 1 } });
+  if (account) {
+    const code = randomBytes(4).toString('hex').toUpperCase();
+    resetCodes.set(code, { email: normalizedEmail, realm: normalizeAccountRealm(realm), accountId: String(account._id), expiresAt: Date.now() + resetCodeTtlMs });
+    try { await sendPasswordResetEmail(normalizedEmail, code); }
+    catch (error) { console.error('[password reset] email send failed:', error.message); }
+  }
+  return { ok: true };
+}
+
+export async function confirmPasswordReset(code, newPassword) {
+  purgeResetCodes();
+  const normalizedCode = String(code || '').trim().toUpperCase();
+  const entry = resetCodes.get(normalizedCode);
+  if (!entry) return { error: 'Reset code expired or invalid' };
+  if (!validPassword(newPassword)) return { error: 'Password must contain at least 8 characters' };
+  await (await accounts(entry.realm)).updateOne(
+    { _id: new ObjectId(entry.accountId) },
+    { $set: { passwordHash: hashPassword(newPassword), updatedAt: new Date() } },
+  );
+  resetCodes.delete(normalizedCode);
+  return { ok: true };
+}
+
+export async function createDeviceSession(deviceId, deviceToken = '') {
   purge(true);
   const normalizedDeviceId = String(deviceId);
   const session = {
@@ -116,40 +168,45 @@ export async function createDeviceSession(deviceId, frontendUrl, deviceToken = '
     deviceId: normalizedDeviceId,
     ownerId: ownerIdFor(normalizedDeviceId),
     expiresAt: Date.now() + pairingTtlMs,
+    purpose: 'on-device-auth',
+    realm: 'roku',
   };
-  // A previously activated Roku may authorize a short-lived automatic browser
-  // login. Validate its local Roku token against the still-linked DB profile;
-  // neither the token nor account credentials are ever placed in the QR URL.
+  // Only an already-authenticated Roku may display an Android-remote QR. The
+  // QR can connect Android to the Roku's existing account; it can never sign
+  // the Roku in or create an account away from the TV.
   const authorization = resolveDeviceToken(deviceToken);
-  if (authorization?.type === 'roku' && authorization.deviceId === normalizedDeviceId && ObjectId.isValid(authorization.accountId)) {
+  if (authorization?.type === 'roku' && normalizeAccountRealm(authorization.realm) === 'roku' && authorization.deviceId === normalizedDeviceId && ObjectId.isValid(authorization.accountId)) {
     const profile = await (await profiles()).findOne({ deviceId: normalizedDeviceId, accountId: new ObjectId(authorization.accountId) }, { projection: { accountId: 1 } });
     if (profile?.accountId) {
       session.accountId = String(profile.accountId);
       session.ownerId = accountOwnerId(profile.accountId);
-      session.autoLogin = true;
+      session.profileId = authorization.profileId || null;
+      session.purpose = 'android-remote';
+      session.realm = 'roku';
     }
   }
   sessions.set(session.code, session);
-  // The QR payload is deliberately limited to the short-lived pairing code.
-  // Build a clean URL instead of appending to frontendUrl, so credentials or
-  // unrelated query parameters can never be copied into the QR contents.
-  const pairUrlObject = new URL(String(frontendUrl));
-  pairUrlObject.search = '';
-  pairUrlObject.hash = '';
-  pairUrlObject.pathname = `${pairUrlObject.pathname.replace(/\/$/, '')}/`;
-  pairUrlObject.searchParams.set('pair', session.code);
-  const pairUrl = pairUrlObject.toString();
-  // Camera apps hand this Android intent URL to RH when it is installed. If
-  // it is not installed, Chrome opens the existing web pairing page instead.
-  // If the Android intent is unavailable, the scanner must still open the
-  // actual pairing page. Falling back to an APK download strands users before
-  // they can sign in, especially when scanning with a regular camera app.
-  const appPairUrl = `intent://pair?pair=${encodeURIComponent(session.code)}#Intent;scheme=rhstream;package=com.rhstream.library;S.browser_fallback_url=${encodeURIComponent(pairUrl)};end`;
-  return {
+  const result = {
     code: session.code, deviceId: session.deviceId, expiresAt: session.expiresAt,
-    pairUrl, appPairUrl,
-    qrImageUrl: `https://quickchart.io/qr?size=190&text=${encodeURIComponent(appPairUrl)}`,
+    purpose: session.purpose,
   };
+  if (session.purpose === 'android-remote') {
+    // Android intent only: deliberately omit browser_fallback_url. A camera
+    // scan opens RH when installed and has no browser authentication path.
+    const appPairUrl = `intent://pair?pair=${encodeURIComponent(session.code)}#Intent;scheme=rhstream;package=com.rhstream.library;end`;
+    result.appPairUrl = appPairUrl;
+    result.qrImageUrl = `https://quickchart.io/qr?size=190&text=${encodeURIComponent(appPairUrl)}`;
+    // Separate QR for the browser auto-login card in Roku Settings: a plain
+    // web URL (not an app intent) that opens the pairing page directly.
+    const browserPairUrlObject = new URL(frontendUrl);
+    browserPairUrlObject.search = '';
+    browserPairUrlObject.hash = '';
+    browserPairUrlObject.pathname = `${browserPairUrlObject.pathname.replace(/\/$/, '')}/`;
+    browserPairUrlObject.searchParams.set('pair', session.code);
+    result.pairUrl = browserPairUrlObject.toString();
+    result.browserQrImageUrl = `https://quickchart.io/qr?size=190&text=${encodeURIComponent(result.pairUrl)}`;
+  }
+  return result;
 }
 
 export async function getRokuSourcePreference(accountId) {
@@ -161,35 +218,30 @@ export async function getRokuSourcePreference(accountId) {
 export async function setRokuSourcePreference(accountId, sourceId) {
   if (!accountId || !ObjectId.isValid(accountId)) throw new Error('Account authentication is required');
   const value = String(sourceId || '').trim();
+  const account = await (await accounts()).findOne({ _id: new ObjectId(accountId) }, { projection: { rokuSourceId: 1, ownerId: 1 } });
   await (await accounts()).updateOne({ _id: new ObjectId(accountId) }, { $set: { rokuSourceId: value, updatedAt: new Date() } });
+  // Same staleness fix as setProfileRokuSourcePreference, for accounts still
+  // on the pre-profile source preference (see getRokuSourcePreferenceByOwner).
+  if (account?.ownerId && value !== String(account.rokuSourceId || '')) {
+  }
   return value;
 }
 
 export async function getRokuSourcePreferenceByOwner(ownerId) {
   if (!ownerId) return '';
+  const profileSourceId = await getProfileRokuSourcePreferenceByOwner(ownerId);
+  if (profileSourceId !== null) return profileSourceId;
+  // Compatibility for an account created before provider choice moved onto
+  // profiles. Only an owner with no profile record can reach this fallback.
   const account = await (await accounts()).findOne({ ownerId: String(ownerId) }, { projection: { rokuSourceId: 1 } });
   return String(account?.rokuSourceId || '');
 }
 
-export async function getPartnerEmail(accountId) {
-  if (!accountId || !ObjectId.isValid(accountId)) return '';
-  const account = await (await accounts()).findOne({ _id: new ObjectId(accountId) }, { projection: { partnerEmail: 1 } });
-  return String(account?.partnerEmail || '');
-}
-
-export async function setPartnerEmail(accountId, email) {
-  if (!accountId || !ObjectId.isValid(accountId)) throw new Error('Account authentication is required');
-  const value = normalizeEmail(email);
-  if (value && !validEmail(value)) throw new Error('Enter a valid email address');
-  await (await accounts()).updateOne({ _id: new ObjectId(accountId) }, { $set: { partnerEmail: value, updatedAt: new Date() } });
-  return value;
-}
-
 // The inverse of resolveAccountByEmail - used to show the host's own name on
 // the invite the partner receives.
-export async function getAccountBasicInfo(accountId) {
+export async function getAccountBasicInfo(accountId, realm = 'roku') {
   if (!accountId || !ObjectId.isValid(accountId)) return null;
-  const account = await (await accounts()).findOne({ _id: new ObjectId(accountId) }, { projection: { email: 1, firstName: 1, lastName: 1 } });
+  const account = await (await accounts(realm)).findOne({ _id: new ObjectId(accountId) }, { projection: { email: 1, firstName: 1, lastName: 1 } });
   if (!account) return null;
   return { email: account.email, name: [account.firstName, account.lastName].filter(Boolean).join(' ').trim() };
 }
@@ -197,12 +249,27 @@ export async function getAccountBasicInfo(accountId) {
 // Read-only lookup used to route a Watch with Partner invite - no password
 // check, unlike loginAccount. Returns null rather than throwing so callers
 // can turn a missing/typo'd partner email into a clear user-facing error.
-export async function resolveAccountByEmail(email) {
+export async function resolveAccountByEmail(email, realm = 'roku') {
   const normalizedEmail = normalizeEmail(email);
   if (!validEmail(normalizedEmail)) return null;
-  const account = await (await accounts()).findOne({ email: normalizedEmail }, { projection: { _id: 1, email: 1, firstName: 1, lastName: 1 } });
+  const account = await (await accounts(realm)).findOne({ email: normalizedEmail }, { projection: { _id: 1, email: 1, firstName: 1, lastName: 1 } });
   if (!account) return null;
   return { accountId: String(account._id), ownerId: accountOwnerId(account._id), email: account.email, name: [account.firstName, account.lastName].filter(Boolean).join(' ').trim() };
+}
+
+// Every account's ownerId, for the ops dashboard to join against
+// getAllXtreamSources() (whose docs only carry ownerId, not accountId/email).
+export async function listAllAccountsBasic() {
+  const [rokuRows, generalRows] = await Promise.all([
+    (await accounts('roku')).find({}, { projection: { email: 1 } }).toArray(),
+    (await accounts('general')).find({}, { projection: { email: 1 } }).toArray(),
+  ]);
+  return [...rokuRows.map(account => ({ ...account, realm: 'roku' })), ...generalRows.map(account => ({ ...account, realm: 'general' }))].map(account => ({
+    accountId: String(account._id),
+    ownerId: accountOwnerId(account._id),
+    email: account.email || '',
+    realm: account.realm,
+  }));
 }
 
 // True when the account has at least one device (Roku / browser / Android)
@@ -218,6 +285,16 @@ export async function isAccountOnline(accountId) {
   return Boolean(device);
 }
 
+export async function isProfileOnline(accountId, profileId) {
+  if (!accountId || !ObjectId.isValid(accountId) || !profileId) return false;
+  const since = new Date(Date.now() - runningWindowMs);
+  const device = await (await profiles()).findOne(
+    { accountId: new ObjectId(accountId), profileId: String(profileId), lastSeenAt: { $gte: since } },
+    { projection: { _id: 1 } },
+  );
+  return Boolean(device);
+}
+
 export function getDeviceSession(code) { purge(); return sessions.get(String(code || '')); }
 
 export async function getPairingInfo(code, token = '') {
@@ -227,17 +304,20 @@ export async function getPairingInfo(code, token = '') {
   const authorization = resolveDeviceToken(token);
   const authenticated = authorization?.deviceId === session.deviceId
     || (profile?.accountId && String(authorization?.accountId || '') === String(profile.accountId));
-  return { deviceId: session.deviceId, expiresAt: session.expiresAt, needsSignup: !profile?.accountId, purpose: profile?.accountId ? 'manage-library' : 'activate-device', authenticated, canAutoLogin: Boolean(session.autoLogin && session.accountId && !session.claimedAt) };
+  return { deviceId: session.deviceId, expiresAt: session.expiresAt, needsSignup: false, purpose: session.purpose, authenticated, canAutoLogin: session.purpose === 'android-remote' && Boolean(session.accountId) && !session.approvedAt };
 }
 
-export function claimAutomaticPairing(code) {
+// Passwordless browser login: same trust model as autoLoginDeviceSession
+// below - the Roku that generated this code already proved it owns the
+// account (createDeviceSession only mints purpose:'android-remote' codes
+// from an authenticated Roku session), so scanning it is sufficient proof.
+export async function claimAutomaticPairing(code) {
   const session = getDeviceSession(code);
   if (!session) return { error: 'Pairing code expired or invalid' };
-  if (!session.autoLogin || !session.accountId) return { error: 'Sign in once before automatic QR login is available' };
-  if (session.claimedAt) return { error: 'This automatic login link has already been used' };
-  session.claimedAt = Date.now();
-  const result = { token: issueToken(session, 'browser'), deviceId: session.deviceId };
-  return result;
+  if (session.purpose !== 'android-remote' || !session.accountId) return { error: 'Sign in on the Roku before scanning' };
+  if (!session.profileId) session.profileId = (await ensureDefaultProfile(session.accountId)).id;
+  session.approvedAt = Date.now();
+  return { token: issueToken(session, 'browser'), deviceId: session.deviceId };
 }
 
 // Approve a Roku pairing with the account already authenticated on the phone.
@@ -247,44 +327,49 @@ export async function authorizeDeviceSession(code, token) {
   const session = getDeviceSession(code);
   if (!session) return { error: 'Pairing code expired or invalid' };
   const authorization = resolveDeviceToken(token);
-  if (authorization?.type !== 'browser' || !ObjectId.isValid(authorization.accountId)) return { error: 'Sign in to authorize this Roku' };
-  const accountId = new ObjectId(authorization.accountId);
-  const deviceCollection = await profiles();
-  const deviceOwnerId = ownerIdFor(session.deviceId);
-  const profile = await deviceCollection.findOne({ deviceId: session.deviceId }, { projection: { accountId: 1, profileId: 1 } });
-  if (profile?.accountId && String(profile.accountId) !== String(accountId)) return { error: 'This Roku is linked to a different RH account' };
-  session.accountId = String(accountId);
-  const selectedProfile = authorization.profileId
-    ? await getAccountProfile(accountId, authorization.profileId)
-    : await ensureDefaultProfile(accountId);
-  if (!selectedProfile) return { error: 'Profile not found' };
-  const profileId = selectedProfile.id;
-  await deviceCollection.updateOne(
-    { deviceId: session.deviceId },
-    { $setOnInsert: { ownerId: deviceOwnerId, deviceId: session.deviceId, createdAt: new Date() }, $set: { accountId, profileId, linkedAt: new Date(), updatedAt: new Date() } },
-    { upsert: true },
-  );
-  session.profileId = profileId;
-  session.ownerId = selectedProfile.isDefault ? await consolidateAccountLibrary(accountId) : selectedProfile.ownerId;
+  if (session.purpose !== 'android-remote' || !session.accountId) return { error: 'Sign in on the Roku before pairing Android' };
+  if (authorization?.type !== 'browser' || !ObjectId.isValid(authorization.accountId)) return { error: 'Sign in to the RH Android app first' };
+  if (normalizeAccountRealm(authorization.realm) !== 'roku') return { error: 'Select Roku User and sign in with the Roku RH account' };
+  if (String(authorization.accountId) !== String(session.accountId)) return { error: 'Sign in with the RH account already connected to this Roku' };
   session.approvedAt = Date.now();
-  return { ok: true, deviceId: session.deviceId };
+  return { ok: true, deviceId: session.deviceId, purpose: 'android-remote' };
+}
+
+// Passwordless login: the Roku that generated this code already proved it
+// owns the account (createDeviceSession only mints purpose:'android-remote'
+// codes from an authenticated Roku session), so scanning it is treated as
+// sufficient proof for Android too - no email/password re-entry.
+export async function autoLoginDeviceSession(code) {
+  const session = getDeviceSession(code);
+  if (!session) return { error: 'Pairing code expired or invalid' };
+  if (session.purpose !== 'android-remote' || !session.accountId) return { error: 'Sign in on the Roku before scanning' };
+  if (!session.profileId) session.profileId = (await ensureDefaultProfile(session.accountId)).id;
+  session.approvedAt = Date.now();
+  return { token: issueToken(session, 'browser'), deviceId: session.deviceId };
 }
 
 async function consumePairing(code, email, password, setup, firstName = '', lastName = '') {
   const session = getDeviceSession(code);
   if (!session) return { error: 'Pairing code expired or invalid' };
+  if (session.purpose === 'android-remote') return { error: 'Sign in through the RH Android app, then scan again' };
   const normalizedEmail = normalizeEmail(email);
   if (!validEmail(normalizedEmail)) return { error: 'Enter a valid email address' };
   if (!validPassword(password)) return { error: 'Password must contain at least 8 characters' };
   const deviceCollection = await profiles();
-  const accountCollection = await accounts();
+  const accountCollection = await accounts('roku');
   const deviceOwnerId = ownerIdFor(session.deviceId);
   const profile = await deviceCollection.findOne({ deviceId: session.deviceId });
   let account;
   if (setup) {
     if (profile?.accountId) return { error: 'This Roku is already activated. Sign in instead.' };
     if (await accountCollection.findOne({ email: normalizedEmail }, { projection: { _id: 1 } })) return { error: 'An account with this email already exists. Sign in instead.' };
-    const created = await accountCollection.insertOne({ email: normalizedEmail, passwordHash: hashPassword(password), firstName: String(firstName || '').trim().slice(0, 60), lastName: String(lastName || '').trim().slice(0, 60), createdAt: new Date(), updatedAt: new Date() });
+    let created;
+    try {
+      created = await accountCollection.insertOne({ email: normalizedEmail, passwordHash: hashPassword(password), firstName: String(firstName || '').trim().slice(0, 60), lastName: String(lastName || '').trim().slice(0, 60), createdAt: new Date(), updatedAt: new Date() });
+    } catch (error) {
+      if (error?.code === 11000) return { error: 'An account with this email already exists. Sign in instead.' };
+      throw error;
+    }
     account = { _id: created.insertedId };
     await ensureDefaultProfile(String(account._id), firstName || 'Main');
   } else {
@@ -298,12 +383,19 @@ async function consumePairing(code, email, password, setup, firstName = '', last
     if (!account || !verifyPassword(password, account.passwordHash)) return { error: 'Incorrect email or password' };
   }
   session.accountId = String(account._id);
+  const canonicalOwner = await consolidateAccountLibrary(account._id);
+  let selectedProfile = null;
+  if (profile?.accountId && String(profile.accountId) === String(account._id) && profile.profileId) {
+    selectedProfile = await getAccountProfile(account._id, profile.profileId);
+  }
+  if (!selectedProfile) selectedProfile = await ensureDefaultProfile(account._id);
+  session.profileId = selectedProfile.id;
+  session.ownerId = selectedProfile.isDefault ? canonicalOwner : selectedProfile.ownerId;
   await deviceCollection.updateOne(
     { deviceId: session.deviceId },
-    { $setOnInsert: { ownerId: deviceOwnerId, deviceId: session.deviceId, createdAt: new Date() }, $set: { accountId: account._id, linkedAt: new Date(), updatedAt: new Date() } },
+    { $setOnInsert: { ownerId: deviceOwnerId, deviceId: session.deviceId, createdAt: new Date() }, $set: { accountId: account._id, profileId: selectedProfile.id, linkedAt: new Date(), updatedAt: new Date() } },
     { upsert: true },
   );
-  session.ownerId = await consolidateAccountLibrary(account._id);
   session.approvedAt = Date.now();
   return { token: issueToken(session, 'browser'), deviceId: session.deviceId };
 }
@@ -311,11 +403,11 @@ async function consumePairing(code, email, password, setup, firstName = '', last
 export function setupDeviceSession(code, email, password, firstName, lastName) { return consumePairing(code, email, password, true, firstName, lastName); }
 export function loginDeviceSession(code, email, password) { return consumePairing(code, email, password, false); }
 
-export async function registerAccount(email, password, firstName = '', lastName = '') {
+export async function registerAccount(email, password, firstName = '', lastName = '', realm = 'general') {
   const normalizedEmail = normalizeEmail(email);
   if (!validEmail(normalizedEmail)) return { error: 'Enter a valid email address' };
   if (!validPassword(password)) return { error: 'Password must contain at least 8 characters' };
-  const collection = await accounts();
+  const collection = await accounts(realm);
   if (await collection.findOne({ email: normalizedEmail }, { projection: { _id: 1 } })) return { error: 'An account with this email already exists. Sign in instead.' };
   try {
     const created = await collection.insertOne({ email: normalizedEmail, passwordHash: hashPassword(password), firstName: String(firstName || '').trim().slice(0, 60), lastName: String(lastName || '').trim().slice(0, 60), createdAt: new Date(), updatedAt: new Date() });
@@ -357,13 +449,15 @@ export async function getLinkedDevices(accountId, profileId = '') {
     { $set: { profileId: defaultProfile.id, updatedAt: new Date() } },
   );
   // The "Linked Roku devices" list (Android + browser Settings, Android welcome
-  // page) is Roku-only and scoped to the profile the caller's token carries -
-  // browser tabs and the Android app's own presence heartbeat (kind 'browser' /
+  // page) is Roku-only and ACCOUNT-scoped - every profile of an RH account sees
+  // the same Roku devices (they belong to the account, not one profile).
+  // Browser tabs and the Android app's own presence heartbeat (kind 'browser' /
   // 'android') do not belong here. The dashboard's Connected Devices page uses
   // listAllLinkedDevices() instead and still shows every kind.
+  void selectedProfileId;
   const rows = await (await profiles()).find(
-    { accountId: new ObjectId(accountId), profileId: selectedProfileId, kind: { $nin: ['browser', 'android'] } },
-    { projection: { deviceId: 1, profileId: 1, linkedAt: 1, updatedAt: 1, lastSeenAt: 1, lastStreamingSeenAt: 1, lastClientIp: 1, kind: 1, label: 1 } },
+    { accountId: new ObjectId(accountId), kind: { $nin: ['browser', 'android'] } },
+    { projection: { deviceId: 1, profileId: 1, linkedAt: 1, updatedAt: 1, lastSeenAt: 1, lastStreamingSeenAt: 1, lastClientIp: 1, lanIp: 1, ecpAppId: 1, kind: 1, label: 1 } },
   ).sort({ linkedAt: 1 }).toArray();
   return rows.map(device => ({
     id: String(device._id),
@@ -373,6 +467,8 @@ export async function getLinkedDevices(accountId, profileId = '') {
     linkedAt: device.linkedAt || device.updatedAt || null,
     lastSeenAt: device.lastSeenAt || null,
     lastClientIp: device.lastClientIp || '',
+    lanIp: device.lanIp || device.lastClientIp || '',
+    ecpAppId: device.ecpAppId || '',
     running: Boolean(device.lastSeenAt && Date.now() - new Date(device.lastSeenAt).getTime() <= runningWindowMs),
     streaming: Boolean(device.lastStreamingSeenAt && Date.now() - new Date(device.lastStreamingSeenAt).getTime() <= streamingWindowMs),
     label: `Roku ${String(device.deviceId || '').replace(/^roku-/, '').slice(-8).toUpperCase()}`,
@@ -406,10 +502,10 @@ function linkedProfileFilter(ownerId, accountId = '', deviceId = '') {
   return { ownerId: String(ownerId) };
 }
 
-export async function getDeviceWeatherLocations(ownerId, accountId = '', deviceId = '') {
+export async function getDeviceWeatherLocations(ownerId, accountId = '', deviceId = '', realm = 'roku') {
   if (!ownerId) return [];
   if (ObjectId.isValid(accountId)) {
-    const account = await (await accounts()).findOne(
+    const account = await (await accounts(realm)).findOne(
       { _id: new ObjectId(accountId) },
       { projection: { weatherLocations: 1 } },
     );
@@ -422,7 +518,7 @@ export async function getDeviceWeatherLocations(ownerId, accountId = '', deviceI
   return Array.isArray(profile?.weatherLocations) ? profile.weatherLocations.slice(0, 1) : [];
 }
 
-export async function saveDeviceWeatherLocations(ownerId, locations, accountId = '', deviceId = '') {
+export async function saveDeviceWeatherLocations(ownerId, locations, accountId = '', deviceId = '', realm = 'roku') {
   if (!ownerId) return { error: 'Linked Roku authorization is required' };
   const supplied = Array.isArray(locations) ? locations.slice(0, 1) : [];
   const weatherLocations = supplied.map(location => location ? ({
@@ -436,7 +532,7 @@ export async function saveDeviceWeatherLocations(ownerId, locations, accountId =
     return { error: 'Select valid weather locations' };
   }
   const result = ObjectId.isValid(accountId)
-    ? await (await accounts()).updateOne(
+    ? await (await accounts(realm)).updateOne(
       { _id: new ObjectId(accountId) },
       { $set: { weatherLocations, updatedAt: new Date() } },
     )
@@ -447,19 +543,29 @@ export async function saveDeviceWeatherLocations(ownerId, locations, accountId =
   return result.matchedCount ? { locations: weatherLocations } : { error: 'Linked Roku profile not found' };
 }
 
-export async function recordDeviceHeartbeat(deviceId, streaming = false, clientIp = '') {
+export async function recordDeviceHeartbeat(deviceId, streaming = false, clientIp = '', extra = {}) {
   const normalized = String(deviceId || '').trim();
   if (!normalized) return;
   const now = Date.now();
   const ip = String(clientIp || '').replace(/^::ffff:/, '').trim();
-  const previous = heartbeatCache.get(normalized) || { at: 0, streaming: false, ip: '' };
-  if (now - previous.at < heartbeatIntervalMs && previous.streaming === Boolean(streaming) && previous.ip === ip) return;
-  heartbeatCache.set(normalized, { at: now, streaming: Boolean(streaming), ip });
+  const lanIp = String(extra.lanIp || '').trim();
+  const ecpAppId = String(extra.ecpAppId || '').trim();
+  const sourceId = String(extra.sourceId || '').trim();
+  const previous = heartbeatCache.get(normalized) || { at: 0, streaming: false, ip: '', lanIp: '', ecpAppId: '', sourceId: '' };
+  if (now - previous.at < heartbeatIntervalMs && previous.streaming === Boolean(streaming)
+      && previous.ip === ip && previous.lanIp === lanIp && previous.ecpAppId === ecpAppId
+      && previous.sourceId === sourceId) return;
+  heartbeatCache.set(normalized, { at: now, streaming: Boolean(streaming), ip, lanIp, ecpAppId, sourceId });
   try {
     const update = { $set: { lastSeenAt: new Date(now) } };
     if (ip) update.$set.lastClientIp = ip;
-    if (streaming) update.$set.lastStreamingSeenAt = new Date(now);
-    else update.$unset = { lastStreamingSeenAt: '' };
+    if (lanIp) update.$set.lanIp = lanIp;
+    if (ecpAppId) update.$set.ecpAppId = ecpAppId;
+    if (streaming) {
+      update.$set.lastStreamingSeenAt = new Date(now);
+      if (sourceId) update.$set.streamingSourceId = sourceId;
+      else update.$unset = { streamingSourceId: '' };
+    } else update.$unset = { lastStreamingSeenAt: '', streamingSourceId: '' };
     await (await profiles()).updateOne({ deviceId: normalized }, update);
   } catch {
     heartbeatCache.delete(normalized);
@@ -468,40 +574,53 @@ export async function recordDeviceHeartbeat(deviceId, streaming = false, clientI
 
 // Every linked device across all accounts, for the local operations dashboard.
 export async function listAllLinkedDevices() {
-  const [deviceRows, accountRows] = await Promise.all([
+  const [deviceRows, rokuAccountRows, generalAccountRows] = await Promise.all([
     (await profiles()).find({}, {
       projection: {
         deviceId: 1, accountId: 1, profileId: 1, linkedAt: 1, updatedAt: 1,
-        lastSeenAt: 1, lastStreamingSeenAt: 1, lastClientIp: 1, kind: 1, label: 1,
+        lastSeenAt: 1, lastStreamingSeenAt: 1, streamingSourceId: 1, lastClientIp: 1, lanIp: 1, ecpAppId: 1, kind: 1, label: 1,
       },
     }).sort({ lastSeenAt: -1 }).toArray(),
-    (await accounts()).find({}, { projection: { email: 1, rokuSourceId: 1, ownerId: 1 } }).toArray(),
+    (await accounts('roku')).find({}, { projection: { email: 1, rokuSourceId: 1, ownerId: 1 } }).toArray(),
+    (await accounts('general')).find({}, { projection: { email: 1, rokuSourceId: 1, ownerId: 1 } }).toArray(),
   ]);
+  const accountRows = [...rokuAccountRows, ...generalAccountRows];
   const accountById = new Map(accountRows.map(row => [String(row._id), row]));
-  return deviceRows.map(row => {
+  return Promise.all(deviceRows.map(async row => {
     const account = accountById.get(String(row.accountId || '')) || null;
+    const selectedProfile = account && row.profileId
+      ? await getAccountProfile(String(row.accountId), String(row.profileId)).catch(() => null)
+      : null;
     return {
       deviceId: row.deviceId,
       accountId: String(row.accountId || ''),
       accountEmail: account?.email || '',
       accountOwnerId: account?.ownerId || (row.accountId ? accountOwnerId(row.accountId) : ''),
-      rokuSourceId: account?.rokuSourceId || '',
+      // Provider selection is profile-specific. The account field is retained
+      // only as a legacy fallback for devices not yet assigned a profile.
+      rokuSourceId: selectedProfile?.rokuSourceId || account?.rokuSourceId || '',
+      streamingProviderId: row.streamingSourceId || '',
       profileId: row.profileId || '',
+      profileName: selectedProfile?.name || '',
+      profileOwnerId: selectedProfile?.ownerId || (selectedProfile?.isDefault ? accountOwnerId(row.accountId) : ''),
       kind: row.kind === 'browser' || row.kind === 'android' ? row.kind : 'roku',
       label: row.kind === 'browser' || row.kind === 'android' ? (row.label || (row.kind === 'android' ? 'Android' : 'Browser')) : '',
       linkedAt: row.linkedAt || null,
       lastSeenAt: row.lastSeenAt || null,
       lastStreamingSeenAt: row.lastStreamingSeenAt || null,
       lastClientIp: row.lastClientIp || '',
+      lanIp: row.lanIp || row.lastClientIp || '',
+      ecpAppId: row.ecpAppId || '',
     };
-  });
+  }));
 }
 
 export async function unlinkAccountDevice(accountId, deviceId, profileId = '') {
   if (!ObjectId.isValid(accountId) || !deviceId) return { error: 'Invalid device' };
-  const selectedProfileId = await accountProfileId(accountId, profileId);
+  // Account-scoped: any profile can unlink any of the account's Roku devices.
+  void profileId;
   const result = await (await profiles()).updateOne(
-    { accountId: new ObjectId(accountId), deviceId: String(deviceId), profileId: selectedProfileId },
+    { accountId: new ObjectId(accountId), deviceId: String(deviceId) },
     { $unset: { accountId: '' }, $set: { updatedAt: new Date() } },
   );
   return result.modifiedCount ? { ok: true } : { error: 'Linked Roku device not found' };
@@ -509,60 +628,76 @@ export async function unlinkAccountDevice(accountId, deviceId, profileId = '') {
 
 export async function isRokuSessionLinked(session) {
   if (session?.type !== 'roku' || !session?.ownerId || !session?.deviceId || !ObjectId.isValid(session?.accountId)) return false;
-  const selectedProfileId = await accountProfileId(session.accountId, session.profileId || '');
+  // The profile is a sub-selection carried on the device row, not an auth gate.
+  // A device still linked to this account stays authorized even when the
+  // token's profile pointer differs from the row's last-selected profile
+  // (e.g. a pairing token has no profileId, so it would otherwise resolve to
+  // the default profile and 401 against a device linked under another profile).
   const profile = await (await profiles()).findOne(
-    { deviceId: String(session.deviceId), accountId: new ObjectId(session.accountId), profileId: selectedProfileId },
+    { deviceId: String(session.deviceId), accountId: new ObjectId(session.accountId) },
     { projection: { _id: 1 } },
   );
   return Boolean(profile);
 }
 
-export async function loginAccount(email, password, deviceId = '') {
+export async function loginAccount(email, password, deviceId = '', realm = 'general') {
+  const accountRealm = normalizeAccountRealm(realm);
   const normalizedEmail = normalizeEmail(email);
   if (!validEmail(normalizedEmail) || !validPassword(password)) return { error: 'Incorrect email or password' };
-  const account = await (await accounts()).findOne({ email: normalizedEmail });
+  const account = await (await accounts(accountRealm)).findOne({ email: normalizedEmail });
   if (!account || !verifyPassword(password, account.passwordHash)) return { error: 'Incorrect email or password' };
   await ensureDefaultProfile(String(account._id), account.firstName || 'Main');
   const linked = await (await profiles()).find({ accountId: account._id }).toArray();
-  const ownerId = await consolidateAccountLibrary(account._id) || accountOwnerId(account._id);
-  if (!linked.length) return { token: issueToken({ ownerId, accountId: String(account._id) }, 'browser'), devices: [] };
+  const ownerId = await consolidateAccountLibrary(account._id, accountRealm) || accountOwnerId(account._id);
+  if (!linked.length) return { token: issueToken({ ownerId, accountId: String(account._id), realm: accountRealm }, 'browser'), devices: [] };
   const devices = linked.map(device => ({ id: String(device._id), deviceId: device.deviceId, label: `Roku ${String(device.deviceId || '').replace(/^roku-/, '').slice(-8).toUpperCase()}` }));
   const selected = linked.find(device => deviceId && device.deviceId === deviceId) || (linked.length === 1 ? linked[0] : null);
   if (deviceId && !selected) return { error: 'Select a linked Roku device' };
-  const session = { ownerId, deviceId: selected?.deviceId, accountId: String(account._id) };
+  const session = { ownerId, deviceId: selected?.deviceId, accountId: String(account._id), realm: accountRealm };
   return { token: issueToken(session, 'browser'), devices };
 }
 
-export async function selectAccountProfile(accountId, profileId, authorization = {}) {
+export async function selectAccountProfile(accountId, profileId, authorization = {}, pin = '') {
   if (!ObjectId.isValid(accountId)) return { error: 'Sign in to choose a profile' };
   const profile = await getAccountProfile(accountId, profileId);
   if (!profile) return { error: 'Profile not found' };
+  if (profile.pinHash && !verifyProfilePin(pin, profile.pinHash)) return { error: 'Incorrect profile PIN', code: 'PROFILE_PIN_REQUIRED' };
   const session = {
     ownerId: profile.ownerId,
     profileId: profile.id,
     accountId: String(accountId),
+    realm: normalizeAccountRealm(authorization.realm),
     deviceId: authorization.deviceId || undefined,
   };
+  // A Roku deep link must resume with the last non-child profile without
+  // inserting a profile chooser. Persist the selection on the linked device,
+  // not just inside the newly minted token.
+  if (authorization.type === 'roku' && authorization.deviceId) {
+    await (await profiles()).updateOne(
+      { deviceId: String(authorization.deviceId), accountId: new ObjectId(String(accountId)) },
+      { $set: { profileId: profile.id, updatedAt: new Date() } },
+    );
+  }
   return {
     token: issueToken(session, authorization.type === 'roku' ? 'roku' : 'browser'),
-    profile: { id: profile.id, name: profile.name, avatar: profile.avatar || 'lime', isDefault: profile.isDefault === true },
+    profile: { id: profile.id, name: profile.name, avatar: profile.avatar || 'lime', avatarImage: profile.avatarImage || '', hasPin: Boolean(profile.pinHash), isDefault: profile.isDefault === true },
   };
 }
 
-export async function changeAccountPassword(accountId, currentPassword, newPassword) {
+export async function changeAccountPassword(accountId, currentPassword, newPassword, realm = 'roku') {
   if (!ObjectId.isValid(accountId)) return { error: 'Sign in to change your password' };
   if (!validPassword(currentPassword) || !validPassword(newPassword)) return { error: 'Passwords must contain at least 8 characters' };
-  const collection = await accounts();
+  const collection = await accounts(realm);
   const account = await collection.findOne({ _id: new ObjectId(accountId) });
   if (!account || !verifyPassword(currentPassword, account.passwordHash)) return { error: 'Current password is incorrect' };
   await collection.updateOne({ _id: account._id }, { $set: { passwordHash: hashPassword(newPassword), updatedAt: new Date() } });
   return { ok: true };
 }
 
-export async function deleteAccount(accountId, currentPassword) {
+export async function deleteAccount(accountId, currentPassword, realm = 'roku') {
   if (!ObjectId.isValid(accountId)) return { error: 'Sign in to delete your account' };
   if (!validPassword(currentPassword)) return { error: 'Enter your current password' };
-  const collection = await accounts();
+  const collection = await accounts(realm);
   const normalizedAccountId = new ObjectId(String(accountId));
   const account = await collection.findOne({ _id: normalizedAccountId });
   if (!account || !verifyPassword(currentPassword, account.passwordHash)) return { error: 'Current password is incorrect' };
@@ -570,6 +705,34 @@ export async function deleteAccount(accountId, currentPassword) {
   await collection.deleteOne({ _id: normalizedAccountId });
   for (const [code, session] of sessions) if (String(session.accountId || '') === String(accountId)) sessions.delete(code);
   return { ok: true };
+}
+
+// Phone "Play on Roku" handoff: re-home the target Roku to the sender's
+// account + profile and mint it a fresh Roku token. Mirrors the device-doc
+// upsert in authorizeDeviceSession, minus the QR/browser-token check (the
+// caller already verified the sender's account token and that this deviceId
+// belongs to one of its linked devices).
+export async function castHandoffLink(deviceId, accountId, profileId) {
+  if (!deviceId || !ObjectId.isValid(accountId)) return { error: 'Invalid cast target' };
+  const account = new ObjectId(accountId);
+  const selectedProfile = profileId
+    ? await getAccountProfile(account, profileId)
+    : await ensureDefaultProfile(account);
+  if (!selectedProfile) return { error: 'Profile not found' };
+  const deviceCollection = await profiles();
+  await deviceCollection.updateOne(
+    { deviceId: String(deviceId) },
+    { $setOnInsert: { ownerId: ownerIdFor(deviceId), deviceId: String(deviceId), createdAt: new Date() },
+      $set: { accountId: account, profileId: selectedProfile.id, linkedAt: new Date(), updatedAt: new Date() } },
+    { upsert: true },
+  );
+  const session = {
+    deviceId: String(deviceId),
+    accountId: String(account),
+    profileId: selectedProfile.id,
+    ownerId: selectedProfile.isDefault ? await consolidateAccountLibrary(account) : selectedProfile.ownerId,
+  };
+  return { token: issueToken(session, 'roku'), profileName: selectedProfile.name || '' };
 }
 
 export function resolveDeviceToken(token) {
@@ -580,6 +743,6 @@ export function resolveDeviceToken(token) {
   try {
     const data = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
     if (!data.ownerId || data.exp <= Date.now()) return null;
-    return { ...data, ownerId: canonicalSessionOwner(data) };
+    return { ...data, realm: normalizeAccountRealm(data.realm), ownerId: canonicalSessionOwner(data) };
   } catch { return null; }
 }

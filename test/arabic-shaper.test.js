@@ -6,7 +6,14 @@ import { shapeArabicForRoku } from '../arabic-shaper.js';
 test('shapes Arabic while preserving mixed Latin text and punctuation', () => {
   const shaped = shapeArabicForRoku('|AR| مسلسلات سورية لبنانية');
   assert.match(shaped, /[\uFE70-\uFEFC]/);
-  assert.match(shaped, /\|AR\|$/);
+  assert.match(shaped, /^\|AR\| /);
+});
+
+test('keeps Latin and Arabic directional runs in source order', () => {
+  const prefixed = shapeArabicForRoku('RM: الزند: ذئب العاصي');
+  const suffixed = shapeArabicForRoku('أصيني ليلي DU-BA:');
+  assert.match(prefixed, /^RM: /);
+  assert.match(suffixed, / DU-BA:$/);
 });
 
 test('combining marks do not disconnect neighbouring Arabic letters', () => {

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { getM3uCatalog, getM3uCategories, m3uProviderUrl } from '../m3u.js';
+import { getM3uCatalog, getM3uCategories, m3uProviderUrl, validateM3uConnection } from '../m3u.js';
 
 test('streams and parses M3U entries into bounded channel metadata', async () => {
   const body = '#EXTM3U\n#EXTINF:-1 tvg-logo="https://img.test/logo.png" group-title="News",Test News\nhttps://stream.test/live.m3u8';
@@ -24,4 +24,20 @@ test('preserves playlist logos written with common attribute formats', async () 
   const items = await getM3uCatalog(source, 'channel');
   assert.equal(items[0].logo, 'https://img.test/bein.png?size=4k&theme=dark');
   assert.equal(items[1].logo, 'https://img.test/event.png');
+});
+
+test('retries a transient M3U download failure', async () => {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    if (calls === 1) throw new TypeError('fetch failed', { cause: new Error('temporary network failure') });
+    return new Response('#EXTM3U\n#EXTINF:-1,Recovered channel\nhttps://stream.test/recovered.m3u8');
+  };
+  try {
+    await validateM3uConnection({ _id: 'm3u-transient-retry', baseUrl: 'https://playlist.test/index.m3u' }, { attempts: 2, timeoutMs: 2_000 });
+    assert.equal(calls, 2);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });

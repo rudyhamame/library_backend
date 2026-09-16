@@ -33,7 +33,7 @@ service never delivers streaming media.
 ## Self-hosted deployment
 
 This service runs on the local machine only, managed by the systemd units in
-`../deploy/` and exposed to clients over the Tailscale network. Set
+`../deploy/` and reachable by clients on the LAN. Set
 `MONGODB_URI`, `DEVICE_AUTH_SECRET`, `PUBLIC_BASE_URL`, and `FRONTEND_URL` in
 `.env` (see `.env.example`); use the same secret values as the Roku backend.
 Never commit `.env` or provider credentials.

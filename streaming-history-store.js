@@ -28,7 +28,7 @@ const streamingKind = (value) => {
   return 'movie';
 };
 
-export async function saveStreamingHistory({ ownerId, sessionId, itemId, title, kind, sourceId, seriesId, extension, poster, startedAt, endedAt, startPositionMs, endPositionMs, streamingDurationMs, mediaDurationMs, completed }) {
+export async function saveStreamingHistory({ ownerId, sessionId, itemId, title, kind, sourceId, seriesId, extension, poster, startedAt, endedAt, startPositionMs, endPositionMs, streamingDurationMs, mediaDurationMs, completed, seasonNumber, episodeNumber }) {
   if (!ownerId || !sessionId) throw new Error('Account owner and streaming session ID are required');
   const now = new Date();
   const startDate = startedAt ? new Date(startedAt) : now;
@@ -47,6 +47,10 @@ export async function saveStreamingHistory({ ownerId, sessionId, itemId, title, 
     mediaDurationMs: milliseconds(mediaDurationMs),
     updatedAt: now,
   };
+  if (kind === 'series' || kind === 'episode') {
+    if (seasonNumber != null && seasonNumber !== '') update.seasonNumber = Number.parseInt(seasonNumber, 10) || 0;
+    if (episodeNumber != null && episodeNumber !== '') update.episodeNumber = Number.parseInt(episodeNumber, 10) || 0;
+  }
   const isCompleted = completed === true || String(completed).toLowerCase() === 'true';
   if (isCompleted) update.completed = true;
   if (startedAt) update.startedAt = Number.isNaN(startDate.getTime()) ? now : startDate;
@@ -73,6 +77,20 @@ export async function getStreamingHistory(ownerId, limit = 100) {
   const safeLimit = Math.min(500, Math.max(1, Number.parseInt(limit, 10) || 100));
   return (await (await streamingHistoryCollection()).find({ ownerId: String(ownerId) }).sort({ startedAt: -1 }).limit(safeLimit).toArray())
     .map(({ _id, ownerId: _ownerId, ...item }) => item);
+}
+
+export async function deleteStreamingSession(ownerId, sessionId) {
+  if (!ownerId || !sessionId) return { deleted: 0 };
+  const result = await (await streamingHistoryCollection())
+    .deleteOne({ ownerId: String(ownerId), sessionId: String(sessionId) });
+  return { deleted: result.deletedCount || 0 };
+}
+
+export async function clearStreamingHistory(ownerId) {
+  if (!ownerId) return { deleted: 0 };
+  const result = await (await streamingHistoryCollection())
+    .deleteMany({ ownerId: String(ownerId) });
+  return { deleted: result.deletedCount || 0 };
 }
 
 export async function getStreamingResume(ownerId, { sourceId, itemId, kind }) {

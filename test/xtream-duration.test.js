@@ -1,6 +1,22 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { getXtreamSeriesEpisodes } from '../xtream.js';
+import { getXtreamMovieInfo, getXtreamSeriesEpisodes } from '../xtream.js';
+
+test('movie duration trusts the complete runtime instead of a shortened duration_secs field', async () => {
+  const originalFetch = global.fetch;
+  global.fetch = async () => new Response(JSON.stringify({ info: { duration: '02:00:00', duration_secs: 6600 } }), { status: 200 });
+  try {
+    assert.equal((await getXtreamMovieInfo({ _id: 'movie-duration', baseUrl: 'http://provider.test', username: 'u', password: 'p' }, '1')).seconds, 7200);
+  } finally { global.fetch = originalFetch; }
+});
+
+test('movie duration treats a small bare provider runtime as minutes', async () => {
+  const originalFetch = global.fetch;
+  global.fetch = async () => new Response(JSON.stringify({ info: { duration: '122' } }), { status: 200 });
+  try {
+    assert.equal((await getXtreamMovieInfo({ _id: 'movie-minutes', baseUrl: 'http://provider.test', username: 'u', password: 'p' }, '2')).seconds, 7320);
+  } finally { global.fetch = originalFetch; }
+});
 
 test('episode duration skips zero placeholders and uses valid fallback fields', async () => {
   const originalFetch = global.fetch;

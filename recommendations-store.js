@@ -35,6 +35,18 @@ export async function getLatestRecommendationCache(ownerId, language, algorithmV
   );
 }
 
+// The cache is keyed by ownerId+language+algorithmVersion, but candidates
+// are drawn from whichever provider was active when it was generated - it
+// never re-checks that. Switching the active provider silently strands the
+// old recommendations pointing at a catalog that mostly no longer applies
+// (see rokuDiscoveryItem's sourceId filter), so callers that change a
+// profile's active source must invalidate its cache to force a fresh
+// generation against the new provider instead of a near-empty stale one.
+export async function deleteRecommendationCacheForOwner(ownerId) {
+  if (!ownerId) return;
+  await (await collection()).deleteMany({ ownerId: String(ownerId) });
+}
+
 export async function saveRecommendationCache(entry) {
   const now = new Date();
   await (await collection()).updateOne(

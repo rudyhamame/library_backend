@@ -147,22 +147,33 @@ function candidateScore(item, evidence, language) {
 async function candidatePool({ sources, savedItems, evidence, language, getCatalog, getCategories }) {
   const saved = new Set(savedItems.map(itemIdentity));
   const candidates = new Map();
-  for (const source of sources) for (const type of ['series', 'movie']) {
+  // Every (source, type) pair is fetched independently below - if one
+  // provider is unreachable, its own retries/timeout run in parallel with the
+  // others instead of stacking onto the total wait (a single dead provider
+  // was pushing this endpoint past a minute, well over the client's timeout).
+  await Promise.all(sources.flatMap(source => ['series', 'movie'].map(async type => {
     let categories;
-    try { categories = await getCategories(source, type); } catch { continue; }
+    try { categories = await getCategories(source, type); } catch { return; }
     const rankedCategories = (Array.isArray(categories) ? categories : [])
       .map(category => ({ ...category, score: categoryPriority(category, evidence, language) }))
       .sort((a, b) => b.score - a.score || String(a.name).localeCompare(String(b.name)));
-    for (const category of rankedCategories) {
-      let rows;
-      try { rows = await getCatalog(source, type, category.id); } catch { continue; }
-      for (const row of Array.isArray(rows) ? rows : []) {
-        const item = { ...row, id: String(row.id), sourceId: String(source._id), sourceName: source.name, providerName: source.name, type, category: category.name || row.category || 'Other' };
-        const identity = itemIdentity(item);
-        if (!item.id || saved.has(identity) || candidates.has(identity) || !languageCompatible(inferItemLanguage(item), language)) continue;
-        item.localScore = candidateScore(item, evidence, language);
-        candidates.set(identity, item);
-      }
+    // Categories are fetched in small concurrent batches (highest-priority
+    // first, order preserved within each batch) instead of one-by-one - each
+    // fetch is a network round trip to the provider, and this endpoint was
+    // taking 60-100s serially, well past the Android client's timeout.
+    const batchSize = 6;
+    for (let start = 0; start < rankedCategories.length; start += batchSize) {
+      const batch = rankedCategories.slice(start, start + batchSize);
+      const batchRows = await Promise.all(batch.map(category => getCatalog(source, type, category.id).catch(() => [])));
+      batch.forEach((category, index) => {
+        for (const row of Array.isArray(batchRows[index]) ? batchRows[index] : []) {
+          const item = { ...row, id: String(row.id), sourceId: String(source._id), sourceName: source.name, providerName: source.name, type, category: category.name || row.category || 'Other' };
+          const identity = itemIdentity(item);
+          if (!item.id || saved.has(identity) || candidates.has(identity) || !languageCompatible(inferItemLanguage(item), language)) continue;
+          item.localScore = candidateScore(item, evidence, language);
+          candidates.set(identity, item);
+        }
+      });
       const languageCounts = { ar: 0, en: 0 };
       if (language === 'both') for (const candidate of candidates.values()) {
         const code = inferItemLanguage(candidate); if (code === 'ar' || code === 'en') languageCounts[code] += 1;
@@ -170,7 +181,7 @@ async function candidatePool({ sources, savedItems, evidence, language, getCatal
       const bilingualReady = languageCounts.ar >= AI_LIMITS.output * 2 && languageCounts.en >= AI_LIMITS.output * 2;
       if (language === 'both' ? bilingualReady : candidates.size >= AI_LIMITS.candidates * 6) break;
     }
-  }
+  })));
   const ranked = [...candidates.values()].sort((a, b) => b.localScore - a.localScore || itemIdentity(a).localeCompare(itemIdentity(b)));
   if (language !== 'both') return ranked.slice(0, AI_LIMITS.candidates);
   const quota = Math.floor(AI_LIMITS.candidates / 2);

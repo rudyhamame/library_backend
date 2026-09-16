@@ -9,27 +9,27 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { shapeArabicForRoku } from './arabic-shaper.js';
-import { createXtreamSource, deleteXtreamSource, getAllXtreamSources, getXtreamSource, getXtreamSources, publicXtreamSource, updateXtreamSelection, updateXtreamSource } from './xtream-store.js';
-import { evictXtreamCache, getXtreamCatalog, getXtreamCategories, getXtreamMovieInfo, getXtreamSeriesEpisodes, validateXtreamConnection, xtreamCacheStats, xtreamProviderUrl } from './xtream.js';
+import { arabicSearchRegexSource, normalizeArabicSearch } from './arabic-search.js';
+import { markProviderCatalogFailure } from './provider-catalog-store.js';
+import { createXtreamSource, deleteXtreamSource, flattenSelection, getAllXtreamSources, getXtreamSource, getXtreamSources, publicXtreamSource, selectionFor, updateXtreamSelection, updateXtreamSource } from './xtream-store.js';
+import { evictXtreamCache, getXtreamCatalog, getXtreamCategories, getXtreamSeriesEpisodes, validateXtreamConnection, xtreamCacheStats, xtreamProviderUrl } from './xtream.js';
 import { evictM3uCache, getM3uCatalog, getM3uCategories, m3uCacheStats, m3uProviderUrl, validateM3uConnection } from './m3u.js';
 import { MediaCapacityError, MediaJobManager, defaultMediaLimits, memoryPressure } from './media-job-manager.js';
 import { HlsStrategy, PlaybackStrategy, choosePlaybackStrategy, determineHlsStrategy, hlsCodecArgs } from './playback-strategy.js';
-import { getStreamingContinueWatching, getStreamingHistory, getStreamingResume, saveStreamingHistory } from './streaming-history-store.js';
+import { clearStreamingHistory, deleteStreamingSession, getStreamingContinueWatching, getStreamingHistory, getStreamingResume, saveStreamingHistory } from './streaming-history-store.js';
 import { getFavorites, toggleFavorite } from './favorites-store.js';
 import { getSeriesWatchOverride, toggleSeriesWatchOverride } from './series-watch-overrides.js';
-import { authorizeDeviceSession, changeAccountPassword, claimAutomaticPairing, createDeviceSession, deleteAccount, getAccountBasicInfo, getDeviceWeatherLocations, getLinkedDevices, getPairingInfo, getPartnerEmail, getRokuDeviceSessionStatus, getRokuSourcePreference, getRokuSourcePreferenceByOwner, isAccountOnline, isRokuSessionLinked, listAllLinkedDevices, loginAccount, loginDeviceSession, recordDeviceHeartbeat, registerAccount, registerBrowserDevice, resolveAccountByEmail, resolveDeviceToken, saveDeviceWeatherLocations, selectAccountProfile, setPartnerEmail, setRokuSourcePreference, setupDeviceSession, unlinkAccountDevice } from './device-sessions.js';
-import { getTailscalePeersByIp } from './tailscale-devices.js';
-import { createAccountProfile, deleteAccountProfile, getAccountProfile, getAccountProfiles, updateAccountProfile } from './account-profile-store.js';
+import { accountOwnerId, profileOwnerId } from './account-library-owner.js';
+import { authorizeDeviceSession, autoLoginDeviceSession, castHandoffLink, changeAccountPassword, claimAutomaticPairing, confirmPasswordReset, createDeviceSession, deleteAccount, getAccountBasicInfo, getDeviceWeatherLocations, getLinkedDevices, getPairingInfo, getRokuDeviceSessionStatus, getRokuSourcePreferenceByOwner, initializeAccountDatabases, isProfileOnline, isRokuSessionLinked, listAllAccountsBasic, listAllLinkedDevices, loginAccount, loginDeviceSession, recordDeviceHeartbeat, registerAccount, registerBrowserDevice, requestPasswordReset, resolveAccountByEmail, resolveDeviceToken, saveDeviceWeatherLocations, selectAccountProfile, setupDeviceSession, unlinkAccountDevice } from './device-sessions.js';
+import { createAccountProfile, deleteAccountProfile, ensureDefaultProfile, getAccountProfile, getAccountProfiles, getProfileByCode, getProfilePartnerCode, getProfilePartnerEmail, setProfilePartnerEmail, setProfileRokuSourcePreference, updateAccountProfile } from './account-profile-store.js';
 import { createLibraryCategory, deleteLibraryCategory, getManagedLibrary, renameLibraryCategory, replaceLibraryCategoryItems } from './library-category-store.js';
 import { enforceLibraryOnly } from './library-route-policy.js';
 import { checkPlaylistSources } from './playlist-health.js';
-import { AI_RECOMMENDATION_VERSION, getAiRecommendations } from './ai-recommendations.js';
-import { getLatestRecommendationCache } from './recommendations-store.js';
-import { backdropVideoFile, ensureBackdropRoot, getRecommendationBackdrop } from './recommendation-backdrop.js';
+import { backdropVideoFile, ensureBackdropRoot, getRecommendationBackdrop, listBackdrops } from './recommendation-backdrop.js';
 import { getAndroidStartupSnapshot, saveAndroidStartupSnapshot } from './android-startup-store.js';
-import { normalizePlaylistRules, playlistRuleEnabled } from './playlist-rules.js';
+import { providerPlaybackUrlIsUsable, resolveProviderMediaId, resolveProviderTitle } from './provider-playback-fields.js';
 import { acquireProviderStreamLease } from './provider-stream-leases.js';
-import { deleteProviderCatalog, getProviderCatalogCategories, getProviderCatalogItems, getProviderCatalogItemsByIds, getProviderCatalogItemsForCategory, getProviderCatalogLanguagePrefixes, getProviderCatalogMeta, getProviderCatalogRails, listProviderCatalogMeta, queryProviderCatalogItems, replaceProviderCatalog, replaceProviderCatalogCategories } from './provider-catalog-store.js';
+import { deleteProviderCatalog, getProviderCatalogCategories, getProviderCatalogItem, getProviderCatalogItems, getProviderCatalogItemsByIds, getProviderCatalogItemsForCategory, getProviderCatalogLanguagePrefixes, getProviderCatalogMeta, getProviderCatalogRails, getProviderMediaMetadataByIds, hydrateContinueWatchingArtwork, listProviderCatalogMeta, queryProviderCatalogItems, recordProviderCatalogDuration, replaceProviderCatalog, replaceProviderCatalogCategories, replaceProviderSeriesEpisodes } from './provider-catalog-store.js';
 
 const app = express();
 app.use(enforceLibraryOnly);
@@ -40,6 +40,7 @@ const playlistHealthInFlight = new Map();
 const playlistHealthTtlMs = Math.max(10_000, Number.parseInt(process.env.PLAYLIST_HEALTH_TTL_MS || '30000', 10) || 30_000);
 const arabicText = /[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]/;
 const rokuText = (value) => arabicText.test(String(value || '')) ? shapeArabicForRoku(value) : String(value || '');
+const forceRokuFullTranscode = String(process.env.ROKU_FORCE_FULL_TRANSCODE || 'false').toLowerCase() === 'true';
 // Provider category names carry junk clients can't render: bidi control marks
 // and dingbat/arrow/emoji prefixes (e.g. U+27A4 shows as an empty box).
 const CATEGORY_JUNK = /[\u061C\u200E-\u200F\u202A-\u202E\u2066-\u2069\uFEFF\u2190-\u21FF\u2200-\u23FF\u2460-\u27BF\u2B00-\u2BFF\uFE00-\uFE0F]|[\uD800-\uDBFF][\uDC00-\uDFFF]/g;
@@ -114,6 +115,46 @@ async function providerStreamBusy() {
   }
   return false;
 }
+// Ask the HLS streamers for a VOD runtime they learned while starting/serving
+// this title. Used by resolveMediaDuration so the length is available even
+// while playback holds the single provider stream slot.
+async function streamerMediaDuration(sourceId, kind, id) {
+  for (const port of streamBackendPorts) {
+    try {
+      const response = await fetch(
+        `http://127.0.0.1:${port}/internal/media-duration/${encodeURIComponent(sourceId)}/${encodeURIComponent(kind)}/${encodeURIComponent(id)}`,
+        { signal: AbortSignal.timeout(1500) },
+      );
+      if (!response.ok) continue;
+      const seconds = Math.max(0, Math.round(Number((await response.json())?.seconds) || 0));
+      if (seconds > 0) return seconds;
+    } catch { /* streamer down / unreachable */ }
+  }
+  return 0;
+}
+// Report the codec-matrix decision made by the streamer that is serving this
+// exact Roku title. This reads the streamer's existing job only: it never
+// probes the provider or opens a second media connection.
+async function streamerPlaybackStrategy(sourceId, kind, id) {
+  const results = await Promise.allSettled(streamBackendPorts.map(async port => {
+    const response = await fetch(`http://127.0.0.1:${port}/internal/active-streams`, { signal: AbortSignal.timeout(1500) });
+    if (!response.ok) return [];
+    return (await response.json())?.streams || [];
+  }));
+  const matches = results.flatMap(result => result.status === 'fulfilled' ? result.value : [])
+    .filter(stream => String(stream.sourceId || '') === String(sourceId)
+      && String(stream.kind || '') === String(kind)
+      && String(stream.itemId || '') === String(id)
+      && String(stream.client || '').toLowerCase() === 'roku')
+    .sort((left, right) => Date.parse(right.lastAccessAt || right.startedAt || 0) - Date.parse(left.lastAccessAt || left.startedAt || 0));
+  const active = matches[0];
+  if (!active) return { playbackStrategy: '', videoMode: '', audioMode: '' };
+  return {
+    playbackStrategy: String(active.strategy || ''),
+    videoMode: String(active.videoMode || ''),
+    audioMode: String(active.audioMode || ''),
+  };
+}
 const hlsMaxSegments = Math.max(12, Number.parseInt(process.env.HLS_MAX_SEGMENTS || '36', 10) || 36);
 const mediaStreamIdleTimeoutMs = Math.max(10_000, Number.parseInt(process.env.MEDIA_STREAM_IDLE_TIMEOUT_MS || '45000', 10) || 45_000);
 const libraryRevisions = new Map();
@@ -136,8 +177,8 @@ const mediaDurationCacheMaxEntries = 2_000;
 const mediaDurationCacheTtlMs = 7 * 24 * 60 * 60 * 1000;
 const streamTicketSecret = process.env.DEVICE_AUTH_SECRET || 'local-development-secret-change-before-production';
 
-function issueStreamTicket(ownerId, sourceId, kind, id, ttlMs = 5 * 60_000) {
-  const payload = Buffer.from(JSON.stringify({ ownerId, sourceId, kind, id, exp: Date.now() + ttlMs })).toString('base64url');
+function issueStreamTicket(ownerId, accountOwner, sourceId, kind, id, ttlMs = 5 * 60_000) {
+  const payload = Buffer.from(JSON.stringify({ ownerId, accountOwnerId: accountOwner, sourceId, kind, id, exp: Date.now() + ttlMs })).toString('base64url');
   const signature = createHmac('sha256', streamTicketSecret).update(payload).digest('base64url');
   return `${payload}.${signature}`;
 }
@@ -158,6 +199,16 @@ const getSourceCatalog = (source, kind, category = 'all') => sourceType(source) 
 const getSourceCategories = (source, kind) => sourceType(source) === 'm3u' ? getM3uCategories(source, kind) : getXtreamCategories(source, kind);
 const sourceProviderUrl = (source, kind, id, extension = '') => sourceType(source) === 'm3u' ? m3uProviderUrl(source, kind, id) : xtreamProviderUrl(source, kind, id, extension);
 
+async function getIndexedXtreamSeriesEpisodes(source, seriesId) {
+  const details = await getXtreamSeriesEpisodes(source, seriesId);
+  const episodes = await Promise.all((details.episodes || []).map(async episode => ({
+    ...episode,
+    providerUrl: await sourceProviderUrl(source, 'series', episode.id, episode.extension),
+  })));
+  await replaceProviderSeriesEpisodes(source.ownerId, String(source._id), String(seriesId), details.title, episodes);
+  return { ...details, episodes };
+}
+
 // A MongoDB snapshot of each provider/kind catalog keeps provider traffic low:
 // a kind is downloaded from the provider at most once per TTL window no matter
 // how much the clients browse, and the last good snapshot keeps serving when
@@ -177,13 +228,23 @@ function refreshCatalogSnapshot(ownerId, source, kind) {
         return null;
       }),
     ]);
-    await replaceProviderCatalog(ownerId, String(source._id), source.name, kind, catalog);
+    const storedCatalog = await Promise.all(catalog.map(async item => ({
+      ...item,
+      // Mongo is the searchable index. Playable rows retain the provider URL
+      // that Roku will use after finding/saving an item. A series row is a
+      // show, not media; its episode URLs are added when details are expanded.
+      providerUrl: kind === 'series' ? '' : await sourceProviderUrl(source, kind, item.id, item.extension),
+    })));
+    await replaceProviderCatalog(ownerId, String(source._id), source.name, kind, storedCatalog);
     if (Array.isArray(categories)) {
       await replaceProviderCatalogCategories(ownerId, String(source._id), kind,
         categories.map(entry => ({ id: String(entry.id), name: cleanCategoryName(entry.name) })));
     }
   })()
-    .catch(error => console.warn(`[Catalog] snapshot refresh failed source=${source._id} kind=${kind}: ${error.message}`))
+    .catch(async error => {
+      await markProviderCatalogFailure(ownerId, String(source._id), kind).catch(() => {});
+      console.warn(`[Catalog] snapshot refresh failed source=${source._id} kind=${kind}: ${error.message}`);
+    })
     .finally(() => catalogSnapshotJobs.delete(key));
   catalogSnapshotJobs.set(key, job);
   return job;
@@ -198,7 +259,7 @@ async function ensureCatalogSnapshot(ownerId, source, kind) {
   if (Date.now() - syncedAt > CATALOG_SNAPSHOT_TTL_MS) void refreshCatalogSnapshot(ownerId, source, kind);
 }
 
-// Web app (rh.tailb5a10d.ts.net): serve strictly what MongoDB already holds.
+// Web app: serve strictly what MongoDB already holds.
 // The playlist provider is never contacted on a browse/category/rails request -
 // the snapshot is filled by the Roku bootstrap and the dashboard's catalog
 // controls. When nothing is stored yet the endpoint just returns empty.
@@ -348,9 +409,11 @@ async function probeMediaDuration(inputUrl) {
   });
 }
 
-async function resolveMediaDuration(source, kind, id, extension, knownDuration = '') {
-  const knownSeconds = durationSeconds(knownDuration);
-  if (knownSeconds > 0) return { seconds: knownSeconds, duration: displayDuration(knownSeconds), source: 'catalog' };
+async function resolveMediaDuration(source, kind, id, extension, seriesId = '') {
+  // Never trust a catalog/snapshot-stored duration as authoritative - only a
+  // live, bounded lookup against the provider itself (an already-running
+  // streamer probe, or a fresh ffprobe) counts. Providers commonly store
+  // placeholder/wrong durations in their catalog metadata.
   const cacheKey = `${source._id}:${kind}:${id}`;
   const cached = mediaDurationCache.get(cacheKey);
   if (cached?.expiresAt > Date.now()) return cached;
@@ -358,34 +421,25 @@ async function resolveMediaDuration(source, kind, id, extension, knownDuration =
   const pending = (async () => {
     let seconds = 0;
     let durationSource = 'probe';
-    if (kind === 'movie' && sourceType(source) === 'xtream') {
-      try {
-        const info = await getXtreamMovieInfo(source, id);
-        seconds = Number(info.seconds) || durationSeconds(info.duration);
-        if (seconds > 0) durationSource = 'xtream';
-      } catch (error) {
-        console.warn(`[Duration] movie-info-failed source=${source._id} id=${id} error=${error.message}`);
-      }
+    // The streamer probes the provider when it starts a title and remembers the
+    // runtime - ask it. This resolves the length WHILE the title is playing (the
+    // streamer holds the single provider slot, so our own probe would get "busy").
+    if (seconds <= 0) {
+      const fromStreamer = await streamerMediaDuration(String(source._id), kind, String(id));
+      if (fromStreamer > 0) { seconds = fromStreamer; durationSource = 'stream-probe'; }
     }
     if (seconds <= 0) {
-      // The ffprobe fallback opens a real connection to the provider - never
-      // let it contend with an active playback job on the same line. If the
-      // one-stream-per-provider slot is taken, skip probing this time WITHOUT
-      // caching the miss (the cache TTL is 7 days; caching a "busy" 0 would
-      // poison the duration for a week instead of just retrying next play).
-      const rules = normalizePlaylistRules(source?.rules);
-      let releaseLease;
-      if (rules.maxConcurrentStreams.enabled) {
-        releaseLease = await acquireProviderStreamLease(source._id, rules.maxConcurrentStreams.limit);
-        if (!releaseLease) return { seconds: 0, duration: '', source: 'busy' };
-      }
-      try {
-        const inputUrl = await sourceProviderUrl(source, kind, id, extension);
-        seconds = await probeMediaDuration(inputUrl);
-        durationSource = 'probe';
-      } finally {
-        await releaseLease?.();
-      }
+      // The ffprobe fallback opens a real provider connection, so optional
+      // metadata work stands down while any playback is active.
+      if (await providerStreamBusy()) return { seconds: 0, duration: '', source: 'busy' };
+      const inputUrl = await sourceProviderUrl(source, kind, id, extension);
+      seconds = await probeMediaDuration(inputUrl);
+      durationSource = 'probe';
+    }
+    // Persist a freshly-probed runtime for browse/display purposes only (card
+    // subtitles, etc.) - resolveMediaDuration itself never reads it back.
+    if (seconds > 0) {
+      recordProviderCatalogDuration(source.ownerId, String(source._id), kind, String(id), seconds).catch(() => {});
     }
     return cacheMediaDuration(cacheKey, seconds, durationSource);
   })().finally(() => mediaDurationInFlight.delete(cacheKey));
@@ -395,12 +449,15 @@ async function resolveMediaDuration(source, kind, id, extension, knownDuration =
 
 async function hydrateSeriesDurations(source, details) {
   const episodes = Array.isArray(details?.episodes) ? details.episodes : [];
+  const storedMedia = await getProviderMediaMetadataByIds(source.ownerId, String(source._id), 'series', episodes.map(episode => episode.id)).catch(() => []);
+  const storedById = new Map(storedMedia.map(item => [String(item.id), item]));
   const hydrated = episodes.map(episode => {
+    const stored = storedById.get(String(episode.id));
     const knownSeconds = durationSeconds(episode.duration);
-    if (knownSeconds > 0) return { ...episode, duration: displayDuration(knownSeconds) };
+    if (knownSeconds > 0) return { ...episode, duration: displayDuration(knownSeconds), videoCodec: stored?.videoCodec || '', audioCodec: stored?.audioCodec || '' };
     const cached = mediaDurationCache.get(`${source._id}:series:${episode.id}`);
-    if (cached?.expiresAt > Date.now() && cached.seconds > 0) return { ...episode, duration: cached.duration };
-    return { ...episode, duration: '' };
+    if (cached?.expiresAt > Date.now() && cached.seconds > 0) return { ...episode, duration: cached.duration, videoCodec: stored?.videoCodec || '', audioCodec: stored?.audioCodec || '' };
+    return { ...episode, duration: stored?.duration || '', videoCodec: stored?.videoCodec || '', audioCodec: stored?.audioCodec || '' };
   });
   return { ...details, episodes: hydrated };
 }
@@ -485,6 +542,33 @@ function mediaOwner(req) {
 function requestAccount(req) {
   const token = String(req.get('x-device-token') || req.query.deviceToken || '');
   return resolveDeviceToken(token)?.accountId || null;
+}
+
+function requestAccountRealm(req) {
+  const token = String(req.get('x-device-token') || req.query.deviceToken || '');
+  return resolveDeviceToken(token)?.realm === 'general' ? 'general' : 'roku';
+}
+
+function requestAccountOwner(req) {
+  const accountId = requestAccount(req);
+  return accountId && /^[a-f0-9]{24}$/i.test(accountId) ? accountOwnerId(accountId) : requestOwner(req);
+}
+
+function requestProfile(req) {
+  const token = String(req.get('x-device-token') || req.query.deviceToken || '');
+  return resolveDeviceToken(token)?.profileId || null;
+}
+
+// Always profile-scoped, even for the default profile (whose token.ownerId is
+// the account-wide owner). Streaming history uses this so every profile keeps
+// its own watch history. Non-default profiles already resolve to the same value
+// as requestOwner, so their existing history is unaffected.
+function requestProfileOwner(req) {
+  const session = resolveDeviceToken(String(req.get('x-device-token') || req.query.deviceToken || ''));
+  if (session?.accountId && /^[a-f0-9]{24}$/i.test(String(session.accountId)) && session?.profileId) {
+    return profileOwnerId(String(session.accountId), String(session.profileId));
+  }
+  return session?.ownerId || null;
 }
 
 function cityIsoMinute(timeZone) {
@@ -587,9 +671,14 @@ function durationSeconds(value) {
 function cacheMediaDuration(key, seconds, source) {
   const duration = displayDuration(seconds);
   mediaDurationCache.delete(key);
+  // A failed probe (seconds=0) is very often transient (provider hiccup,
+  // timeout) - caching that miss for the same week-long TTL as a real
+  // success would lock this title's playback out for a week over one bad
+  // attempt. Retry it again soon instead.
+  const ttl = seconds > 0 ? mediaDurationCacheTtlMs : 60_000;
   mediaDurationCache.set(key, {
     seconds, duration, source,
-    expiresAt: Date.now() + mediaDurationCacheTtlMs,
+    expiresAt: Date.now() + ttl,
   });
   while (mediaDurationCache.size > mediaDurationCacheMaxEntries) mediaDurationCache.delete(mediaDurationCache.keys().next().value);
   return { seconds, duration, source };
@@ -626,25 +715,47 @@ async function getAllXtreamItems(kind) {
 }
 
 function selectedXtreamItem(source, item) {
+  const kind = item.kind === 'episode' ? 'series' : String(item.kind || '');
+  const id = resolveProviderMediaId(item, item.kind);
   const suppliedCategory = String(item.category || item.categoryName || '').trim();
   // "test" is the source display name, not a media category. Never expose it
   // as a Roku filter when an old saved item is missing category metadata.
   const category = /^test$/i.test(suppliedCategory) || !suppliedCategory ? 'Other' : suppliedCategory;
+  const suppliedProviderUrl = providerPlaybackUrlIsUsable(item.providerUrl) ? String(item.providerUrl) : '';
+  const providerUrl = suppliedProviderUrl || String(
+    sourceType(source) === 'xtream' && kind !== 'series' && id
+      ? sourceProviderUrl(source, kind, id, item.extension)
+      : (providerPlaybackUrlIsUsable(item.url) ? item.url : '')
+  );
   return {
     ...item,
-    id: String(item.id),
+    id,
+    title: resolveProviderTitle(item, item.kind, id),
     kind: item.kind,
     sourceId: source._id,
     sourceName: source.name,
     category,
     language: item.language || detectXtreamLanguage(item, category),
     rokuCategory: item.rokuCategory || rokuText(category),
+    providerUrl,
   };
 }
 
-async function getLibrarySelectedItems(ownerId = null, requestedKind = '') {
+async function attachProviderUrls(items, sources) {
+  const byId = new Map((sources || []).map(source => [String(source._id), source]));
+  return Promise.all((items || []).map(async item => {
+    if (providerPlaybackUrlIsUsable(item.providerUrl)) return item;
+    const source = byId.get(String(item.sourceId || ''));
+    const id = resolveProviderMediaId(item, item.kind);
+    const kind = item.kind === 'episode' ? 'series' : String(item.kind || '');
+    if (!source || !id || !['series', 'movie', 'channel'].includes(kind)) return item;
+    return { ...item, id, title: resolveProviderTitle(item, item.kind, id), providerUrl: await sourceProviderUrl(source, kind, id, item.extension) };
+  }));
+}
+
+async function getLibrarySelectedItems(ownerId = null, requestedKind = '', accountOwner = ownerId) {
   if (!ownerId) return [];
-  const sources = await getAllXtreamSources(ownerId);
+  const sources = flattenSelection(await getAllXtreamSources(accountOwner), ownerId, accountOwner);
   const groups = sources.map(source => {
     const enabledItems = (Array.isArray(source.enabledItems) ? source.enabledItems : [])
       .filter(item => item?.kind && (!requestedKind || item.kind === requestedKind));
@@ -652,19 +763,19 @@ async function getLibrarySelectedItems(ownerId = null, requestedKind = '') {
     // MongoDB. Fetching a provider's entire catalog here to backfill one absent
     // logo made every page wait on an unrelated upstream request. Logo
     // enrichment belongs to the source import/update path, never this hot path.
-    return enabledItems.map(item => selectedXtreamItem(source, item));
+    return enabledItems.map(item => selectedXtreamItem(source, item)).filter(item => item.id);
   });
   return groups.flat();
 }
 
-async function getRokuSelectedItems(kind, ownerId = null) {
+async function getRokuSelectedItems(kind, ownerId = null, accountOwner = ownerId, requestedSourceId = '') {
   // The managed Library is the category source of truth. Provider categories
   // only seed it; Roku never recomputes rails from the provider after that.
   if (!ownerId) return [];
-  const suppliedItems = await getLibrarySelectedItems(ownerId, kind);
+  const suppliedItems = await getLibrarySelectedItems(ownerId, kind, accountOwner);
   const managed = await getManagedLibrary(ownerId, suppliedItems, kind);
-  const selectedSourcePreference = await getRokuSourcePreferenceByOwner(ownerId);
-  const selectedSourceId = pickRokuSourceId(selectedSourcePreference, await getAllXtreamSources(ownerId));
+  const selectedSourcePreference = String(requestedSourceId || '') || await getRokuSourcePreferenceByOwner(ownerId);
+  const selectedSourceId = pickRokuSourceId(selectedSourcePreference, await getAllXtreamSources(accountOwner));
   return managed.categories.flatMap(category => category.items.map(item => ({
     ...item,
     category: category.name,
@@ -727,19 +838,27 @@ function rokuDiscoveryItem(item) {
 }
 
 function rokuXtreamStreamFormat(extension = '') {
-  return ['mp4', 'm4v', 'mov'].includes(String(extension).toLowerCase()) ? 'mp4' : 'hls';
+  if (forceRokuFullTranscode) return 'hls';
+  const ext = String(extension).toLowerCase();
+  if (ext === 'mkv') return 'mkv';
+  return ['mp4', 'm4v', 'mov'].includes(ext) ? 'mp4' : 'hls';
 }
 
 function rokuXtreamPlaybackPath(sourceId, kind, id, extension = '') {
   const ext = String(extension || '').replace(/[^a-z0-9]/gi, '').toLowerCase();
-  if (rokuXtreamStreamFormat(ext) === 'mp4') {
+  if (forceRokuFullTranscode) {
+    const query = new URLSearchParams({ hlsFallback: 'full' });
+    if (ext) query.set('ext', ext);
+    return `/api/xtream/hls/${encodeURIComponent(sourceId)}/${kind}/${encodeURIComponent(id)}/master.m3u8?${query}`;
+  }
+  if (rokuXtreamStreamFormat(ext) !== 'hls' && kind !== 'channel') {
     return `/api/xtream/play/${encodeURIComponent(sourceId)}/${kind}/${encodeURIComponent(id)}${ext ? `?ext=${encodeURIComponent(ext)}` : ''}`;
   }
   return `/api/xtream/hls/${encodeURIComponent(sourceId)}/${kind}/${encodeURIComponent(id)}/master.m3u8${ext ? `?ext=${encodeURIComponent(ext)}` : ''}`;
 }
 
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '2mb' })); // profile pictures + WWP host avatar are ~1MB data URIs
 
 // Verify the actual Roku credential, not merely process availability. This
 // keeps the Library backend indicator from showing green when the saved token
@@ -770,20 +889,15 @@ async function ownerPlaylistHealth(ownerId, { force = false } = {}) {
   if (playlistHealthInFlight.has(ownerId)) return playlistHealthInFlight.get(ownerId);
   const request = (async () => {
     const sources = await getAllXtreamSources(ownerId);
-    const checkedSources = sources.filter(source => !playlistRuleEnabled(source, 'suppressAutomaticHealthChecks'));
-    const health = await checkPlaylistSources(checkedSources, source => (
+    const health = await checkPlaylistSources(sources, source => (
       sourceType(source) === 'm3u' ? validateM3uConnection(source) : validateXtreamConnection(source)
     ));
-    const skippedSources = sources.filter(source => playlistRuleEnabled(source, 'suppressAutomaticHealthChecks'));
-    const online = health.online + skippedSources.length;
+    const online = health.online;
     const status = sources.length === 0 ? 'not_saved' : health.failed > 0 ? (online > 0 ? 'degraded' : 'offline') : 'online';
     const payload = {
       ...health,
       ok: status === 'online', status, total: sources.length, online,
-      results: [
-        ...health.results.map(({ sourceId, ok }) => ({ sourceId, ok })),
-        ...skippedSources.map(source => ({ sourceId: String(source._id), ok: true, skipped: true })),
-      ],
+      results: health.results.map(({ sourceId, ok }) => ({ sourceId, ok })),
       checkedAt: new Date().toISOString(),
     };
     playlistHealthCache.set(ownerId, { payload, expiresAt: Date.now() + playlistHealthTtlMs });
@@ -802,7 +916,8 @@ app.get('/api/roku/playlist-health', async (req, res) => {
     const session = resolveDeviceToken(token);
     if (!await isRokuSessionLinked(session)) return res.status(401).json({ ok: false, status: 'not_paired' });
     res.set('Cache-Control', 'no-store');
-    const { results: _results, ...summary } = await ownerPlaylistHealth(session.ownerId);
+    const healthOwner = session.accountId ? accountOwnerId(session.accountId) : session.ownerId;
+    const { results: _results, ...summary } = await ownerPlaylistHealth(healthOwner);
     res.json(summary);
   } catch (error) {
     res.status(503).json({ ok: false, status: 'unavailable', error: error.message });
@@ -811,7 +926,7 @@ app.get('/api/roku/playlist-health', async (req, res) => {
 
 app.get('/api/playlist-health', async (req, res) => {
   try {
-    const ownerId = requestOwner(req);
+    const ownerId = requestAccountOwner(req);
     if (!ownerId) return res.status(401).json({ ok: false, status: 'unauthorized' });
     res.set('Cache-Control', 'no-store');
     res.json(await ownerPlaylistHealth(ownerId, { force: req.query.refresh === '1' }));
@@ -820,14 +935,15 @@ app.get('/api/playlist-health', async (req, res) => {
   }
 });
 
-// The Roku displays a short-lived QR/device code. The phone signs up or signs
-// in, then the Roku polls for approval and receives its token automatically.
+
+// Roku account authentication stays entirely on-TV. Once authenticated, the
+// same endpoint returns an Android-app-only QR used strictly for remote pairing.
 app.post('/api/roku/device-session', async (req, res) => {
   try {
     const deviceId = String(req.body?.deviceId || '').trim();
     if (!deviceId) return res.status(400).json({ error: 'deviceId is required' });
     const token = String(req.get('x-device-token') || req.query.deviceToken || '');
-    res.json(await createDeviceSession(deviceId, frontendUrl, token));
+    res.json(await createDeviceSession(deviceId, token));
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 app.get('/api/roku/device-session', async (req, res) => {
@@ -835,7 +951,7 @@ app.get('/api/roku/device-session', async (req, res) => {
     const deviceId = String(req.query.deviceId || '').trim();
     if (!deviceId) return res.status(400).json({ error: 'deviceId is required' });
     const token = String(req.get('x-device-token') || req.query.deviceToken || '');
-    res.json(await createDeviceSession(deviceId, frontendUrl, token));
+    res.json(await createDeviceSession(deviceId, token));
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 app.get('/api/roku/device-session/status', async (req, res) => {
@@ -862,9 +978,9 @@ app.post('/api/device-session/info', async (req, res) => {
     res.json(session);
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
-app.post('/api/device-session/claim', (req, res) => {
+app.post('/api/device-session/claim', async (req, res) => {
   try {
-    const result = claimAutomaticPairing(req.body?.code);
+    const result = await claimAutomaticPairing(req.body?.code);
     if (result.error) return res.status(result.error.includes('expired') ? 404 : 401).json(result);
     res.json(result);
   } catch (error) { res.status(500).json({ error: error.message }); }
@@ -873,6 +989,13 @@ app.post('/api/device-session/authorize', async (req, res) => {
   try {
     const result = await authorizeDeviceSession(req.body?.code, req.get('x-device-token'));
     if (result.error) return res.status(result.error.includes('expired') ? 404 : result.error.includes('different') ? 409 : 401).json(result);
+    res.json(result);
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+app.post('/api/device-session/auto-login', async (req, res) => {
+  try {
+    const result = await autoLoginDeviceSession(req.body?.code);
+    if (result.error) return res.status(result.error.includes('expired') ? 404 : 401).json(result);
     res.json(result);
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
@@ -891,20 +1014,45 @@ app.post('/api/device-session/login', async (req, res) => {
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
+// Roku certification requires authentication to be completed on the TV. This
+// endpoint keeps the existing short-lived, device-bound session model, but
+// returns only the Roku token after credentials have been validated. It never
+// returns the browser token produced by the shared account helper.
+app.post('/api/roku/device-session/on-device-auth', async (req, res) => {
+  try {
+    const code = String(req.body?.code || '').trim();
+    const mode = req.body?.mode === 'signup' ? 'signup' : 'signin';
+    const result = mode === 'signup'
+      ? await setupDeviceSession(code, req.body?.email, req.body?.password, req.body?.firstName, req.body?.lastName)
+      : await loginDeviceSession(code, req.body?.email, req.body?.password);
+    if (result.error) return res.status(result.error.includes('expired') ? 404 : result.error.includes('Incorrect') ? 401 : 400).json(result);
+    const rokuSession = await getRokuDeviceSessionStatus(code);
+    if (!rokuSession || rokuSession.status !== 'approved' || !rokuSession.token) {
+      return res.status(500).json({ error: 'Roku authorization could not be completed' });
+    }
+    res.set('Cache-Control', 'no-store');
+    res.json(rokuSession);
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
 app.get('/api/account/devices', async (req, res) => {
   try {
     const accountId = requestAccount(req);
     if (!accountId) return res.status(401).json({ error: 'Sign in to view linked devices' });
     const devices = await getLinkedDevices(accountId, resolveDeviceToken(String(req.get('x-device-token') || ''))?.profileId || '');
-    const tailscalePeers = await getTailscalePeersByIp();
-    res.json({ items: devices.map(device => ({ ...device, tailscaleHostname: tailscalePeers.get(device.lastClientIp)?.hostName || '' })) });
+    res.json({ items: devices });
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 app.post('/api/roku/heartbeat', async (req, res) => {
   try {
     const session = resolveDeviceToken(String(req.get('x-device-token') || req.query.deviceToken || ''));
     if (!await isRokuSessionLinked(session)) return res.status(401).json({ error: 'Valid linked Roku authorization is required' });
-    await recordDeviceHeartbeat(session.deviceId, req.body?.streaming === true, clientAddress(req));
+    await recordDeviceHeartbeat(session.deviceId, req.body?.streaming === true, clientAddress(req), {
+      // Roku's FormatJson lowercases keys.
+      lanIp: req.body?.lanIp || req.body?.lanip || '',
+      ecpAppId: req.body?.ecpAppId || req.body?.ecpappid || '',
+      sourceId: req.body?.sourceId || req.body?.sourceid || '',
+    });
     res.json({ ok: true });
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
@@ -933,18 +1081,193 @@ app.delete('/api/account/devices/:deviceId', async (req, res) => {
     res.json(result);
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
+// "Play on Roku" hand-off. The phone queues a cast for one of its linked Roku
+// devices; the Roku channel polls /pending and redeems the one-time code for a
+// token bound to the *sender's* account + profile, then deep-links playback.
+// ponytail: in-memory Map, lost on restart (like partnerInvites); a queued
+// cast just needs to survive the ~seconds until the Roku polls.
+const castQueue = new Map(); // deviceId -> { code, accountId, profileId, item, exp }
+const CAST_TTL_MS = 2 * 60 * 1000;
+function pruneCastQueue() { const now = Date.now(); for (const [id, e] of castQueue) if (e.exp < now) castQueue.delete(id); }
+
+// Remote control for a cast already on screen (pause/play/seek), delivered
+// through the same poll the Roku already runs during playback. One-shot:
+// cleared the moment the Roku's next poll picks it up.
+const castControlQueue = new Map(); // deviceId -> { action, value, exp }
+const CAST_CONTROL_TTL_MS = 15 * 1000;
+function pruneCastControlQueue() { const now = Date.now(); for (const [id, e] of castControlQueue) if (e.exp < now) castControlQueue.delete(id); }
+
+async function releaseAndroidProviderForRoku(sourceId) {
+  const port = String(process.env.ANDROID_STREAM_BACKEND_PORT || '8788').trim();
+  const response = await fetch(`http://127.0.0.1:${port}/internal/streams/android-handoff`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ sourceId }),
+    signal: AbortSignal.timeout(12_000),
+  });
+  if (!response.ok) throw new Error(`Android streamer rejected handoff (HTTP ${response.status})`);
+  const result = await response.json();
+  console.log(`[Roku cast] released Android provider jobs source=${sourceId} stopped=${Number(result?.stopped) || 0}`);
+}
+
+function canonicalCastDisplay(kind, suppliedTitle) {
+  const title = String(suppliedTitle || '').trim();
+  if (kind !== 'series') return { title };
+  // Android releases have used both "Series (12)" and "Series [E12]".
+  // Normalize at the handoff boundary so Roku always receives one canonical
+  // player title and structured fields, never a duplicated episode suffix.
+  const match = title.match(/^(.*?)\s*(?:\[E\s*(\d+)\]|\(E?\s*(\d+)\))\s*$/i);
+  if (!match) return { title, seriesTitle: title, episodeNumber: '' };
+  const seriesTitle = String(match[1] || '').trim();
+  const episodeNumber = String(match[2] || match[3] || '').trim();
+  return {
+    title: seriesTitle && episodeNumber ? `${seriesTitle} [E${episodeNumber}]` : title,
+    seriesTitle,
+    episodeNumber,
+  };
+}
+
+app.post('/api/roku/cast', async (req, res) => {
+  try {
+    const auth = resolveDeviceToken(String(req.get('x-device-token') || ''));
+    if (!auth?.accountId) return res.status(401).json({ error: 'Sign in to cast to Roku' });
+    const deviceId = String(req.body?.deviceId || '').trim();
+    const sourceId = String(req.body?.sourceId || '').trim();
+    const kind = String(req.body?.kind || '').trim();
+    const id = String(req.body?.id || '').trim();
+    if (!deviceId || !sourceId || !id || !['channel', 'movie', 'series'].includes(kind)) {
+      return res.status(400).json({ error: 'deviceId, sourceId, kind and id are required' });
+    }
+    const source = await getXtreamSource(sourceId, requestAccountOwner(req));
+    if (!source) return res.status(404).json({ error: 'Playlist source not found' });
+    const extension = String(req.body?.extension || '').trim();
+    const providerUrl = await sourceProviderUrl(source, kind, id, extension);
+    const display = canonicalCastDisplay(kind, req.body?.title);
+    const linked = await getLinkedDevices(auth.accountId, auth.profileId || '');
+    const targetDevice = linked.find(device => String(device.deviceId) === deviceId);
+    if (!targetDevice) {
+      return res.status(404).json({ error: 'That Roku is not linked to this account' });
+    }
+    // Finish every Android FFmpeg job holding this source before publishing
+    // the one-time cast. This ordering prevents Roku from redeeming while a
+    // stale phone job still owns the provider's single connection slot.
+    await releaseAndroidProviderForRoku(sourceId);
+    pruneCastQueue();
+    const castCode = randomBytes(9).toString('base64url');
+    castQueue.set(deviceId, {
+      code: castCode,
+      accountId: auth.accountId,
+      profileId: auth.profileId || '',
+      item: {
+        sourceId, kind, id,
+        extension,
+        providerUrl,
+        ...display,
+        durationSeconds: Number(req.body?.durationSeconds) || 0,
+      },
+      exp: Date.now() + CAST_TTL_MS,
+    });
+    // The one-time code lets a LAN ECP launch redeem immediately. Roku still
+    // polls the queue as a compatibility fallback when launch arguments are
+    // unavailable or the channel was already transitioning.
+    res.json({ ok: true, castCode });
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+app.get('/api/roku/cast/pending', (req, res) => {
+  pruneCastQueue();
+  pruneCastControlQueue();
+  const deviceId = String(req.query.deviceId || '').trim();
+  const entry = castQueue.get(deviceId);
+  const control = castControlQueue.get(deviceId);
+  if (control) castControlQueue.delete(deviceId);
+  res.set('Cache-Control', 'no-store');
+  if (entry?.stop) { castQueue.delete(deviceId); return res.json({ stop: true, ...(control ? { control } : {}) }); }
+  // Polling is intentionally unauthenticated so a cold-started Roku can find
+  // its handoff. Expose only the one-time redemption code and harmless display
+  // identity here; the provider URL (which can contain credentials) is returned
+  // only by the code-consuming /redeem request.
+  res.json({
+    ...(entry ? { cast: { code: entry.code, kind: entry.item.kind, id: entry.item.id, title: entry.item.title } } : {}),
+    ...(control ? { control } : {}),
+  });
+});
+
+// "Unsend" - the phone toggled Play-on-Roku off. Tell the Roku to stop and
+// return to Welcome on its next poll (one-shot; cleared when served).
+app.post('/api/roku/cast/stop', async (req, res) => {
+  try {
+    const auth = resolveDeviceToken(String(req.get('x-device-token') || ''));
+    if (!auth?.accountId) return res.status(401).json({ error: 'Sign in to control Roku' });
+    const deviceId = String(req.body?.deviceId || '').trim();
+    if (!deviceId) return res.status(400).json({ error: 'deviceId is required' });
+    const linked = await getLinkedDevices(auth.accountId, auth.profileId || '');
+    if (!linked.some(device => String(device.deviceId) === deviceId)) {
+      return res.status(404).json({ error: 'That Roku is not linked to this account' });
+    }
+    pruneCastQueue();
+    castQueue.set(deviceId, { stop: true, exp: Date.now() + CAST_TTL_MS });
+    res.json({ ok: true });
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+// Pause/play/seek a cast already on screen - delivered on the Roku's next
+// poll (same channel /cast/pending uses for stop), so no new Roku poll loop.
+app.post('/api/roku/cast/control', async (req, res) => {
+  try {
+    const auth = resolveDeviceToken(String(req.get('x-device-token') || ''));
+    if (!auth?.accountId) return res.status(401).json({ error: 'Sign in to control Roku' });
+    const deviceId = String(req.body?.deviceId || '').trim();
+    const action = String(req.body?.action || '').trim();
+    if (!deviceId || !['pause', 'play', 'seek'].includes(action)) {
+      return res.status(400).json({ error: 'deviceId and a valid action are required' });
+    }
+    const linked = await getLinkedDevices(auth.accountId, auth.profileId || '');
+    if (!linked.some(device => String(device.deviceId) === deviceId)) {
+      return res.status(404).json({ error: 'That Roku is not linked to this account' });
+    }
+    pruneCastControlQueue();
+    const value = action === 'seek' ? Number(req.body?.value) || 0 : undefined;
+    castControlQueue.set(deviceId, { action, value, exp: Date.now() + CAST_CONTROL_TTL_MS });
+    res.json({ ok: true });
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+app.post('/api/roku/cast/redeem', async (req, res) => {
+  try {
+    pruneCastQueue();
+    // Roku's FormatJson lowercases keys, so accept deviceid/deviceId both ways.
+    const deviceId = String(req.body?.deviceId || req.body?.deviceid || '').trim();
+    const code = String(req.body?.code || '');
+    const entry = castQueue.get(deviceId);
+    if (!entry || !code || code !== entry.code) return res.status(404).json({ error: 'Cast request expired' });
+    const linked = await castHandoffLink(deviceId, entry.accountId, entry.profileId);
+    if (linked.error) return res.status(400).json(linked);
+    castQueue.delete(deviceId);
+    await recordDeviceHeartbeat(deviceId, false, clientAddress(req));
+    res.set('Cache-Control', 'no-store');
+    res.json({ token: linked.token, profileName: linked.profileName, ...entry.item });
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
 app.post('/api/account/login', async (req, res) => {
   try {
-    const result = await loginAccount(req.body?.email, req.body?.password, req.body?.deviceId);
+    const realm = req.body?.realm === 'roku' ? 'roku' : 'general';
+    const result = await loginAccount(req.body?.email, req.body?.password, req.body?.deviceId, realm);
     if (result.error) return res.status(result.error.startsWith('Incorrect') ? 401 : 400).json(result);
     res.json(result);
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 app.post('/api/account/signup', async (req, res) => {
   try {
-    const result = await registerAccount(req.body?.email, req.body?.password, req.body?.firstName, req.body?.lastName);
+    const result = await registerAccount(req.body?.email, req.body?.password, req.body?.firstName, req.body?.lastName, 'general');
     if (result.error) return res.status(400).json(result);
-    res.status(201).json(result);
+    // Sign-up is also authentication. Return the same browser session payload
+    // as sign-in so a newly created account can continue without a second
+    // credential round-trip.
+    const session = await loginAccount(req.body?.email, req.body?.password, req.body?.deviceId || '', 'general');
+    if (session.error) return res.status(400).json(session);
+    res.status(201).json(session);
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 app.get('/api/account/profiles', async (req, res) => {
@@ -953,6 +1276,18 @@ app.get('/api/account/profiles', async (req, res) => {
     if (!accountId) return res.status(401).json({ error: 'Sign in to view profiles' });
     res.set('Cache-Control', 'no-store');
     res.json({ items: await getAccountProfiles(accountId) });
+  } catch (error) { res.status(Number(error?.status) || 500).json({ error: error.message }); }
+});
+app.get('/api/account/profiles/:profileId/avatar', async (req, res) => {
+  try {
+    const accountId = requestAccount(req);
+    if (!accountId) return res.status(401).json({ error: 'Sign in to view profile images' });
+    const profile = await getAccountProfile(accountId, req.params.profileId);
+    const match = String(profile?.avatarImage || '').match(/^data:image\/(jpeg|png|webp);base64,([A-Za-z0-9+/=]+)$/);
+    if (!match) return res.sendStatus(404);
+    res.set('Content-Type', `image/${match[1]}`);
+    res.set('Cache-Control', 'private, no-store');
+    res.send(Buffer.from(match[2], 'base64'));
   } catch (error) { res.status(Number(error?.status) || 500).json({ error: error.message }); }
 });
 app.post('/api/account/profiles', async (req, res) => {
@@ -987,8 +1322,8 @@ app.post('/api/account/profiles/:profileId/select', async (req, res) => {
     const authorization = resolveDeviceToken(String(req.get('x-device-token') || req.query.deviceToken || ''));
     const accountId = authorization?.accountId;
     if (!accountId) return res.status(401).json({ error: 'Sign in to choose a profile' });
-    const result = await selectAccountProfile(accountId, req.params.profileId, authorization);
-    if (result.error) return res.status(404).json(result);
+    const result = await selectAccountProfile(accountId, req.params.profileId, authorization, req.body?.pin);
+    if (result.error) return res.status(result.code === 'PROFILE_PIN_REQUIRED' ? 403 : 404).json(result);
     res.set('Cache-Control', 'no-store');
     res.json(result);
   } catch (error) { res.status(Number(error?.status) || 500).json({ error: error.message }); }
@@ -998,48 +1333,107 @@ app.get('/api/account/roku-source', async (req, res) => {
     const accountId = requestAccount(req);
     const ownerId = requestOwner(req);
     if (!accountId || !ownerId) return res.status(401).json({ error: 'Authentication required' });
-    const sources = await getAllXtreamSources(ownerId);
-    const savedSourceId = await getRokuSourcePreference(accountId);
+    const sources = await getAllXtreamSources(accountOwnerId(accountId));
+    const savedSourceId = await getRokuSourcePreferenceByOwner(ownerId);
     const sourceId = sources.some(source => String(source._id) === savedSourceId) ? savedSourceId : String(sources[0]?._id || '');
     res.set('Cache-Control', 'no-store');
-    res.json({ sourceId, items: sources.map(source => ({ id: source._id, name: source.name, type: source.type || 'xtream' })) });
+    const items = await Promise.all(sources.map(async source => {
+      let expiryDate = '';
+      if ((source.type || 'xtream') === 'xtream') {
+        try {
+          const info = await validateXtreamConnection(source, { attempts: 1, timeoutMs: 8_000 });
+          const expirySeconds = Number(info?.exp_date) || 0;
+          if (expirySeconds > 0) expiryDate = new Date(expirySeconds * 1000).toISOString().slice(0, 10);
+        } catch { /* Provider status is optional; keep the chooser responsive. */ }
+      }
+      // Include a lowercase alias because some Roku JSON bridges normalize
+      // associative-array keys when crossing the Task boundary.
+      return {
+        id: source._id,
+        name: source.name,
+        type: source.type || 'xtream',
+        expiryDate,
+        expiry: expiryDate,
+        connectionStatus: source.connectionStatus || 'unknown',
+        connectionMessage: source.connectionMessage || '',
+      };
+    }));
+    res.json({ sourceId, items });
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 async function saveRokuSourceRequest(req, res) {
   try {
     const accountId = requestAccount(req);
-    const ownerId = requestOwner(req);
+    const ownerId = requestAccountOwner(req);
+    const profileId = requestProfile(req);
     // Roku sends this as a query parameter (its PUT body is not reliably
     // delivered); browsers send a JSON body. Accept either.
     const sourceId = String(req.body?.sourceId ?? req.query?.sourceId ?? '').trim();
     if (!accountId || !ownerId) return res.status(401).json({ error: 'Authentication required' });
     if (sourceId && !await getXtreamSource(sourceId, ownerId)) return res.status(404).json({ error: 'Playlist source not found' });
-    res.json({ sourceId: await setRokuSourcePreference(accountId, sourceId) });
+    res.json({ sourceId: await setProfileRokuSourcePreference(accountId, profileId, sourceId) });
   } catch (error) { res.status(500).json({ error: error.message }); }
 }
 app.put('/api/account/roku-source', saveRokuSourceRequest);
 app.post('/api/account/roku-source', saveRokuSourceRequest);
+
+// A partner's account email only names their account, which can hold several
+// profiles - the profile code (see account-profile-store.js) pins down the
+// exact one. Still requires reciprocity: that specific profile must itself
+// list the host back as its partner, by email AND code, before this links.
+async function resolvePartnerProfile(partnerEmail, partnerCode, hostEmail, hostCode, realm = 'roku') {
+  if (!partnerEmail || !partnerCode || !hostEmail || !hostCode) return null;
+  const partner = await resolveAccountByEmail(partnerEmail, realm);
+  if (!partner) return null;
+  const raw = await getProfileByCode(partner.accountId, partnerCode);
+  if (!raw) return null;
+  const reciprocalEmail = await getProfilePartnerEmail(partner.accountId, raw.id);
+  const reciprocalCode = await getProfilePartnerCode(partner.accountId, raw.id);
+  if (reciprocalEmail !== hostEmail || reciprocalCode !== hostCode) return null;
+  return { partner, profile: raw };
+}
+
 app.get('/api/account/partner', async (req, res) => {
   try {
     const accountId = requestAccount(req);
+    const realm = requestAccountRealm(req);
     if (!accountId) return res.status(401).json({ error: 'Authentication required' });
+    const profileId = requestProfile(req);
     res.set('Cache-Control', 'no-store');
-    const partnerEmail = await getPartnerEmail(accountId);
-    if (!partnerEmail) return res.json({ partnerEmail: '', linked: false, online: false, name: '' });
-    const partner = await resolveAccountByEmail(partnerEmail);
+    const myProfile = profileId ? await getAccountProfile(accountId, profileId) : await ensureDefaultProfile(accountId);
+    const myProfileCode = myProfile?.code || '';
+    const partnerEmail = await getProfilePartnerEmail(accountId, profileId);
+    const partnerProfileCode = await getProfilePartnerCode(accountId, profileId);
+    if (!partnerEmail) return res.json({ partnerEmail: '', partnerProfileCode: '', myProfileCode, linked: false, online: false, name: '' });
+    const hostAccount = await getAccountBasicInfo(accountId, realm);
+    const resolved = await resolvePartnerProfile(partnerEmail, partnerProfileCode, hostAccount?.email || '', myProfileCode, realm);
     res.json({
       partnerEmail,
-      linked: Boolean(partner),
-      online: partner ? await isAccountOnline(partner.accountId) : false,
-      name: partner?.name || '',
+      partnerProfileCode,
+      myProfileCode,
+      linked: Boolean(resolved),
+      online: resolved ? await isProfileOnline(resolved.partner.accountId, resolved.profile.id) : false,
+      name: resolved?.profile.name || '',
+      avatarImage: resolved?.profile.avatarImage || '',
+      partnerProfileId: resolved?.profile.id || '',
     });
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 app.put('/api/account/partner', async (req, res) => {
   try {
     const accountId = requestAccount(req);
+    const realm = requestAccountRealm(req);
     if (!accountId) return res.status(401).json({ error: 'Authentication required' });
-    res.json({ partnerEmail: await setPartnerEmail(accountId, req.body?.partnerEmail) });
+    const email = String(req.body?.partnerEmail || '').trim();
+    const code = String(req.body?.partnerProfileCode || '').trim().toUpperCase();
+    if (email) {
+      const partner = await resolveAccountByEmail(email, realm);
+      if (!partner) throw new Error('No RH account uses that email address');
+      const profile = await getProfileByCode(partner.accountId, code);
+      if (!profile) throw new Error(`That account has no profile with code ${code || '?'}`);
+    }
+    const partnerEmail = await setProfilePartnerEmail(accountId, requestProfile(req), email, code);
+    res.json({ partnerEmail, partnerProfileCode: partnerEmail ? code : '' });
   } catch (error) { res.status(400).json({ error: error.message }); }
 });
 
@@ -1050,25 +1444,42 @@ app.put('/api/account/partner', async (req, res) => {
 app.post('/api/partner/invite', async (req, res) => {
   try {
     const accountId = requestAccount(req);
+    const realm = requestAccountRealm(req);
     const ownerId = requestOwner(req);
-    if (!accountId || !ownerId) return res.status(401).json({ error: 'Authentication required' });
+    const accountOwner = requestAccountOwner(req);
+    const profileId = requestProfile(req);
+    if (!accountId || !ownerId || !accountOwner) return res.status(401).json({ error: 'Authentication required' });
     const { sourceId, kind, id, extension = '', title = '' } = req.body || {};
     if (!sourceId || !['channel', 'movie', 'series'].includes(kind) || !id) {
       return res.status(400).json({ error: 'sourceId, kind, and id are required' });
     }
-    const partnerEmail = await getPartnerEmail(accountId);
+    const partnerEmail = await getProfilePartnerEmail(accountId, profileId);
     if (!partnerEmail) return res.status(400).json({ error: 'Set a partner in Settings before inviting them' });
-    const partner = await resolveAccountByEmail(partnerEmail);
+    const partner = await resolveAccountByEmail(partnerEmail, realm);
     if (!partner) return res.status(404).json({ error: `No RH account found for ${partnerEmail}` });
-    const source = await getXtreamSource(sourceId, ownerId);
+    const source = await getXtreamSource(sourceId, accountOwner);
     if (!source) return res.status(404).json({ error: 'Playlist source not found' });
-    const hostAccount = await getAccountBasicInfo(accountId);
+    const hostAccount = await getAccountBasicInfo(accountId, realm);
+    const hostProfiles = await getAccountProfiles(accountId);
+    const selectedHostProfile = hostProfiles.find(profile => profile.id === profileId) || hostProfiles.find(profile => profile.isDefault) || hostProfiles[0];
+    const hostProfile = selectedHostProfile ? await getAccountProfile(accountId, selectedHostProfile.id) : null;
     const wwpSessionId = randomBytes(12).toString('base64url');
-    const streamTicket = issueStreamTicket(ownerId, String(sourceId), kind, String(id), wwpStreamTicketTtlMs);
+    const streamTicket = issueStreamTicket(ownerId, accountOwner, String(sourceId), kind, String(id), wwpStreamTicketTtlMs);
+    // The partner cannot resolve the VOD duration themselves (they do not own
+    // this source), so carry it in the invite. Trust the host's player value;
+    // fall back to a provider probe only when it did not send one.
+    let durationSeconds = Math.max(0, Math.round(Number(req.body?.durationSeconds) || 0));
+    if (!durationSeconds && kind !== 'channel') {
+      try {
+        const probed = await resolveMediaDuration(source, kind, String(id), extension);
+        durationSeconds = Math.max(0, Math.round(Number(probed?.seconds) || 0));
+      } catch { /* best effort - the partner's scrubber just stays open-ended */ }
+    }
     const invite = {
       wwpSessionId,
       hostOwnerId: ownerId,
-      hostName: hostAccount?.name || hostAccount?.email || 'Your partner',
+      hostName: hostProfile?.name || hostAccount?.name || hostAccount?.email || 'Your partner',
+      hostAvatar: /^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/.test(String(hostProfile?.avatarImage || req.body?.hostAvatar || '')) ? String(hostProfile?.avatarImage || req.body?.hostAvatar).slice(0, 1_500_000) : '',
       title: String(title || '').slice(0, 200),
       sourceId: String(sourceId),
       kind,
@@ -1076,11 +1487,17 @@ app.post('/api/partner/invite', async (req, res) => {
       extension: String(extension || ''),
       streamTicket,
       start: Math.max(0, Number(req.body?.start) || 0),
+      durationSeconds,
       quality: String(req.body?.quality || ''),
       expiresAt: Date.now() + wwpStreamTicketTtlMs,
     };
-    partnerInvites.set(partner.ownerId, invite);
-    bumpPartnerInviteRevision(partner.ownerId);
+    const hostEmail = hostAccount?.email || '';
+    const matchedProfiles = await reciprocalPartnerProfiles(partner.accountId, hostEmail);
+    if (matchedProfiles.length === 0) return res.status(409).json({ error: "Your partner hasn't added you on their end yet." });
+    for (const matched of matchedProfiles) {
+      partnerInvites.set(matched.raw.ownerId, invite);
+      bumpPartnerInviteRevision(matched.raw.ownerId);
+    }
     res.json({ ok: true, wwpSessionId, partnerEmail: partner.email });
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
@@ -1100,14 +1517,39 @@ app.get('/api/partner/invite', async (req, res) => {
 app.post('/api/account/password', async (req, res) => {
   try {
     const accountId = requestAccount(req);
-    const result = await changeAccountPassword(accountId, req.body?.currentPassword, req.body?.newPassword);
+    const result = await changeAccountPassword(accountId, req.body?.currentPassword, req.body?.newPassword, requestAccountRealm(req));
     if (result.error) return res.status(result.error.startsWith('Sign in') ? 401 : 400).json(result);
+    res.json(result);
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+app.post('/api/account/password-reset/request', async (req, res) => {
+  try {
+    const realm = req.body?.realm === 'roku' ? 'roku' : 'general';
+    const result = await requestPasswordReset(req.body?.email, realm);
+    if (result.error) return res.status(400).json(result);
+    res.json(result);
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+app.post('/api/account/password-reset/confirm', async (req, res) => {
+  try {
+    const result = await confirmPasswordReset(req.body?.code, req.body?.newPassword);
+    if (result.error) return res.status(result.error.includes('expired') ? 404 : 400).json(result);
     res.json(result);
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 app.delete('/api/account', async (req, res) => {
   try {
-    const result = await deleteAccount(requestAccount(req), req.body?.password);
+    const result = await deleteAccount(requestAccount(req), req.body?.password, requestAccountRealm(req));
+    if (result.error) return res.status(result.error.startsWith('Sign in') ? 401 : 400).json(result);
+    res.json(result);
+  } catch (error) { res.status(Number(error?.status) || 500).json({ error: error.message }); }
+});
+// The Roku on-device DashboardTask only issues GET/POST/PUT requests, so the
+// Roku channel's Settings "Delete Account" uses this POST alias instead of
+// the DELETE route above (same deleteAccount() call, same requirements).
+app.post('/api/account/delete', async (req, res) => {
+  try {
+    const result = await deleteAccount(requestAccount(req), req.body?.password, requestAccountRealm(req));
     if (result.error) return res.status(result.error.startsWith('Sign in') ? 401 : 400).json(result);
     res.json(result);
   } catch (error) { res.status(Number(error?.status) || 500).json({ error: error.message }); }
@@ -1178,11 +1620,12 @@ app.get('/internal/devices', async (req, res) => {
     const devices = await listAllLinkedDevices();
     const sourceNameCache = new Map();
     const rows = await Promise.all(devices.map(async device => {
+      const displayedSourceId = device.streamingProviderId || device.rokuSourceId;
       let providerName = '';
-      if (device.rokuSourceId && device.accountOwnerId) {
-        const cacheKey = `${device.accountOwnerId}:${device.rokuSourceId}`;
+      if (displayedSourceId && device.accountOwnerId) {
+        const cacheKey = `${device.accountOwnerId}:${displayedSourceId}`;
         if (!sourceNameCache.has(cacheKey)) {
-          const source = await getXtreamSource(device.rokuSourceId, device.accountOwnerId).catch(() => null);
+          const source = await getXtreamSource(displayedSourceId, device.accountOwnerId).catch(() => null);
           sourceNameCache.set(cacheKey, source?.name || '');
         }
         providerName = sourceNameCache.get(cacheKey);
@@ -1194,11 +1637,17 @@ app.get('/internal/devices', async (req, res) => {
         label: device.kind === 'browser' || device.kind === 'android' ? device.label : `Roku ${String(device.deviceId || '').replace(/^roku-/, '').slice(-8).toUpperCase()}`,
         kind: device.kind,
         accountEmail: device.accountEmail,
+        profileId: device.profileId,
+        profileName: device.profileName,
+        profileOwnerId: device.profileOwnerId,
         providerId: device.rokuSourceId,
+        streamingProviderId: device.streamingProviderId,
         providerName,
         lastSeenAt: device.lastSeenAt,
         lastStreamingSeenAt: device.lastStreamingSeenAt,
         lastClientIp: device.lastClientIp,
+        lanIp: device.lanIp,
+        ecpAppId: device.ecpAppId,
         online: seenAgoMs != null && seenAgoMs <= 90_000,
         streamingHeartbeat: streamAgoMs != null && streamAgoMs <= 15_000,
         linkedAt: device.linkedAt,
@@ -1213,7 +1662,7 @@ app.get('/internal/devices', async (req, res) => {
 // for the operations dashboard (:8790). Scoped to the caller's account token.
 app.get('/api/xtream/catalog-snapshot', async (req, res) => {
   try {
-    const ownerId = requestOwner(req);
+    const ownerId = requestAccountOwner(req);
     if (!ownerId) return res.status(401).json({ error: 'Authentication required' });
     const sources = await getAllXtreamSources(ownerId);
     res.set('Cache-Control', 'no-store');
@@ -1243,7 +1692,7 @@ app.get('/api/xtream/catalog-snapshot', async (req, res) => {
 // running. Progress is read back via the `downloading` flag above.
 app.post('/api/xtream/sources/:id/download-catalog', async (req, res) => {
   try {
-    const ownerId = requestOwner(req);
+    const ownerId = requestAccountOwner(req);
     if (!ownerId) return res.status(401).json({ error: 'Authentication required' });
     const source = await getXtreamSource(req.params.id, ownerId);
     if (!source) return res.status(404).json({ error: 'Playlist source not found' });
@@ -1254,18 +1703,112 @@ app.post('/api/xtream/sources/:id/download-catalog', async (req, res) => {
 
 app.get('/api/xtream/catalog-snapshot/items', async (req, res) => {
   try {
-    const ownerId = requestOwner(req);
+    const ownerId = requestAccountOwner(req);
     if (!ownerId) return res.status(401).json({ error: 'Authentication required' });
     const kind = { series: 'series', movie: 'movie', movies: 'movie', vod: 'movie', channel: 'channel', channels: 'channel', live: 'channel' }[String(req.query.kind || '')];
     if (!kind) return res.status(400).json({ error: 'kind must be series, movie, or channel' });
     const source = await getXtreamSource(String(req.query.sourceId || ''), ownerId);
     if (!source) return res.status(404).json({ error: 'Playlist source not found' });
     res.set('Cache-Control', 'no-store');
-    res.json(await queryProviderCatalogItems(
+    const result = await queryProviderCatalogItems(
       ownerId, String(source._id), kind,
       { q: String(req.query.q || ''), page: Number.parseInt(req.query.page, 10) || 1, limit: Number.parseInt(req.query.limit, 10) || 50 },
-    ));
+    );
+    // The real, untouched provider URL for each item - computed here (not
+    // stored in the snapshot) since it embeds this source's credentials.
+    // Shown on the RH servers catalog page so a Direct-playback question can
+    // be answered by looking at the exact URL a client would be given.
+    result.items = (result.items || []).map(item => ({ ...item, providerUrl: sourceProviderUrl(source, kind, item.id, item.extension) }));
+    res.json(result);
   } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+// A "series" catalog row is the show, not a playable stream - only its
+// episodes have a provider URL. The RH servers catalog page drills into one
+// series at a time here (never all of them: a full series-to-episodes
+// expansion is one live provider call per show, too expensive to do for an
+// entire paginated series list).
+app.get('/api/xtream/catalog-snapshot/episodes', async (req, res) => {
+  try {
+    const ownerId = requestAccountOwner(req);
+    if (!ownerId) return res.status(401).json({ error: 'Authentication required' });
+    const seriesId = String(req.query.seriesId || '');
+    if (!seriesId) return res.status(400).json({ error: 'seriesId is required' });
+    const source = await getXtreamSource(String(req.query.sourceId || ''), ownerId);
+    if (!source) return res.status(404).json({ error: 'Playlist source not found' });
+    res.set('Cache-Control', 'no-store');
+    const details = await getIndexedXtreamSeriesEpisodes(source, seriesId);
+    const items = (details.episodes || []).map(episode => {
+      const extension = String(episode.extension || '').toLowerCase();
+      return {
+        id: episode.id,
+        title: episode.title || `${details.title} - ${episode.episodeNumber}`,
+        category: episode.seasonTitle || (episode.seasonNumber != null ? `Season ${episode.seasonNumber}` : ''),
+        extension,
+        providerUrl: sourceProviderUrl(source, 'series', episode.id, extension),
+      };
+    });
+    res.json({ seriesTitle: details.title, items, total: items.length });
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+app.post('/api/xtream/catalog-snapshot/codecs', async (req, res) => {
+  return res.status(404).json({ error: 'Catalog media-info scanning has been removed' });
+  /* legacy catalog scanner retained below only as dead source during rollout
+  try {
+    const ownerId = requestAccountOwner(req);
+    if (!ownerId) return res.status(401).json({ error: 'Authentication required' });
+    const source = await getXtreamSource(String(req.body?.sourceId || ''), ownerId);
+    if (!source) return res.status(404).json({ error: 'Playlist source not found' });
+    const kind = String(req.body?.kind || '');
+    const id = String(req.body?.id || '');
+    if (!['movie', 'channel', 'series'].includes(kind) || !id) return res.status(400).json({ error: 'A movie, channel, or episode is required' });
+    let item;
+    if (kind === 'series') {
+      const seriesId = String(req.body?.seriesId || '');
+      if (!seriesId) return res.status(400).json({ error: 'seriesId is required for an episode' });
+      const details = await getIndexedXtreamSeriesEpisodes(source, seriesId);
+      item = details.episodes.find(episode => String(episode.id) === id);
+      if (!item) return res.status(404).json({ error: 'Series episode not found' });
+      const cached = await getProviderMediaMetadata(ownerId, String(source._id), 'series', id);
+      if (cached?.videoCodec || cached?.audioCodec) {
+        return res.json({ videoCodec: cached.videoCodec || '', audioCodec: cached.audioCodec || '', duration: cached.duration || displayDuration(durationSeconds(item.duration)), cached: true });
+      }
+    } else {
+      item = await getProviderCatalogItem(ownerId, String(source._id), kind, id);
+      if (!item) return res.status(404).json({ error: 'Catalog item not found' });
+    }
+    const storedDurationSeconds = durationSeconds(item.duration);
+    if (kind !== 'series' && (item.videoCodec || item.audioCodec) && (kind === 'channel' || storedDurationSeconds > 0)) {
+      return res.json({
+        videoCodec: item.videoCodec || '', audioCodec: item.audioCodec || '',
+        duration: kind === 'channel' ? 'Live' : displayDuration(storedDurationSeconds), cached: true,
+      });
+    }
+    if (await providerStreamBusy()) return res.status(409).json({ error: 'Codec scan paused while playback is active' });
+    const inputUrl = await sourceProviderUrl(source, kind, id, item.extension);
+    const codecs = await probeMediaCodecs(inputUrl);
+      if (kind === 'series') {
+        await recordProviderMediaMetadata(ownerId, String(source._id), kind, id, {
+          videoCodec: codecs.videoCodec, audioCodec: codecs.audioCodec,
+          duration: displayDuration(codecs.durationSeconds || storedDurationSeconds),
+        });
+      } else {
+        await recordProviderCatalogCodecs(ownerId, String(source._id), kind, id, codecs.videoCodec, codecs.audioCodec);
+      }
+      if (kind === 'movie' && codecs.durationSeconds > 0) {
+        await recordProviderCatalogDuration(ownerId, String(source._id), kind, id, codecs.durationSeconds);
+      }
+    res.set('Cache-Control', 'no-store');
+    res.json({
+      videoCodec: codecs.videoCodec, audioCodec: codecs.audioCodec,
+      duration: kind === 'channel' ? 'Live' : displayDuration(codecs.durationSeconds || storedDurationSeconds), cached: false,
+    });
+  } catch (error) {
+    res.status(502).json({ error: String(error?.message || 'Codec probe failed').slice(0, 240) });
+  }
+});
+  */
 });
 
 app.use('/api/xtream', (req, res, next) => {
@@ -1279,24 +1822,25 @@ app.use('/api/xtream', (req, res, next) => {
 app.get('/api/xtream/stream-ticket/:sourceId/:kind/:id', async (req, res) => {
   try {
     const ownerId = requestOwner(req);
+    const accountOwner = requestAccountOwner(req);
     if (!ownerId) return res.status(401).json({ error: 'Authentication required' });
     if (!['channel', 'movie', 'series'].includes(req.params.kind)) return res.sendStatus(400);
-    const source = await getXtreamSource(req.params.sourceId, ownerId);
+    const source = await getXtreamSource(req.params.sourceId, accountOwner);
     if (!source) return res.sendStatus(404);
     res.set('Cache-Control', 'no-store');
-    res.json({ ticket: issueStreamTicket(ownerId, req.params.sourceId, req.params.kind, req.params.id) });
+    res.json({ ticket: issueStreamTicket(ownerId, accountOwner, req.params.sourceId, req.params.kind, req.params.id) });
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 app.get('/api/xtream/series/:sourceId/:id', async (req, res) => {
   try {
-    const ownerId = requestOwner(req);
+    const ownerId = requestAccountOwner(req);
     if (!ownerId) return res.status(401).json({ error: 'Authentication required' });
     const source = await getXtreamSource(req.params.sourceId, ownerId);
     if (!source) return res.sendStatus(404);
     // Catalog responses must never wait for FFprobe across a whole season.
     // Unknown durations are resolved through the dedicated media-duration API.
-    const details = await hydrateSeriesDurations(source, await getXtreamSeriesEpisodes(source, req.params.id));
+    const details = await hydrateSeriesDurations(source, await getIndexedXtreamSeriesEpisodes(source, req.params.id));
     res.set('Cache-Control', 'no-store');
     res.json(details);
   } catch (error) { res.status(502).json({ error: error.message }); }
@@ -1380,17 +1924,16 @@ app.get('/api/roku/bootstrap', async (req, res) => {
   try {
     // Home needs a very small, fast catalog only. Return the newest saved
     // Roku entries without expanding every series into episodes.
-    const ownerId = requestOwner(req);
-    const [selectedSeries, selectedMovies, selectedChannels, snapshot, recommendation, sources, favorites] = await Promise.all([
-      getRokuSelectedItems('series', ownerId),
-      getRokuSelectedItems('movie', ownerId),
-      getRokuSelectedItems('channel', ownerId),
-      getAndroidStartupSnapshot(ownerId),
-      getLatestRecommendationCache(ownerId, 'both', AI_RECOMMENDATION_VERSION),
-      getAllXtreamSources(ownerId),
-      getFavorites(ownerId).catch(() => []),
+    const ownerId = requestOwner(req), accountOwner = requestAccountOwner(req);
+    const requestedSourceId = String(req.query.sourceId || '').trim();
+    const [selectedSeries, selectedMovies, selectedChannels, sources, favorites] = await Promise.all([
+      getRokuSelectedItems('series', ownerId, accountOwner, requestedSourceId),
+      getRokuSelectedItems('movie', ownerId, accountOwner, requestedSourceId),
+      getRokuSelectedItems('channel', ownerId, accountOwner, requestedSourceId),
+      getAllXtreamSources(accountOwner),
+      getFavorites(accountOwner, requestProfile(req)).catch(() => []),
     ]);
-    const selectedSourcePreference = await getRokuSourcePreferenceByOwner(ownerId);
+    const selectedSourcePreference = requestedSourceId || await getRokuSourcePreferenceByOwner(ownerId);
     const selectedSourceId = pickRokuSourceId(selectedSourcePreference, sources);
     const newestFirst = (items) => [...items]
       .sort((a, b) => Number(b.added || 0) - Number(a.added || 0))
@@ -1419,20 +1962,28 @@ app.get('/api/roku/bootstrap', async (req, res) => {
     const discoveryItems = items => (Array.isArray(items) ? items : [])
       .filter(item => !selectedSourceId || String(item?.sourceId || '') === selectedSourceId)
       .filter(item => accountSourceIds.has(String(item?.sourceId || '')))
-      .map(rokuDiscoveryItem)
+      .map(item => {
+        const source = sources.find(candidate => String(candidate._id) === String(item?.sourceId || ''));
+        return rokuDiscoveryItem(source ? selectedXtreamItem(source, item) : item);
+      })
       .filter(Boolean)
       .slice(0, 10);
     // "New" rails come from the stored provider snapshot (newest per kind), not
     // the Android startup snapshot which is only built when the phone app runs.
-    const selectedSource = sources.find(source => String(source._id) === selectedSourceId) || null;
+    const profileSources = flattenSelection(sources, ownerId, accountOwner);
+    const selectedSource = profileSources.find(source => String(source._id) === selectedSourceId) || null;
     let rails = { series: [], movie: [], channel: [] };
+    let catalogMeta = null;
     if (selectedSource) {
-      for (const kind of ['series', 'movie', 'channel']) void ensureCatalogSnapshot(ownerId, selectedSource, kind);
-      const r = await getProviderCatalogRails(ownerId, selectedSourceId, 12).catch(() => null);
+      for (const kind of ['series', 'movie', 'channel']) void ensureCatalogSnapshot(accountOwner, selectedSource, kind);
+      const r = await getProviderCatalogRails(accountOwner, selectedSourceId, 12).catch(() => null);
       if (r) rails = { series: r.series || [], movie: r.movie || [], channel: r.channel || [] };
+      catalogMeta = await getProviderCatalogMeta(accountOwner, selectedSourceId).catch(() => null);
     }
     const railItems = list => (Array.isArray(list) ? list : [])
-      .map(item => rokuDiscoveryItem({ ...item, sourceId: selectedSourceId }))
+      .map(item => rokuDiscoveryItem(selectedSource
+        ? selectedXtreamItem(selectedSource, { ...item, sourceId: selectedSourceId })
+        : { ...item, sourceId: selectedSourceId }))
       .filter(Boolean)
       .slice(0, 10);
     // Favorites store only id/title/kind - re-hydrate each one against the
@@ -1440,13 +1991,16 @@ app.get('/api/roku/bootstrap', async (req, res) => {
     // selected source when the saved favorite has no sourceId (that snapshot
     // has one implicit provider). Without the sourceId, rokuDiscoveryItem
     // drops the item and the whole Favorites rail silently disappears.
+    // A favorite without a provider identity is legacy/ambiguous and must not
+    // leak its old title into whichever provider happens to be active now.
+    const providerFavorites = favorites.filter(favorite => String(favorite.sourceId || '') === selectedSourceId);
     const favoriteSnapshot = new Map();
-    if (selectedSourceId && favorites.length) {
-      for (const row of await getProviderCatalogItemsByIds(ownerId, selectedSourceId, favorites.map(favorite => favorite.id)).catch(() => [])) {
+    if (selectedSourceId && providerFavorites.length) {
+      for (const row of await getProviderCatalogItemsByIds(accountOwner, selectedSourceId, providerFavorites.map(favorite => favorite.id)).catch(() => [])) {
         favoriteSnapshot.set(`${row.kind}:${row.id}`, row);
       }
     }
-    const hydratedFavorites = favorites.map(favorite => {
+    const hydratedFavorites = providerFavorites.map(favorite => {
       const match = favoriteSnapshot.get(`${favorite.kind}:${favorite.id}`);
       return rokuDiscoveryItem({
         ...favorite,
@@ -1460,18 +2014,20 @@ app.get('/api/roku/bootstrap', async (req, res) => {
     res.json({
       items: [...series, ...movies],
       favorites: hydratedFavorites,
-      recommendations: discoveryItems(recommendation?.payload?.items),
+      // Keys ("<kind>:<id>") the account has saved into its Library for the
+      // active provider - the Roku marks matching cards with a saved badge.
+      savedKeys: Array.isArray(selectedSource?.enabledKeys) ? selectedSource.enabledKeys.map(String) : [],
       newReleases: {
         series: railItems(rails.series),
         movies: railItems(rails.movie),
         channels: railItems(rails.channel),
       },
       stats: {
-        // Welcome counters = the items the user has SAVED for this provider
-        // (its enabled selection), never the provider's full catalog totals.
-        series: rokuSavedCount(selectedSource, 'series'),
-        movies: rokuSavedCount(selectedSource, 'movie'),
-        channels: rokuSavedCount(selectedSource, 'channel'),
+        // Welcome counters come from the complete provider catalog snapshot
+        // already stored in MongoDB, not the profile's saved/enabled subset.
+        series: Math.max(0, Number(catalogMeta?.kinds?.series?.count) || 0),
+        movies: Math.max(0, Number(catalogMeta?.kinds?.movie?.count) || 0),
+        channels: Math.max(0, Number(catalogMeta?.kinds?.channel?.count) || 0),
         selectedSourceId,
         selectedSourceName: selectedSource?.name || '',
       },
@@ -1485,7 +2041,7 @@ app.get('/api/roku/series/categories', async (req, res) => {
   try {
     const seen = new Set();
     const items = [];
-    for (const series of await getRokuSelectedItems('series', requestOwner(req))) {
+    for (const series of await getRokuSelectedItems('series', requestOwner(req), requestAccountOwner(req))) {
       const category = series.category || 'Other';
       if (seen.has(category)) continue;
       seen.add(category);
@@ -1512,7 +2068,7 @@ app.get('/api/roku/search', async (req, res) => {
       return res.status(400).json({ error: 'kind and q are required' });
     }
     if (String(req.query.librarySource || '') === 'server') {
-      const source = await getRokuServerProvider(requestOwner(req));
+      const source = await getRokuServerProvider(requestOwner(req), requestAccountOwner(req));
       if (!source) {
         console.warn(`[Roku search] kind=${kind} q="${query}" -> no server provider for owner`);
         return res.json({ items: [] });
@@ -1521,14 +2077,15 @@ app.get('/api/roku/search', async (req, res) => {
       // slice: getRokuServerCatalog(...,'all') truncates at 1500 items, which
       // silently hid almost everything in a 200k+ item movie catalog. Query
       // Mongo directly, independent of any category filter.
-      const escapedQuery = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      const result = await queryProviderCatalogItems(requestOwner(req), String(source._id), kind, {
-        categoryId: '', page: 1, limit: 60, extraFilters: [{ title: { $regex: escapedQuery, $options: 'i' } }],
+      const regexSource = arabicSearchRegexSource(query) || query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const result = await queryProviderCatalogItems(requestAccountOwner(req), String(source._id), kind, {
+        categoryId: '', page: 1, limit: 60, extraFilters: [{ title: { $regex: regexSource, $options: 'i' } }],
       });
       console.log(`[Roku search] kind=${kind} q="${query}" source=${String(source._id).slice(0, 8)} matches=${result.total}`);
       const matches = result.items.map(item => selectedXtreamItem(source, item));
+      const savedKeys = Array.isArray(source.enabledKeys) ? source.enabledKeys.map(String) : [];
       if (kind === 'series') {
-        return res.json({ items: matches.map(item => ({
+        return res.json({ savedKeys, items: matches.map(item => ({
           id: `series-search:${item.sourceId}:${item.id}`, title: item.title, rokuTitle: rokuText(item.title),
           category: item.category, rokuCategory: rokuText(item.category), sourceId: String(item.sourceId), seriesId: item.id,
           thumbnail: item.logo, contentKind: 'series-search',
@@ -1536,12 +2093,13 @@ app.get('/api/roku/search', async (req, res) => {
         })) });
       }
       if (kind === 'movie') {
-        return res.json({ items: matches.map(item => ({ ...directXtreamItem(item), thumbnail: item.logo, duration: item.duration || '', kind: 'movie', contentKind: 'movie', rokuEnabled: true })) });
+        return res.json({ savedKeys, items: matches.map(item => ({ ...directXtreamItem(item), thumbnail: item.logo, duration: item.duration || '', kind: 'movie', contentKind: 'movie', rokuEnabled: true })) });
       }
-      return res.json({ items: buildXtreamChannelsPayload(matches) });
+      return res.json({ savedKeys, items: buildXtreamChannelsPayload(matches) });
     }
-    const matches = (await getRokuSelectedItems(kind, requestOwner(req)))
-      .filter(item => item.title.toLocaleLowerCase().includes(query))
+    const normalizedQuery = normalizeArabicSearch(query);
+    const matches = (await getRokuSelectedItems(kind, requestOwner(req), requestAccountOwner(req)))
+      .filter(item => normalizeArabicSearch(item.title).includes(normalizedQuery))
       .slice(0, 60);
     if (kind === 'series') {
       return res.json({ items: matches.map(item => ({
@@ -1567,22 +2125,87 @@ app.get('/api/roku/search', async (req, res) => {
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
+// Direct-to-Play must resolve against the active provider snapshot, not the
+// profile's saved Library or whichever ten cards happen to be mounted on the
+// Roku. This keeps catalog deep links valid for unsaved titles.
+app.get('/api/roku/deep-link-item', async (req, res) => {
+  try {
+    const ownerId = requestOwner(req), accountOwner = requestAccountOwner(req);
+    if (!ownerId || !accountOwner) return res.status(401).json({ error: 'Authentication required' });
+    // SceneGraph associative-array keys may be serialized lowercase when a
+    // task enumerates them, so accept both spellings at this HTTP boundary.
+    const mediaType = String(req.query.mediaType ?? req.query.mediatype ?? '').toLowerCase();
+    const contentId = String(req.query.contentId ?? req.query.contentid ?? '').trim();
+    if (!contentId) return res.status(400).json({ error: 'contentId is required' });
+    let kind = '';
+    if (['movie', 'shortform', 'shortformvideo', 'tvspecial'].includes(mediaType)) kind = 'movie';
+    else if (['channel', 'live', 'livefeed', 'sportsevent'].includes(mediaType)) kind = 'channel';
+    else if (['series', 'season'].includes(mediaType)) kind = 'series';
+    else if (mediaType !== 'episode') return res.status(400).json({ error: 'Unsupported mediaType' });
+
+    const source = await getRokuServerProvider(ownerId, accountOwner);
+    if (!source) {
+      console.warn(`[Roku deep link] mediaType=${mediaType} id=${contentId} no active provider`);
+      return res.status(404).json({ error: 'No active provider' });
+    }
+    const sourceId = String(source._id);
+    if (kind) {
+      await ensureCatalogSnapshot(accountOwner, source, kind);
+      const row = await getProviderCatalogItem(accountOwner, sourceId, kind, contentId);
+      if (!row) {
+        console.warn(`[Roku deep link] mediaType=${mediaType} id=${contentId} source=${sourceId.slice(0, 8)} not found`);
+        return res.status(404).json({ error: 'Content not found' });
+      }
+      console.log(`[Roku deep link] resolved mediaType=${mediaType} id=${contentId} source=${sourceId.slice(0, 8)}`);
+      return res.json({ items: [rokuDiscoveryItem(selectedXtreamItem(source, row))] });
+    }
+
+    // Episode feed IDs use "seriesId:episodeId". A plain episode ID can also
+    // resolve from this profile's watch history for old integrations.
+    let seriesId = '', episodeId = contentId;
+    const separator = contentId.match(/^([^:|/]+)[:|/]([^:|/]+)$/);
+    if (separator) [, seriesId, episodeId] = separator;
+    if (!seriesId) {
+      const watched = (await getStreamingHistory(requestProfileOwner(req), 500))
+        .find(item => item.kind === 'series' && String(item.sourceId) === sourceId && String(item.itemId) === episodeId && item.seriesId);
+      if (watched) seriesId = String(watched.seriesId);
+    }
+    if (!seriesId) return res.status(404).json({ error: 'Episode requires a series-qualified contentId' });
+    await ensureCatalogSnapshot(accountOwner, source, 'series');
+    const seriesRow = await getProviderCatalogItem(accountOwner, sourceId, 'series', seriesId);
+    if (!seriesRow) return res.status(404).json({ error: 'Series not found' });
+    const episodes = await buildXtreamSeriesPayload({
+      selected: [selectedXtreamItem(source, seriesRow)], accountOwner, strict: true,
+    });
+    const episode = episodes.find(item => String(item.id) === episodeId);
+    if (!episode) return res.status(404).json({ error: 'Episode not found' });
+    return res.json({ items: [episode] });
+  } catch (error) { res.status(502).json({ error: error.message }); }
+});
+
 app.get('/api/roku/series/detail', async (req, res) => {
   try {
     const sourceId = String(req.query.sourceId || '');
     const seriesId = String(req.query.seriesId || '');
     if (!sourceId || !seriesId) return res.status(400).json({ error: 'sourceId and seriesId are required' });
-    let series;
-    if (String(req.query.librarySource || '') === 'server') {
-      const source = await getRokuServerProvider(requestOwner(req));
-      if (source && String(source._id) === sourceId) {
-        series = { id: seriesId, sourceId, title: String(req.query.title || 'Series'), category: String(req.query.category || 'Other') };
-      }
-    } else {
-      series = (await getRokuSelectedItems('series', requestOwner(req))).find(item => String(item.sourceId) === sourceId && item.id === seriesId);
-    }
-    if (!series) return res.status(404).json({ error: 'Series not found' });
-    res.json({ items: await buildXtreamSeriesPayload({ selected: [series] }) });
+    const ownerId = requestOwner(req);
+    const accountOwner = requestAccountOwner(req);
+    if (!ownerId || !accountOwner) return res.status(401).json({ error: 'Authentication required' });
+    // Welcome includes recommendations and new releases that are intentionally
+    // not required to be saved. Authorize against this profile's active
+    // provider, not its saved-item list, then let Xtream resolve the series.
+    const source = await getRokuServerProvider(ownerId, accountOwner);
+    if (!source || String(source._id) !== sourceId) return res.status(404).json({ error: 'Series not found for the active provider' });
+    const saved = (await getRokuSelectedItems('series', ownerId, accountOwner))
+      .find(item => String(item.sourceId) === sourceId && String(item.id) === seriesId);
+    const series = saved || {
+      id: seriesId,
+      sourceId,
+      title: String(req.query.title || 'Series'),
+      category: String(req.query.category || 'Other'),
+    };
+    res.set('Cache-Control', 'no-store');
+    res.json({ items: await buildXtreamSeriesPayload({ selected: [series], accountOwner, strict: true }) });
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
@@ -1598,8 +2221,23 @@ app.get('/api/roku/series/last-watched', async (req, res) => {
     const seriesId = String(req.query.seriesId || '');
     if (!sourceId || !seriesId) return res.status(400).json({ error: 'sourceId and seriesId are required' });
     const override = await getSeriesWatchOverride(ownerId, sourceId, seriesId);
+    // When there is no manual '*' override, use the most recently played
+    // episode for this series. Keep the saved absolute position with it so
+    // the Roku episode grid can show where playback will resume.
+    const watchedHistory = await getStreamingHistory(requestProfileOwner(req), 500);
+    const episodeId = override?.episodeId || watchedHistory.find(item => item.kind === 'series'
+      && String(item.sourceId || '') === sourceId
+      && String(item.seriesId || '') === seriesId
+      && String(item.itemId || '') !== '')?.itemId || '';
+    const watched = watchedHistory.find(item => item.kind === 'series'
+      && String(item.sourceId || '') === sourceId
+      && String(item.seriesId || '') === seriesId
+      && String(item.itemId || '') === String(episodeId));
     res.set('Cache-Control', 'no-store');
-    res.json({ episodeId: override?.episodeId || '' });
+    res.json({
+      episodeId,
+      positionMs: Math.max(0, Number(watched?.endPositionMs) || 0),
+    });
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
@@ -1613,7 +2251,12 @@ app.post('/api/roku/series/last-watched/toggle', async (req, res) => {
       sourceId: pick('sourceId'), seriesId: pick('seriesId'), episodeId: pick('episodeId'),
       episodeTitle: pick('episodeTitle'), seasonNumber: pick('seasonNumber'), episodeNumber: pick('episodeNumber'),
     });
-    res.json(result);
+    const resume = result.active
+      ? await getStreamingResume(requestProfileOwner(req), {
+        sourceId: pick('sourceId'), itemId: pick('episodeId'), kind: 'series',
+      })
+      : null;
+    res.json({ ...result, positionMs: Math.max(0, Number(resume?.endPositionMs) || 0) });
   } catch (error) { res.status(400).json({ error: error.message }); }
 });
 
@@ -1655,16 +2298,14 @@ function pickRokuSourceId(preferredId, sources) {
   return String(sources[0]?._id || '');
 }
 
-// How many items the user has SAVED (enabled) for a source, by kind. Keys look
-// like "series:3209" / "movie:160189" / "channel:10836".
-function rokuSavedCount(source, kind) {
-  const keys = Array.isArray(source?.enabledKeys) ? source.enabledKeys : [];
-  const prefix = `${kind}:`;
-  return keys.filter(key => String(key).startsWith(prefix)).length;
+// The full saved-key list for a source ("<kind>:<id>"), for the Roku's
+// saved-badge marking.
+function rokuSourceSavedKeys(source) {
+  return Array.isArray(source?.enabledKeys) ? source.enabledKeys.map(String) : [];
 }
 
-async function getRokuServerProvider(ownerId) {
-  const sources = await getAllXtreamSources(ownerId);
+async function getRokuServerProvider(ownerId, accountOwner = ownerId) {
+  const sources = flattenSelection(await getAllXtreamSources(accountOwner), ownerId, accountOwner);
   const preferredId = await getRokuSourcePreferenceByOwner(ownerId);
   return sources.find(source => String(source._id) === pickRokuSourceId(preferredId, sources)) || null;
 }
@@ -1672,30 +2313,44 @@ async function getRokuServerProvider(ownerId) {
 // The Roku "server" library source reads the SAME MongoDB provider snapshot the
 // web app uses — never a live provider call. A missing snapshot is fetched once;
 // a stale one serves immediately and refreshes in the background.
-async function getRokuServerCatalog(ownerId, kind, requestedCategory) {
-  const source = await getRokuServerProvider(ownerId);
+async function getRokuServerCatalog(ownerId, kind, requestedCategory, accountOwner = ownerId) {
+  const source = await getRokuServerProvider(ownerId, accountOwner);
   if (!source) return { source: null, category: '', items: [] };
-  await ensureCatalogSnapshot(ownerId, source, kind);
-  const categories = await getProviderCatalogCategories(ownerId, String(source._id), kind).catch(() => []);
+  await ensureCatalogSnapshot(accountOwner, source, kind);
+  const categories = await getProviderCatalogCategories(accountOwner, String(source._id), kind).catch(() => []);
   const category = String(requestedCategory || categories[0]?.id || 'all');
   const categoryName = categories.find(entry => String(entry.id) === category)?.name || 'Other';
-  const stored = await getProviderCatalogItemsForCategory(ownerId, String(source._id), kind, category).catch(() => []);
+  const stored = await getProviderCatalogItemsForCategory(accountOwner, String(source._id), kind, category).catch(() => []);
   const items = stored
     .map(item => selectedXtreamItem(source, { ...item, category: item.category || categoryName }))
     .sort((a, b) => String(a.title || '').localeCompare(String(b.title || ''), undefined, { numeric: true, sensitivity: 'base' }));
   return { source, category, items };
 }
 
+// The "SAVED" filter on a Roku server-catalog page: only the items the account
+// has saved into its Library (the active provider's enabledItems) for this
+// kind, across every category. Same item shape as getRokuServerCatalog.
+async function getRokuServerSavedItems(ownerId, kind, accountOwner = ownerId) {
+  const source = await getRokuServerProvider(ownerId, accountOwner);
+  if (!source) return { source: null, category: 'all', items: [] };
+  const items = (Array.isArray(source.enabledItems) ? source.enabledItems : [])
+    .filter(item => item && item.kind === kind)
+    .map(item => selectedXtreamItem(source, item))
+    .filter(item => item.id)
+    .sort((a, b) => String(a.title || '').localeCompare(String(b.title || ''), undefined, { numeric: true, sensitivity: 'base' }));
+  return { source, category: 'all', items };
+}
+
 app.get('/api/roku/provider/categories', async (req, res) => {
   try {
-    const ownerId = requestOwner(req);
-    if (!ownerId) return res.status(401).json({ error: 'Authentication required' });
+    const ownerId = requestOwner(req), accountOwner = requestAccountOwner(req);
+    if (!ownerId || !accountOwner) return res.status(401).json({ error: 'Authentication required' });
     const kind = ['series', 'movie', 'channel'].includes(String(req.query.kind)) ? String(req.query.kind) : '';
     if (!kind) return res.status(400).json({ error: 'kind must be series, movie, or channel' });
-    const source = await getRokuServerProvider(ownerId);
+    const source = await getRokuServerProvider(ownerId, accountOwner);
     if (!source) return res.json({ sourceId: '', categories: [] });
-    await ensureCatalogSnapshot(ownerId, source, kind);
-    const categories = (await getProviderCatalogCategories(ownerId, String(source._id), kind).catch(() => []))
+    await ensureCatalogSnapshot(accountOwner, source, kind);
+    const categories = (await getProviderCatalogCategories(accountOwner, String(source._id), kind).catch(() => []))
       .map(entry => ({ id: String(entry.id), name: cleanCategoryName(entry.name), rokuName: rokuText(cleanCategoryName(entry.name)) }))
       .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
     res.set('Cache-Control', 'private, no-store');
@@ -1707,15 +2362,17 @@ app.get('/api/roku/movies', async (req, res) => {
   const startedAt = Date.now();
   try {
     if (String(req.query.librarySource || '') === 'server') {
-      const catalog = await getRokuServerCatalog(requestOwner(req), 'movie', req.query.category);
+      const catalog = String(req.query.saved || '') === '1'
+        ? await getRokuServerSavedItems(requestOwner(req), 'movie', requestAccountOwner(req))
+        : await getRokuServerCatalog(requestOwner(req), 'movie', req.query.category, requestAccountOwner(req));
       const items = await buildXtreamMoviesPayload({ selected: catalog.items });
-      return res.json({ items, page: 0, total: items.length, hasMore: false });
+      return res.json({ items, page: 0, total: items.length, hasMore: false, savedKeys: rokuSourceSavedKeys(catalog.source) });
     }
     const pageInfo = rokuPage(req, rokuMoviePageLimit);
     // Roku movie pages are deliberately fixed at ten items per request.
     pageInfo.limit = rokuMoviePageLimit;
     pageInfo.offset = pageInfo.page * pageInfo.limit;
-    const selected = (await getRokuSelectedItems('movie', requestOwner(req)))
+    const selected = (await getRokuSelectedItems('movie', requestOwner(req), requestAccountOwner(req)))
       .slice()
       .sort((a, b) => Number(b.added || 0) - Number(a.added || 0));
     const sourcePage = selected.slice(pageInfo.offset, pageInfo.offset + pageInfo.limit);
@@ -1735,22 +2392,41 @@ app.get('/api/roku/movies', async (req, res) => {
 });
 app.get('/api/streaming-history', async (req, res) => {
   try {
-    const ownerId = requestOwner(req);
+    const ownerId = requestProfileOwner(req);
     if (!ownerId) return res.status(401).json({ error: 'Authentication required' });
     res.set('Cache-Control', 'no-store');
-    res.json({ items: await getStreamingHistory(ownerId, req.query.limit) });
+    let items = await getStreamingHistory(ownerId, req.query.limit);
+    if (String(req.query.providerScope || '') === 'roku') {
+      const accountOwner = requestAccountOwner(req);
+      const sources = await getAllXtreamSources(accountOwner);
+      const selectedSourceId = pickRokuSourceId(await getRokuSourcePreferenceByOwner(requestOwner(req)), sources);
+      const selectedSource = sources.find(source => String(source._id) === selectedSourceId);
+      items = items.filter(item => String(item.sourceId || '') === selectedSourceId)
+        .map(item => ({ ...item, providerName: item.providerName || selectedSource?.name || '' }));
+      items = await attachProviderUrls(items, sources);
+    }
+    res.json({ items });
   }
   catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 app.get('/api/streaming-history/continue-watching', async (req, res) => {
   try {
-    const ownerId = requestOwner(req);
+    const ownerId = requestProfileOwner(req);
     if (!ownerId) return res.status(401).json({ error: 'Authentication required' });
-    // Continue Watching is a per-profile concept: the last Series, Movie, and
-    // Channel the profile watched on ANY platform (Android, Roku, browser) and
-    // from ANY playlist source. Never scope it to a single Roku provider.
-    const items = await getStreamingContinueWatching(ownerId, req.query.limit);
+    const accountOwner = requestAccountOwner(req);
+    let items = await getStreamingContinueWatching(ownerId, req.query.limit);
+    // Roku's Welcome page is both profile- and provider-specific. Other
+    // clients retain their existing cross-provider history unless they opt in.
+    if (String(req.query.providerScope || '') === 'roku') {
+      const sources = await getAllXtreamSources(accountOwner);
+      const selectedSourceId = pickRokuSourceId(await getRokuSourcePreferenceByOwner(requestOwner(req)), sources);
+      const selectedSource = sources.find(source => String(source._id) === selectedSourceId);
+      items = items.filter(item => String(item.sourceId || '') === selectedSourceId)
+        .map(item => ({ ...item, providerName: item.providerName || selectedSource?.name || '' }));
+      items = await attachProviderUrls(items, sources);
+    }
+    items = await hydrateContinueWatchingArtwork(accountOwner, items);
     res.set('Cache-Control', 'no-store');
     res.json({ items });
   }
@@ -1759,7 +2435,7 @@ app.get('/api/streaming-history/continue-watching', async (req, res) => {
 
 app.get('/api/streaming-history/resume', async (req, res) => {
   try {
-    const ownerId = requestOwner(req);
+    const ownerId = requestProfileOwner(req);
     if (!ownerId) return res.status(401).json({ error: 'Authentication required' });
     res.set('Cache-Control', 'no-store');
     const item = await getStreamingResume(ownerId, req.query);
@@ -1770,7 +2446,7 @@ app.get('/api/streaming-history/resume', async (req, res) => {
 
 app.put('/api/streaming-history/:sessionId', async (req, res) => {
   try {
-    const ownerId = requestOwner(req);
+    const ownerId = requestProfileOwner(req);
     if (!ownerId) return res.status(401).json({ error: 'Authentication required' });
     const sessionId = String(req.params.sessionId || '').trim();
     if (!sessionId) return res.status(400).json({ error: 'Streaming session ID is required' });
@@ -1789,11 +2465,31 @@ app.put('/api/streaming-history/:sessionId', async (req, res) => {
   catch (error) { res.status(500).json({ error: error.message }); }
 });
 
+app.delete('/api/streaming-history/:sessionId', async (req, res) => {
+  try {
+    const ownerId = requestProfileOwner(req);
+    if (!ownerId) return res.status(401).json({ error: 'Authentication required' });
+    res.set('Cache-Control', 'no-store');
+    res.json(await deleteStreamingSession(ownerId, String(req.params.sessionId || '').trim()));
+  }
+  catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+app.delete('/api/streaming-history', async (req, res) => {
+  try {
+    const ownerId = requestProfileOwner(req);
+    if (!ownerId) return res.status(401).json({ error: 'Authentication required' });
+    res.set('Cache-Control', 'no-store');
+    res.json(await clearStreamingHistory(ownerId));
+  }
+  catch (error) { res.status(500).json({ error: error.message }); }
+});
+
 app.get('/api/favorites', async (req, res) => {
   try {
-    const ownerId = requestOwner(req);
-    if (!ownerId) return res.status(401).json({ error: 'Authentication required' });
-    res.set('Cache-Control', 'no-store'); res.json({ items: await getFavorites(ownerId) });
+    const ownerId = requestAccountOwner(req), profileId = requestProfile(req);
+    if (!ownerId || !profileId) return res.status(401).json({ error: 'Profile authentication required' });
+    res.set('Cache-Control', 'no-store'); res.json({ items: await getFavorites(ownerId, profileId) });
   }
   catch (error) { res.status(500).json({ error: error.message }); }
 });
@@ -1801,20 +2497,114 @@ async function toggleFavoriteRequest(req, res) {
   try {
     const id = String(req.query?.id || req.body?.id || '');
     if (!id) return res.status(400).json({ error: 'id is required' });
-    const ownerId = requestOwner(req);
-    if (!ownerId) return res.status(401).json({ error: 'Authentication required' });
+    const ownerId = requestAccountOwner(req), profileOwner = requestOwner(req), profileId = requestProfile(req);
+    if (!ownerId || !profileOwner || !profileId) return res.status(401).json({ error: 'Profile authentication required' });
     const pick = key => req.query?.[key] || req.body?.[key] || '';
+    const kind = String(pick('kind'));
+    if (!['series', 'movie', 'channel'].includes(kind)) return res.status(400).json({ error: 'Valid item kind is required' });
+    const sources = await getAllXtreamSources(ownerId);
+    let sourceId = String(pick('sourceId')).trim();
+    if (!sourceId) sourceId = pickRokuSourceId(await getRokuSourcePreferenceByOwner(profileOwner), sources);
+    if (!sourceId || !sources.some(source => String(source._id) === sourceId)) {
+      return res.status(400).json({ error: 'Favorite provider is required' });
+    }
+    const favoriteValue = pick('favorite');
+    const favorite = favoriteValue === true || String(favoriteValue).toLowerCase() === 'true'
+      ? true
+      : favoriteValue === false || String(favoriteValue).toLowerCase() === 'false' ? false : undefined;
     res.json(await toggleFavorite({
-      ownerId, id,
-      title: pick('title'), kind: pick('kind'),
-      sourceId: pick('sourceId'), logo: pick('logo'),
-      category: pick('category'), extension: pick('extension'),
+      ownerId, profileId, id,
+      title: pick('title'), kind, sourceId, logo: pick('logo'),
+      category: pick('category'), extension: pick('extension'), favorite,
     }));
   } catch (error) { res.status(500).json({ error: error.message }); }
 }
 app.post('/api/favorites/toggle', toggleFavoriteRequest);
 app.put('/api/favorites/toggle', toggleFavoriteRequest);
 app.get('/api/favorites/toggle', toggleFavoriteRequest);
+
+// Add / remove one catalog item from the account's saved Library selection
+// (the source's enabledKeys/enabledItems) straight from the Roku player. This
+// is the same "saved to my Library" state the web app manages, keyed per
+// source as "<kind>:<id>".
+async function toggleRokuLibraryRequest(req, res) {
+  try {
+    const ownerId = requestOwner(req);
+    const accountOwner = requestAccountOwner(req);
+    if (!ownerId) return res.status(401).json({ error: 'Authentication required' });
+    const pick = key => String(req.query?.[key] || req.body?.[key] || '').trim();
+    const id = pick('id');
+    let kind = pick('kind');
+    if (kind === 'series-search' || kind === 'episode') kind = 'series';
+    if (!id || !['movie', 'series', 'channel'].includes(kind)) {
+      return res.status(400).json({ error: 'id and a valid kind are required' });
+    }
+    const sources = flattenSelection(await getAllXtreamSources(accountOwner), ownerId, accountOwner);
+    let sourceId = pick('sourceId');
+    if (!sourceId || !sources.some(source => String(source._id) === sourceId)) {
+      sourceId = pickRokuSourceId(await getRokuSourcePreferenceByOwner(ownerId), sources);
+    }
+    const source = sources.find(candidate => String(candidate._id) === sourceId);
+    if (!source) return res.status(404).json({ error: 'No playlist provider for this account' });
+    const key = `${kind}:${id}`;
+    const enabledKeys = Array.isArray(source.enabledKeys) ? source.enabledKeys.map(String) : [];
+    const enabledItems = Array.isArray(source.enabledItems) ? source.enabledItems : [];
+    const currentlySaved = enabledKeys.includes(key);
+    let nextKeys;
+    let nextItems;
+    if (currentlySaved) {
+      nextKeys = enabledKeys.filter(candidate => candidate !== key);
+      nextItems = enabledItems.filter(candidate => candidate.key !== key);
+    } else {
+      // Resolve the item's real metadata from the stored catalog snapshot -
+      // NEVER trust the client's title, which the Roku has already reshaped to
+      // Arabic presentation-form glyphs (that would corrupt the web display).
+      let snapshotRow = null;
+      try {
+        void await ensureCatalogSnapshot(accountOwner, source, kind);
+        const rows = await getProviderCatalogItemsByIds(accountOwner, String(source._id), [id]);
+        snapshotRow = (Array.isArray(rows) ? rows : []).find(row => String(row.id) === id && row.kind === kind) || null;
+      } catch { snapshotRow = null; }
+      const category = snapshotRow?.category || pick('category') || 'Other';
+      const title = snapshotRow?.title || (pick('title') && !/[ﭐ-﷿ﹰ-﻿]/.test(pick('title')) ? pick('title') : `${kind} ${id}`);
+      nextItems = [...enabledItems.filter(candidate => candidate.key !== key), {
+        key, id, kind,
+        title,
+        logo: snapshotRow?.logo || pick('logo'),
+        categoryId: snapshotRow?.categoryId || pick('categoryId'),
+        category,
+        language: snapshotRow?.language || detectXtreamLanguage({ title }, category),
+        extension: snapshotRow?.extension || pick('extension') || (kind === 'channel' ? 'm3u8' : 'mp4'),
+        duration: snapshotRow?.duration || pick('duration'),
+        added: String(Math.floor(Date.now() / 1000)),
+        providerUrl: kind === 'series' ? '' : await sourceProviderUrl(
+          source, kind, id, snapshotRow?.extension || pick('extension') || (kind === 'channel' ? 'm3u8' : 'mp4'),
+        ),
+      }];
+      nextKeys = nextItems.map(candidate => candidate.key);
+    }
+    await updateXtreamSelection(String(source._id), { enabledKeys: nextKeys, enabledItems: nextItems, archivedKeys: source.archivedKeys || [], archivedItems: source.archivedItems || [] }, accountOwner, ownerId);
+    bumpLibraryRevision(ownerId);
+    res.json({ saved: !currentlySaved, key, sourceId: String(source._id) });
+  } catch (error) { res.status(500).json({ error: error.message }); }
+}
+app.get('/api/roku/library/toggle', toggleRokuLibraryRequest);
+app.post('/api/roku/library/toggle', toggleRokuLibraryRequest);
+
+// The saved-key list for the profile's active Roku provider, so cards can show
+// a "saved" badge. Lightweight - keys only, no catalog expansion.
+app.get('/api/roku/library/keys', async (req, res) => {
+  try {
+    const ownerId = requestOwner(req);
+    const accountOwner = requestAccountOwner(req);
+    if (!ownerId) return res.status(401).json({ error: 'Authentication required' });
+    const sources = flattenSelection(await getAllXtreamSources(accountOwner), ownerId, accountOwner);
+    const sourceId = pickRokuSourceId(await getRokuSourcePreferenceByOwner(ownerId), sources);
+    const source = sources.find(candidate => String(candidate._id) === sourceId);
+    res.set('Cache-Control', 'no-store');
+    res.json({ sourceId, keys: Array.isArray(source?.enabledKeys) ? source.enabledKeys.map(String) : [] });
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
 app.get('/api/roku/weather-locations/search', async (req, res) => {
   try {
     if (!requestOwner(req)) return res.status(401).json({ error: 'Sign in to search weather locations' });
@@ -1843,7 +2633,7 @@ app.get('/api/account/weather-locations', async (req, res) => {
   try {
     const ownerId = requestOwner(req);
     if (!ownerId) return res.status(401).json({ error: 'Sign in to manage weather locations' });
-    res.json({ locations: await getDeviceWeatherLocations(ownerId, requestAccount(req), requestDevice(req)) });
+    res.json({ locations: await getDeviceWeatherLocations(ownerId, requestAccount(req), requestDevice(req), requestAccountRealm(req)) });
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
@@ -1851,7 +2641,7 @@ app.put('/api/account/weather-locations', async (req, res) => {
   try {
     const ownerId = requestOwner(req);
     if (!ownerId) return res.status(401).json({ error: 'Sign in to manage weather locations' });
-    const result = await saveDeviceWeatherLocations(ownerId, req.body?.locations, requestAccount(req), requestDevice(req));
+    const result = await saveDeviceWeatherLocations(ownerId, req.body?.locations, requestAccount(req), requestDevice(req), requestAccountRealm(req));
     if (result.error) return res.status(result.error.includes('not found') ? 404 : 400).json(result);
     dashboardCache.clear();
     res.json(result);
@@ -1864,7 +2654,7 @@ app.get('/api/roku/dashboard', async (req, res) => {
     if (!ownerId) return res.status(401).json({ error: 'Valid device authorization is required' });
     // Weather is cached, but clock values must be generated for every request
     // so the minute display never remains frozen for the cache lifetime.
-    const savedLocations = await getDeviceWeatherLocations(ownerId, requestAccount(req), requestDevice(req));
+    const savedLocations = await getDeviceWeatherLocations(ownerId, requestAccount(req), requestDevice(req), requestAccountRealm(req));
     const location = savedLocations[0];
     const locations = location ? [{ ...location, id: 'slot1' }] : [];
     const cacheKey = JSON.stringify(locations);
@@ -1890,15 +2680,18 @@ app.get('/api/roku/dashboard', async (req, res) => {
   } catch (error) { res.status(502).json({ backend: 'online', error: error.message }); }
 });
 function parsePlaylistInput(body, existing = null) {
-  const name = String(body?.name || existing?.name || '').trim();
   let type = body?.type === 'm3u' ? 'm3u' : body?.type === 'xtream' ? 'xtream' : sourceType(existing);
   const supplied = String(body?.url || '').trim();
-  if (!name) throw new Error('Source name is required');
-  if (!supplied && existing) return { name };
+  const suppliedName = String(body?.name || existing?.name || '').trim();
+  if (!supplied && existing) {
+    if (!suppliedName) throw new Error('Source name is required');
+    return { name: suppliedName };
+  }
   if (!supplied) throw new Error(`Paste the ${type === 'm3u' ? 'M3U playlist' : 'Xtream server'} URL`);
   let url;
   try { url = new URL(supplied); } catch { throw new Error('Enter a valid playlist URL'); }
   if (!['http:', 'https:'].includes(url.protocol)) throw new Error('Playlist URL must use HTTP or HTTPS');
+  const name = suppliedName || url.hostname || (type === 'm3u' ? 'M3U Playlist' : 'Xtream Playlist');
   // Many providers label their Xtream get.php URL as an M3U link. Downloading
   // that generated file can take minutes for a large catalog and made Add
   // Source fail even though the account API was healthy. Detect the embedded
@@ -1915,27 +2708,17 @@ function parsePlaylistInput(body, existing = null) {
 
 app.get('/api/xtream/sources', async (req, res) => {
   try {
-    const ownerId = requestOwner(req);
-    if (!ownerId) return res.status(401).json({ error: 'Authentication required' });
-    res.json({ items: await getXtreamSources(ownerId) });
+    const ownerId = requestOwner(req), accountOwner = requestAccountOwner(req);
+    if (!ownerId || !accountOwner) return res.status(401).json({ error: 'Authentication required' });
+    res.json({ items: (await getAllXtreamSources(accountOwner)).map(source => publicXtreamSource(source, ownerId, accountOwner)) });
   }
   catch (error) { res.status(500).json({ error: error.message }); }
 });
 
-app.put('/api/xtream/sources/:id/rules', async (req, res) => {
-  try {
-    const ownerId = requestOwner(req);
-    if (!ownerId) return res.status(401).json({ error: 'Authentication required' });
-    const source = await getXtreamSource(req.params.id, ownerId);
-    if (!source) return res.status(404).json({ error: 'Playlist source not found' });
-    res.json(await updateXtreamSource(source._id, { rules: normalizePlaylistRules(req.body?.rules) }, ownerId));
-  } catch (error) { res.status(500).json({ error: error.message }); }
-});
-
-async function buildAndroidRecentSnapshot(ownerId) {
+async function buildAndroidRecentSnapshot(ownerId, accountOwner = ownerId) {
   // Sources saved while their provider was unreachable must not turn a
   // background refresh into a minute-long chain of connection timeouts.
-  const sources = (await getAllXtreamSources(ownerId)).filter(source => source.connectionStatus !== 'offline' && !playlistRuleEnabled(source, 'suppressBackgroundRefresh'));
+  const sources = (await getAllXtreamSources(accountOwner)).filter(source => source.connectionStatus !== 'offline');
   const recent = { series: [], movie: [], channel: [] };
   const counts = { series: 0, movie: 0, channel: 0 };
   for (const source of sources) {
@@ -1967,29 +2750,20 @@ async function buildAndroidRecentSnapshot(ownerId) {
   return { counts, recent };
 }
 
-function refreshAndroidRecentSnapshot(ownerId) {
+function refreshAndroidRecentSnapshot(ownerId, accountOwner = ownerId) {
   const key = String(ownerId);
   if (androidRecentRefreshes.has(key)) return androidRecentRefreshes.get(key);
-  const pending = buildAndroidRecentSnapshot(ownerId)
+  const pending = buildAndroidRecentSnapshot(ownerId, accountOwner)
     .finally(() => androidRecentRefreshes.delete(key));
   androidRecentRefreshes.set(key, pending);
   return pending;
 }
 
-function scheduleAndroidStartupRefresh(ownerId, language) {
-  const key = `${ownerId}:${language}`;
+function scheduleAndroidStartupRefresh(ownerId, language, accountOwner = ownerId) {
+  const key = `${ownerId}`;
   if (androidStartupRefreshes.has(key)) return;
   const pending = (async () => {
-    await refreshAndroidRecentSnapshot(ownerId);
-    await getAiRecommendations({
-      ownerId, language, forceRefresh: false,
-      getSources: async requestedOwner => (await getAllXtreamSources(requestedOwner))
-        .filter(source => source.connectionStatus !== 'offline' && !playlistRuleEnabled(source, 'suppressBackgroundRefresh')),
-      getCatalog: (source, kind, category) => withCatalogMemorySlot(
-        () => getSourceCatalog(source, kind, category), 'background',
-      ),
-      getCategories: getSourceCategories,
-    });
+    await refreshAndroidRecentSnapshot(ownerId, accountOwner);
   })().catch(error => console.warn(`[AndroidStartup] background-refresh-failed owner=${ownerId} error=${error.message}`))
     .finally(() => androidStartupRefreshes.delete(key));
   androidStartupRefreshes.set(key, pending);
@@ -2017,80 +2791,302 @@ function androidSavedCounts(sources) {
 // Gemini are refreshed after the response and never block Android navigation.
 app.get('/api/android/bootstrap', async (req, res) => {
   try {
-    const ownerId = requestOwner(req);
+    const ownerId = requestOwner(req), accountOwner = requestAccountOwner(req);
     if (!ownerId) return res.status(401).json({ error: 'Authentication required' });
     const authorization = resolveDeviceToken(String(req.get('x-device-token') || ''));
     const language = ['arabic', 'english', 'both'].includes(String(req.query.language)) ? String(req.query.language) : 'both';
-    const [sources, snapshot, recommendation, devices] = await Promise.all([
-      getAllXtreamSources(ownerId),
+    const [sources, snapshot, devices] = await Promise.all([
+      getAllXtreamSources(accountOwner),
       getAndroidStartupSnapshot(ownerId),
-      getLatestRecommendationCache(ownerId, language, AI_RECOMMENDATION_VERSION),
       authorization?.accountId ? getLinkedDevices(authorization.accountId, authorization.profileId || '') : Promise.resolve([]),
     ]);
-    const counts = androidSavedCounts(sources);
+    const selectedSources = flattenSelection(sources, ownerId, accountOwner);
+    const selectedSourceId = pickRokuSourceId(await getRokuSourcePreferenceByOwner(ownerId), sources);
+    const selectedSource = sources.find(source => String(source._id) === selectedSourceId);
+    const providerItems = items => (Array.isArray(items) ? items : [])
+      .filter(item => String(item?.sourceId || '') === selectedSourceId)
+      .map(item => ({ ...item, providerName: item.providerName || selectedSource?.name || '' }));
+    const recent = snapshot?.recent || { series: [], movie: [], channel: [] };
+    const counts = androidSavedCounts(selectedSources);
     res.set('Cache-Control', 'no-store');
     res.json({
       counts,
-      recent: snapshot?.recent || { series: [], movie: [], channel: [] },
-      recommendations: recommendation?.payload?.items || [],
-      recommendationVersion: AI_RECOMMENDATION_VERSION,
+      recent: { series: providerItems(recent.series), movie: providerItems(recent.movie), channel: providerItems(recent.channel) },
       devices,
-      sources: sources.map(publicXtreamSource),
+      sources: selectedSources.map(source => publicXtreamSource(source, ownerId, accountOwner)),
       snapshotUpdatedAt: snapshot?.updatedAt || null,
       recentRefreshAvailable: androidProviderRefreshEnabled,
     });
     const snapshotAge = snapshot?.updatedAt ? Date.now() - new Date(snapshot.updatedAt).getTime() : Number.POSITIVE_INFINITY;
-    if (androidProviderRefreshEnabled && (snapshotAge > 15 * 60 * 1000 || !recommendation)) {
-      scheduleAndroidStartupRefresh(ownerId, language);
+    if (androidProviderRefreshEnabled && snapshotAge > 15 * 60 * 1000) {
+      scheduleAndroidStartupRefresh(ownerId, language, accountOwner);
     }
   }
   catch (error) { res.status(500).json({ error: error.message }); }
 });
 
+/* AI recommendations removed. Endpoint intentionally returns 404. */
+app.post('/api/recommendations/ai', (req, res) => res.sendStatus(404));
+/*
 app.post('/api/recommendations/ai', async (req, res) => {
   try {
-    const ownerId = requestOwner(req);
-    if (!ownerId) return res.status(401).json({ error: 'Authentication required' });
+    const ownerId = requestOwner(req), accountOwner = requestAccountOwner(req);
+    if (!ownerId || !accountOwner) return res.status(401).json({ error: 'Authentication required' });
+    const allSources = await getAllXtreamSources(accountOwner);
+    const selectedSourceId = pickRokuSourceId(await getRokuSourcePreferenceByOwner(ownerId), allSources);
+    const scopedSources = flattenSelection(allSources, ownerId, accountOwner)
+      .filter(source => String(req.body?.providerScope || '') !== 'roku' || String(source._id) === selectedSourceId);
     const payload = await getAiRecommendations({
       ownerId,
       language: req.body?.language,
       forceRefresh: req.body?.refresh === true,
-      getSources: getAllXtreamSources,
+      getSources: async () => scopedSources,
       getCatalog: getSourceCatalog,
       getCategories: getSourceCategories,
     });
+    if (String(req.body?.providerScope || '') === 'roku') {
+      payload.items = (payload.items || []).filter(item => String(item.sourceId || '') === selectedSourceId)
+        .map(item => ({ ...item, providerName: item.providerName || allSources.find(source => String(source._id) === selectedSourceId)?.name || '' }));
+    }
     res.set('Cache-Control', 'private, no-store');
     res.json(payload);
-    getAllXtreamSources(ownerId)
-      .then(sources => getRecommendationBackdrop(ownerId, payload.items, sources, { providerBusy: providerStreamBusy, acquireLease: sourceId => acquireProviderStreamLease(sourceId, 1) }))
-      .catch(() => {});
+    // The Welcome page's own backdrop poll (per playlist provider) drives the
+    // build now - no need to also kick an unscoped "all providers" one here
+    // that the client never requests and that would just steal the build slot.
   } catch (error) {
     console.error(`[AIRecommendations] endpoint-failed status=${Number(error?.status) || 500}`);
     res.status(Number(error?.status) || 500).json({ error: 'Recommendations are temporarily unavailable' });
   }
 });
+*/
 
 // The RH browser home screen polls this after its recommendations load, then
 // plays the montage once when `ready` flips true. Building happens in the
 // background off the AI-recommendation items; see recommendation-backdrop.js.
+/*
 app.get('/api/recommendations/ai/backdrop', async (req, res) => {
   try {
     const ownerId = requestOwner(req);
-    if (!ownerId) return res.status(401).json({ error: 'Authentication required' });
-    const language = ['arabic', 'english', 'both'].includes(String(req.query.language)) ? String(req.query.language) : 'both';
-    const [recommendation, sources] = await Promise.all([
-      getLatestRecommendationCache(ownerId, language, AI_RECOMMENDATION_VERSION),
-      getAllXtreamSources(ownerId),
-    ]);
-    const status = await getRecommendationBackdrop(ownerId, recommendation?.payload?.items || [], sources, { providerBusy: providerStreamBusy, acquireLease: sourceId => acquireProviderStreamLease(sourceId, 1) });
+    const accountOwner = requestAccountOwner(req);
+    if (!ownerId || !accountOwner) return res.status(401).json({ error: 'Authentication required' });
+    const sources = await getAllXtreamSources(accountOwner);
+    const status = await getRecommendationBackdrop(accountOwner, String(req.query.sourceId || ''), sources, { providerBusy: providerStreamBusy, acquireLease: sourceId => acquireProviderStreamLease(sourceId, 1) });
     res.set('Cache-Control', 'no-store');
     res.json(status);
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
+*/
 
+// Ops dashboard: every playlist source across every account, loopback-only
+// like the other /internal routes - no per-account sign-in needed to see who
+// added what.
+app.get('/internal/playlists', async (req, res) => {
+  if (!localRequest(req)) return res.sendStatus(404);
+  try {
+    const [sources, accountsList, catalogMeta] = await Promise.all([
+      getAllXtreamSources(), listAllAccountsBasic(), listProviderCatalogMeta(),
+    ]);
+    const emailByOwner = new Map(accountsList.map(account => [account.ownerId, account.email]));
+    const profilesByOwner = new Map(await Promise.all(accountsList.map(async account => {
+      const profiles = await getAccountProfiles(account.accountId);
+      return [account.ownerId, profiles.map(profile => ({
+        id: profile.id,
+        name: profile.name,
+        code: profile.code || '',
+        ownerId: profile.isDefault ? account.ownerId : profileOwnerId(account.accountId, profile.id),
+        isDefault: profile.isDefault === true,
+        hasPin: profile.hasPin === true,
+      }))];
+    })));
+    const catalogBySource = new Map(catalogMeta.map(meta => [`${meta.ownerId}:${meta.sourceId}`, meta]));
+    const kindLabels = { series: 'Series', movie: 'Movies', channel: 'Live' };
+    const kindOrder = ['series', 'movie', 'channel'];
+    // This dashboard endpoint is deliberately passive: it reads stored account,
+    // catalog, and connection state and never authenticates against a provider.
+    const rows = await Promise.all(sources.map(async source => {
+      const meta = catalogBySource.get(`${source.ownerId}:${source._id}`);
+      const kind = kindOrder
+        .filter(value => Number(meta?.kinds?.[value]?.count) > 0)
+        .map(value => kindLabels[value])
+        .join(', ');
+      const signedIn = source.connectionStatus === 'online' ? true : (source.connectionStatus === 'offline' ? false : null);
+      const catalogItems = ['series', 'movie', 'channel'].reduce((n, k) => n + (Number(meta?.kinds?.[k]?.count) || 0), 0);
+      const catalogSyncedAt = meta?.updatedAt ? new Date(meta.updatedAt).toISOString() : null;
+      return {
+        id: String(source._id),
+        username: emailByOwner.get(String(source.ownerId || '')) || 'Unknown user',
+        profiles: profilesByOwner.get(String(source.ownerId || '')) || [],
+        providerUsername: source.username || '',
+        name: source.name || 'Playlist',
+        type: source.type || 'xtream',
+        kind,
+        signedIn,
+        signInError: source.lastConnectionError || '',
+        catalogItems,
+        catalogSyncedAt,
+        endpoint: source.baseUrl || '',
+        connectionStatus: source.connectionStatus || 'unknown',
+      };
+    })).then(rows => rows.sort((a, b) => a.username.localeCompare(b.username) || a.name.localeCompare(b.name)));
+    res.set('Cache-Control', 'no-store');
+    res.json({ playlists: rows });
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+// Credential-free catalog viewer for the loopback-only operations dashboard.
+// These routes deliberately resolve the source's stored owner server-side;
+// the browser receives no RH account token and off-host callers get 404.
+app.get('/internal/catalog-snapshot', async (req, res) => {
+  if (!localRequest(req)) return res.sendStatus(404);
+  try {
+    const [sources, accountsList] = await Promise.all([getAllXtreamSources(), listAllAccountsBasic()]);
+    const emailByOwner = new Map(accountsList.map(account => [account.ownerId, account.email]));
+    const rows = await Promise.all(sources.map(async source => {
+      const ownerId = String(source.ownerId || '');
+      const meta = await getProviderCatalogMeta(ownerId, String(source._id)).catch(() => null);
+      return {
+        sourceId: String(source._id),
+        name: source.name || 'Playlist',
+        account: emailByOwner.get(ownerId) || 'Local account',
+        connectionStatus: source.connectionStatus || 'unknown',
+        counts: {
+          series: Number(meta?.kinds?.series?.count) || 0,
+          movie: Number(meta?.kinds?.movie?.count) || 0,
+          channel: Number(meta?.kinds?.channel?.count) || 0,
+        },
+        syncedAt: meta?.updatedAt || null,
+        downloading: ['series', 'movie', 'channel'].some(kind => catalogSnapshotJobs.has(`${ownerId}:${source._id}:${kind}`)),
+      };
+    }));
+    res.set('Cache-Control', 'no-store');
+    res.json({ sources: rows });
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+app.get('/internal/catalog-snapshot/items', async (req, res) => {
+  if (!localRequest(req)) return res.sendStatus(404);
+  try {
+    const kind = { series: 'series', movie: 'movie', movies: 'movie', vod: 'movie', channel: 'channel', channels: 'channel', live: 'channel' }[String(req.query.kind || '')];
+    if (!kind) return res.status(400).json({ error: 'kind must be series, movie, or channel' });
+    const source = await getXtreamSource(String(req.query.sourceId || ''));
+    if (!source) return res.status(404).json({ error: 'Playlist source not found' });
+    const result = await queryProviderCatalogItems(
+      String(source.ownerId), String(source._id), kind,
+      { q: String(req.query.q || ''), page: Number.parseInt(req.query.page, 10) || 1, limit: Number.parseInt(req.query.limit, 10) || 50 },
+    );
+    result.items = (result.items || []).map(item => ({ ...item, providerUrl: sourceProviderUrl(source, kind, item.id, item.extension) }));
+    res.set('Cache-Control', 'no-store');
+    res.json(result);
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+app.get('/internal/catalog-snapshot/episodes', async (req, res) => {
+  if (!localRequest(req)) return res.sendStatus(404);
+  try {
+    const seriesId = String(req.query.seriesId || '');
+    if (!seriesId) return res.status(400).json({ error: 'seriesId is required' });
+    const source = await getXtreamSource(String(req.query.sourceId || ''));
+    if (!source) return res.status(404).json({ error: 'Playlist source not found' });
+    const details = await getIndexedXtreamSeriesEpisodes(source, seriesId);
+    const items = (details.episodes || []).map(episode => {
+      const extension = String(episode.extension || '').toLowerCase();
+      return {
+        id: episode.id,
+        title: episode.title || `${details.title} - ${episode.episodeNumber}`,
+        category: episode.seasonTitle || (episode.seasonNumber != null ? `Season ${episode.seasonNumber}` : ''),
+        extension,
+        providerUrl: sourceProviderUrl(source, 'series', episode.id, extension),
+      };
+    });
+    res.set('Cache-Control', 'no-store');
+    res.json({ seriesTitle: details.title, items, total: items.length });
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+app.post('/internal/catalog-snapshot/download', async (req, res) => {
+  if (!localRequest(req)) return res.sendStatus(404);
+  try {
+    const source = await getXtreamSource(String(req.body?.sourceId || ''));
+    if (!source) return res.status(404).json({ error: 'Playlist source not found' });
+    const ownerId = String(source.ownerId || '');
+    for (const kind of ['series', 'movie', 'channel']) refreshCatalogSnapshot(ownerId, source, kind);
+    res.json({ ok: true, started: true });
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+// Ops dashboard: "log in again" to a set of provider rows - one row (an RH
+// account's source), a whole credential line, or every line under a provider.
+// Authenticates once per real credential (baseUrl+username) so a max_conns:1
+// panel is not hit twice in parallel, then persists the result to every source
+// that shares it and drops the cached provider lists. Loopback-only.
+app.post('/internal/source-retry', async (req, res) => {
+  if (!localRequest(req)) return res.sendStatus(404);
+  try {
+    const ids = [...new Set((Array.isArray(req.body?.sourceIds) ? req.body.sourceIds
+      : req.body?.sourceId ? [req.body.sourceId] : []).map(String).filter(Boolean))];
+    if (!ids.length) return res.status(400).json({ error: 'sourceId(s) required' });
+    const targets = (await getAllXtreamSources()).filter(source => ids.includes(String(source._id)));
+    if (!targets.length) return res.sendStatus(404);
+    const byCredential = new Map();
+    for (const source of targets) {
+      const key = `${sourceType(source)}\u0000${source.baseUrl || ''}\u0000${source.username || ''}`;
+      (byCredential.get(key) || byCredential.set(key, []).get(key)).push(source);
+    }
+    const results = [];
+    for (const group of byCredential.values()) {
+      let ok = true;
+      let message = '';
+      try {
+        if (sourceType(group[0]) === 'm3u') await validateM3uConnection({ ...group[0] }, { attempts: 1, timeoutMs: 12_000 });
+        else await validateXtreamConnection({ ...group[0] }, { attempts: 1, timeoutMs: 12_000 });
+      } catch (error) {
+        ok = false;
+        message = String(error?.message || 'Playlist provider is unavailable').slice(0, 240);
+      }
+      for (const source of group) {
+        await updateXtreamSource(String(source._id), ok
+          ? { connectionStatus: 'online', connectionMessage: '' }
+          : { connectionStatus: 'offline', connectionMessage: message }).catch(() => {});
+        if (ok && sourceType(source) === 'm3u') {
+          await refreshCatalogSnapshot(source.ownerId, source, 'channel').catch(error => {
+            console.warn(`[Playlist] retry catalog refresh failed source=${source._id}: ${error.message}`);
+          });
+        }
+        results.push({ id: String(source._id), ok, status: ok ? 'online' : 'offline', error: message });
+      }
+    }
+    playlistHealthCache.clear();
+    evictXtreamCache(Date.now(), true);
+    evictM3uCache(Date.now(), true);
+    res.set('Cache-Control', 'no-store');
+    const online = results.filter(result => result.ok).length;
+    res.json({ ok: online === results.length, online, total: results.length, results });
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+// Ops dashboard preview: every built backdrop + the items it was spliced
+// from, loopback-only like the other /internal routes.
+app.get('/internal/backdrops', async (req, res) => {
+  if (!localRequest(req)) return res.sendStatus(404);
+  try { res.set('Cache-Control', 'no-store'); res.json({ backdrops: await listBackdrops() }); }
+  catch (error) { res.status(500).json({ error: error.message }); }
+});
+app.get('/internal/backdrop.mp4', async (req, res) => {
+  if (!localRequest(req)) return res.sendStatus(404);
+  try {
+    const file = backdropVideoFile(String(req.query.owner || ''), String(req.query.h || ''));
+    if (!file) return res.sendStatus(404);
+    await fs.access(file);
+    res.setHeader('Content-Type', 'video/mp4');
+    res.setHeader('Cache-Control', 'no-store');
+    res.sendFile(file);
+  } catch { res.sendStatus(404); }
+});
+
+/*
 app.get('/api/recommendations/ai/backdrop.mp4', async (req, res) => {
   try {
-    const ownerId = requestOwner(req);
+    const ownerId = requestAccountOwner(req);
     if (!ownerId) return res.sendStatus(401);
     const file = backdropVideoFile(ownerId, String(req.query.h || ''));
     if (!file) return res.sendStatus(404);
@@ -2100,24 +3096,48 @@ app.get('/api/recommendations/ai/backdrop.mp4', async (req, res) => {
     res.sendFile(file);
   } catch { res.sendStatus(404); }
 });
+*/
+
+// Prepares the Welcome-page backdrop ahead of a login, off the playlist
+// catalog each account already has synced - not off a live AI-recommendation
+// call. getRecommendationBackdrop already no-ops once a matching build
+// exists, so a periodic sweep only ever spends provider time on an account
+// whose newest Series/Movies changed since its last build.
+async function sweepBackdrops() {
+  const sources = await getAllXtreamSources().catch(() => []);
+  const byOwner = new Map();
+  for (const source of sources) {
+    const ownerId = String(source.ownerId || '');
+    if (!ownerId) continue;
+    if (!byOwner.has(ownerId)) byOwner.set(ownerId, []);
+    byOwner.get(ownerId).push(source);
+  }
+  for (const [ownerId, ownerSources] of byOwner) {
+    // Warm one backdrop per provider (that is what the Welcome page shows now).
+    for (const source of ownerSources) {
+      await getRecommendationBackdrop(ownerId, String(source._id), ownerSources, { providerBusy: providerStreamBusy, acquireLease: sourceId => acquireProviderStreamLease(sourceId, 1) }).catch(() => {});
+    }
+  }
+}
+// AI recommendation backdrop generation removed.
 
 // Periodic Android work must never download whole provider catalogs.  Return
 // the same persisted snapshot used by bootstrap.  This keeps notifications
 // useful without making a background worker exhaust the Fly VM.
 app.get('/api/xtream/catalog-counts', async (req, res) => {
   try {
-    const ownerId = requestOwner(req);
-    if (!ownerId) return res.status(401).json({ error: 'Authentication required' });
+    const ownerId = requestOwner(req), accountOwner = requestAccountOwner(req);
+    if (!ownerId || !accountOwner) return res.status(401).json({ error: 'Authentication required' });
     if (androidProviderRefreshEnabled && req.query.refresh === 'true') {
-      return res.json(await refreshAndroidRecentSnapshot(ownerId));
+      return res.json(await refreshAndroidRecentSnapshot(ownerId, accountOwner));
     }
     const [snapshot, sources] = await Promise.all([
       getAndroidStartupSnapshot(ownerId),
-      getAllXtreamSources(ownerId),
+      getAllXtreamSources(accountOwner),
     ]);
     res.set('Cache-Control', 'no-store');
     res.json({
-      counts: androidSavedCounts(sources),
+      counts: androidSavedCounts(flattenSelection(sources, ownerId, accountOwner)),
       recent: snapshot?.recent || { series: [], movie: [], channel: [] },
       snapshotUpdatedAt: snapshot?.updatedAt || null,
     });
@@ -2140,19 +3160,21 @@ app.get('/api/xtream/logo', async (req, res) => {
       if (['localhost', '127.0.0.1', '0.0.0.0', '::1'].includes(target.hostname)) throw new Error('Unsupported logo host');
     };
     let target = new URL(supplied);
+    const prepareRokuLogoTarget = value => {
+      if (req.query.roku !== '1') return value;
+      const hostname = value.hostname.toLowerCase();
+      if (hostname === 'www.themoviedb.org' || hostname === 'themoviedb.org') value.hostname = 'image.tmdb.org';
+      if (value.hostname.toLowerCase() === 'image.tmdb.org') {
+        value.pathname = value.pathname.replace(/^\/t\/p\/[^/]+\//, '/t/p/w342/');
+      }
+      if (/^i\d+\.wp\.com$/i.test(value.hostname)) value.searchParams.set('fit', '342,513');
+      return value;
+    };
     // Roku cards are roughly 160x240 at a 1280x720 UI resolution. Avoid
     // forwarding multi-megapixel TMDB originals to the device; TMDB provides
     // an image-size path specifically for this purpose. Keep the default proxy
     // behavior unchanged for the Library web frontend.
-    if (req.query.roku === '1' && target.hostname.toLowerCase() === 'image.tmdb.org') {
-      target.pathname = target.pathname.replace(/^\/t\/p\/[^/]+\//, '/t/p/w342/');
-    }
-    if (req.query.roku === '1' && /^i\d+\.wp\.com$/i.test(target.hostname)) {
-      // Jetpack's image CDN already accepts a fit transform. Override large
-      // publisher dimensions for Roku cards instead of forwarding 819x1024+
-      // artwork to a 1280x720 SceneGraph.
-      target.searchParams.set('fit', '342,513');
-    }
+    target = prepareRokuLogoTarget(target);
     let response;
     for (let redirects = 0; redirects <= 3; redirects += 1) {
       validateLogoTarget(target);
@@ -2165,7 +3187,7 @@ app.get('/api/xtream/logo', async (req, res) => {
       const location = response.headers.get('location');
       await response.body?.cancel();
       if (!location || redirects === 3) throw new Error('Logo redirected too many times');
-      target = new URL(location, target);
+      target = prepareRokuLogoTarget(new URL(location, target));
     }
     if (!response.ok) return res.sendStatus(response.status === 404 ? 404 : 502);
     const contentType = response.headers.get('content-type') || 'image/jpeg';
@@ -2196,9 +3218,17 @@ function validateSavedPlaylistSource(source, sourceId, ownerId) {
   setImmediate(async () => {
     try {
       const candidate = { ...source, _id: sourceId };
-      if (source.type === 'm3u') await validateM3uConnection(candidate, { timeoutMs: 8_000 });
+      if (source.type === 'm3u') await validateM3uConnection(candidate, { attempts: 3, timeoutMs: 12_000 });
       else await validateXtreamConnection(candidate, { attempts: 1, timeoutMs: 8_000 });
       await updateXtreamSource(sourceId, { connectionStatus: 'online', connectionMessage: '' }, ownerId);
+      // The initial catalog request shares the validation download and fails
+      // with it. Rebuild the M3U snapshot after a retry succeeds so Live TV
+      // appears without making the user add the playlist again.
+      if (source.type === 'm3u') {
+        await refreshCatalogSnapshot(ownerId, candidate, 'channel').catch(error => {
+          console.warn(`[Playlist] post-validation catalog refresh failed source=${sourceId}: ${error.message}`);
+        });
+      }
     } catch (error) {
       const connectionMessage = String(error?.message || error || 'Playlist provider is unavailable').slice(0, 240);
       await updateXtreamSource(sourceId, { connectionStatus: 'offline', connectionMessage }, ownerId).catch(() => {});
@@ -2211,24 +3241,34 @@ function validateSavedPlaylistSource(source, sourceId, ownerId) {
 
 app.post('/api/xtream/sources', async (req, res) => {
   try {
-    const ownerId = requestOwner(req);
+    const ownerId = requestAccountOwner(req);
     if (!ownerId) return res.status(401).json({ error: 'Authentication required' });
     const source = parsePlaylistInput(req.body);
     const saved = await createXtreamSource({
       ...source, ownerId, connectionStatus: 'checking', connectionMessage: 'Checking provider connection in the background.',
     });
+    if (req.body?.selectForRoku === true || req.body?.selectforroku === true) {
+      const accountId = requestAccount(req);
+      if (accountId) await setProfileRokuSourcePreference(accountId, requestProfile(req), saved.id);
+    }
     playlistHealthCache.delete(ownerId);
     res.status(202).json({
       ...saved,
-      warning: 'Playlist saved. Provider connection is being checked in the background.',
+      warning: 'Playlist saved. Provider connection and catalog download are running in the background.',
+      catalogDownloadStarted: true,
     });
     validateSavedPlaylistSource(source, saved.id, ownerId);
+    // Seed MongoDB immediately after the source is created. Catalog reads are
+    // snapshot-only, so this makes the new playlist available without waiting
+    // for a user to open each rail/category first. Jobs are deduplicated per
+    // account/source/kind and failures retain the normal connection status.
+    for (const kind of ['series', 'movie', 'channel']) void refreshCatalogSnapshot(ownerId, { ...source, _id: saved.id }, kind);
   } catch (error) { res.status(400).json({ error: error.message }); }
 });
 
 app.put('/api/xtream/sources/:id', async (req, res) => {
   try {
-    const ownerId = requestOwner(req);
+    const ownerId = requestAccountOwner(req);
     const existing = await getXtreamSource(req.params.id, ownerId);
     if (!existing) return res.sendStatus(404);
     const changes = parsePlaylistInput(req.body, existing);
@@ -2248,7 +3288,7 @@ app.put('/api/xtream/sources/:id', async (req, res) => {
 
 app.delete('/api/xtream/sources/:id', async (req, res) => {
   try {
-    const ownerId = requestOwner(req);
+    const ownerId = requestAccountOwner(req);
     if (!await deleteXtreamSource(req.params.id, ownerId)) return res.sendStatus(404);
     playlistHealthCache.delete(ownerId);
     await deleteProviderCatalog(ownerId, String(req.params.id)).catch(() => {});
@@ -2280,7 +3320,7 @@ async function probeXtreamStream(source, kind) {
     extension = String(first.extension || (kind === 'movie' ? 'mkv' : 'mp4'));
   }
   if (kind === 'series') {
-    const info = await getXtreamSeriesEpisodes(source, id).catch(() => ({ episodes: [] }));
+    const info = await getIndexedXtreamSeriesEpisodes(source, id).catch(() => ({ episodes: [] }));
     const episode = Array.isArray(info?.episodes) ? info.episodes[0] : null;
     if (!episode) throw new Error('No episodes returned for the sample series');
     id = String(episode.id);
@@ -2327,7 +3367,7 @@ async function probeXtreamStream(source, kind) {
 // is, so this stays safe to run interactively.
 app.get('/api/xtream/sources/:id/diagnostics', async (req, res) => {
   try {
-    const ownerId = requestOwner(req);
+    const ownerId = requestAccountOwner(req);
     if (!ownerId) return res.status(401).json({ error: 'Authentication required' });
     const source = await getXtreamSource(req.params.id, ownerId);
     if (!source) return res.status(404).json({ error: 'Playlist source not found' });
@@ -2349,15 +3389,8 @@ app.get('/api/xtream/sources/:id/diagnostics', async (req, res) => {
       isM3u ? notApplicable : (auth.ok ? vodStep('movie') : skipped),
       auth.ok ? checkDiagnosticStep(() => getSourceCategories(source, 'channel')) : skipped,
     ]);
-    // The provider's own connection counter (Xtream's base auth response) is
-    // ground truth for "is this playlist streaming right now" — it reflects
-    // every device using these credentials, not just the ones this app knows
-    // about, and catches a provider-side lock our own tracking cannot see.
-    const connections = !isM3u && auth.result
-      ? { active: Number(auth.result.active_cons) || 0, max: Number(auth.result.max_connections) || 0 }
-      : null;
     res.set('Cache-Control', 'no-store');
-    res.json({ sourceId: String(source._id), checkedAt: new Date().toISOString(), connections, steps: { auth, series, movie, channel } });
+    res.json({ sourceId: String(source._id), checkedAt: new Date().toISOString(), steps: { auth, series, movie, channel } });
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
@@ -2365,18 +3398,19 @@ app.get('/api/xtream/sources/:id/diagnostics', async (req, res) => {
 // provider snapshot. A stale/missing snapshot triggers one lazy refresh.
 app.get('/api/xtream/sources/:id/rails', async (req, res) => {
   try {
-    const ownerId = requestOwner(req);
-    if (!ownerId) return res.status(401).json({ error: 'Authentication required' });
-    const source = await getXtreamSource(req.params.id, ownerId);
+    const ownerId = requestOwner(req), accountOwner = requestAccountOwner(req);
+    if (!ownerId || !accountOwner) return res.status(401).json({ error: 'Authentication required' });
+    const source = await getXtreamSource(req.params.id, accountOwner);
     if (!source) return res.status(404).json({ error: 'Playlist source not found' });
     const limit = Math.max(1, Math.min(50, Number.parseInt(req.query.limit, 10) || 10));
     // Stored snapshot only - never touch the playlist provider here.
-    const rails = await getProviderCatalogRails(ownerId, String(source._id), limit);
-    const enabled = new Set(Array.isArray(source.enabledKeys) ? source.enabledKeys : []);
+    const rails = await getProviderCatalogRails(accountOwner, String(source._id), limit);
+    const selectedSource = { ...source, ...selectionFor(source, ownerId, accountOwner) };
+    const enabled = new Set(selectedSource.enabledKeys);
     const mark = list => list.map(item => ({ ...item, sourceId: String(source._id), providerName: source.name, enabled: enabled.has(item.key) }));
     res.set('Cache-Control', 'private, no-store');
     res.json({
-      source: publicXtreamSource(source),
+      source: publicXtreamSource(source, ownerId, accountOwner),
       series: mark(rails.series), movie: mark(rails.movie), channel: mark(rails.channel),
       updatedAt: rails.updatedAt || new Date().toISOString(),
       counts: {
@@ -2391,9 +3425,9 @@ app.get('/api/xtream/sources/:id/rails', async (req, res) => {
 
 app.get('/api/xtream/catalog', async (req, res) => {
   try {
-    const ownerId = requestOwner(req);
-    if (!ownerId) return res.status(401).json({ error: 'Authentication required' });
-    const source = await getXtreamSource(String(req.query.sourceId || ''), ownerId);
+    const ownerId = requestOwner(req), accountOwner = requestAccountOwner(req);
+    if (!ownerId || !accountOwner) return res.status(401).json({ error: 'Authentication required' });
+    const source = await getXtreamSource(String(req.query.sourceId || ''), accountOwner);
     if (!source) return res.status(404).json({ error: 'Xtream source not found' });
     const aliases = { live: 'channel', channel: 'channel', movie: 'movie', vod: 'movie', series: 'series' };
     const kind = aliases[String(req.query.kind || '')];
@@ -2407,30 +3441,38 @@ app.get('/api/xtream/catalog', async (req, res) => {
     // Served strictly from the MongoDB provider snapshot - the playlist
     // provider is never contacted here. The snapshot is populated by the Roku
     // bootstrap and the dashboard's catalog controls.
-    if (!await catalogSnapshotHasKind(ownerId, source._id, kind)) {
-      return res.json({ source: publicXtreamSource(source), languages: [], items: [], pagination: { page: 1, pageSize: 0, pageCount: 1, total: 0 }, origin: 'unavailable' });
+    if (!await catalogSnapshotHasKind(accountOwner, source._id, kind)) {
+      return res.json({ source: publicXtreamSource(source, ownerId, accountOwner), languages: [], items: [], pagination: { page: 1, pageSize: 0, pageCount: 1, total: 0 }, origin: 'unavailable' });
     }
-    const enabled = new Set(source.enabledKeys || []);
+    const selectedSource = { ...source, ...selectionFor(source, ownerId, accountOwner) };
+    const enabled = new Set(selectedSource.enabledKeys);
     const titleLanguage = String(req.query.titleLanguage || req.query.language || 'all').toUpperCase();
     const requestedPage = Math.max(1, Number.parseInt(req.query.page, 10) || 1);
     const requestedLimit = String(req.query.limit || '').trim().toLowerCase();
     const pageSize = requestedLimit === 'all' ? 200 : Math.min(200, Math.max(10, Number.parseInt(requestedLimit, 10) || 50));
-    const languages = await catalogLanguagesFor(ownerId, source._id, kind);
+    const languages = await catalogLanguagesFor(accountOwner, source._id, kind);
     // Every filter is applied in MongoDB - a search stays across the whole kind,
     // a browse stays inside the open category, and the title-prefix language
     // filter ("DE - ...", "AR | ...") folds into the same query.
     const filters = [];
-    if (query) filters.push({ title: { $regex: query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), $options: 'i' } });
+    // The query is folded (e.g. ة -> ه), but snapshot titles retain their
+    // original spelling. Expand variants when matching those stored titles.
+    if (query) filters.push({ title: { $regex: arabicSearchRegexSource(query), $options: 'i' } });
     if (titleLanguage !== 'ALL') filters.push({ title: { $regex: `^\\s*${titleLanguage.replace(/[^A-Z]/gi, '')}\\s*[-|:]`, $options: 'i' } });
-    const result = await queryProviderCatalogItems(ownerId, String(source._id), kind, {
+    const result = await queryProviderCatalogItems(accountOwner, String(source._id), kind, {
       categoryId: query ? '' : category,
       page: requestedPage,
       limit: pageSize,
       extraFilters: filters,
     });
+    // Catalog rows carry only a category id - always resolve it to the real
+    // provider category name so no id ever leaks into the UI.
+    const categories = await getProviderCatalogCategories(accountOwner, String(source._id), kind).catch(() => []);
+    const categoryNameById = new Map(categories.map(entry => [String(entry.id), entry.name]));
     res.json({
-      source: publicXtreamSource(source), languages,
-      items: result.items.map(item => ({ ...item, languageCode: titleLanguageCode(item), titleLanguage: titleLanguageCode(item), enabled: enabled.has(item.key) })),
+      source: publicXtreamSource(source, ownerId, accountOwner), languages, categories,
+      stale: result.stale, syncedAt: result.syncedAt,
+      items: result.items.map(item => ({ ...item, category: categoryNameById.get(String(item.categoryId)) || item.category || 'Uncategorized', languageCode: titleLanguageCode(item), titleLanguage: titleLanguageCode(item), enabled: enabled.has(item.key) })),
       pagination: { page: result.page, pageSize: result.limit, pageCount: result.pageCount, total: result.total },
     });
   } catch (error) { res.status(502).json({ error: error.message }); }
@@ -2438,7 +3480,7 @@ app.get('/api/xtream/catalog', async (req, res) => {
 
 app.get('/api/xtream/categories', async (req, res) => {
   try {
-    const ownerId = requestOwner(req);
+    const ownerId = requestAccountOwner(req);
     if (!ownerId) return res.status(401).json({ error: 'Authentication required' });
     const source = await getXtreamSource(String(req.query.sourceId || ''), ownerId);
     if (!source) return res.status(404).json({ error: 'Xtream source not found' });
@@ -2460,9 +3502,16 @@ app.get('/api/xtream/categories', async (req, res) => {
   } catch (error) { res.status(502).json({ error: error.message }); }
 });
 
+// A Watch-with-Partner guest does not own the host's source, so let a valid
+// stream ticket for this exact item resolve the source as the host instead.
+function durationLookupOwner(req, kind) {
+  const ticket = resolveStreamTicket(req.query.streamTicket, req.params.sourceId, kind, req.params.id);
+  return ticket?.accountOwnerId || requestAccountOwner(req);
+}
+
 app.get('/api/xtream/movie/:sourceId/:id/duration', async (req, res) => {
   try {
-    const source = await getXtreamSource(req.params.sourceId, mediaOwner(req));
+    const source = await getXtreamSource(req.params.sourceId, durationLookupOwner(req, 'movie'));
     if (!source) return res.sendStatus(404);
     const { seconds, duration, source: durationSource } = await resolveMediaDuration(source, 'movie', req.params.id, req.query.ext);
     res.set('Cache-Control', 'private, max-age=300');
@@ -2472,10 +3521,23 @@ app.get('/api/xtream/movie/:sourceId/:id/duration', async (req, res) => {
 
 app.get('/api/xtream/media-duration/:sourceId/:kind/:id', async (req, res) => {
   try {
-    if (req.params.kind !== 'movie' && req.params.kind !== 'series') return res.sendStatus(400);
-    const source = await getXtreamSource(req.params.sourceId, mediaOwner(req));
+    if (!['movie', 'series', 'channel'].includes(req.params.kind)) return res.sendStatus(400);
+    const source = await getXtreamSource(req.params.sourceId, durationLookupOwner(req, req.params.kind));
     if (!source) return res.sendStatus(404);
-    const result = await resolveMediaDuration(source, req.params.kind, req.params.id, req.query.ext, req.query.known);
+    // Live channels have no duration to probe - the Roku preview only asks
+    // this endpoint for the active stream's codec-matrix strategy.
+    if (req.params.kind === 'channel') {
+      if (req.query.playbackStrategy !== '1') return res.sendStatus(400);
+      const matrix = await streamerPlaybackStrategy(req.params.sourceId, req.params.kind, req.params.id);
+      res.set('Cache-Control', 'no-store');
+      return res.json(matrix);
+    }
+    const result = await resolveMediaDuration(source, req.params.kind, req.params.id, req.query.ext, req.query.seriesId);
+    if (req.query.playbackStrategy === '1') {
+      const matrix = await streamerPlaybackStrategy(req.params.sourceId, req.params.kind, req.params.id);
+      res.set('Cache-Control', 'no-store');
+      return res.json({ ...result, ...matrix });
+    }
     res.set('Cache-Control', 'private, max-age=300');
     res.json(result);
   } catch (error) { res.status(502).json({ error: error.message }); }
@@ -2540,31 +3602,34 @@ function suppliedXtreamEnabledItems(source, enabledKeys, suppliedItems, category
 
 app.get('/api/xtream/sources/:id/enabled', async (req, res) => {
   try {
-    const source = await getXtreamSource(req.params.id, requestOwner(req));
+    const ownerId = requestOwner(req), accountOwner = requestAccountOwner(req);
+    const source = await getXtreamSource(req.params.id, accountOwner);
     if (!source) return res.sendStatus(404);
-    const enabledKeys = Array.isArray(source.enabledKeys) ? source.enabledKeys : [];
-    let enabledItems = Array.isArray(source.enabledItems) ? source.enabledItems : [];
+    const selectedSource = { ...source, ...selectionFor(source, ownerId, accountOwner) };
+    const enabledKeys = selectedSource.enabledKeys;
+    let enabledItems = selectedSource.enabledItems;
     const itemKeys = new Set(enabledItems.map(item => item.key));
     const needsBackfill = enabledItems.length !== enabledKeys.length
       || enabledKeys.some(key => !itemKeys.has(key))
       || enabledItems.some(item => !item.category || !item.language
-        || String(item.category).trim().toLowerCase() === String(source.name).trim().toLowerCase());
+        || String(item.category).trim().toLowerCase() === String(selectedSource.name).trim().toLowerCase());
     if (needsBackfill && enabledKeys.length) {
       enabledItems = await resolveXtreamEnabledItems(source, enabledKeys);
-      const updated = await updateXtreamSelection(source._id, enabledItems.map(item => item.key), enabledItems, requestOwner(req));
+      const updated = await updateXtreamSelection(source._id, { ...selectionFor(source, ownerId, accountOwner), enabledKeys: enabledItems.map(item => item.key), enabledItems }, accountOwner, ownerId);
       return res.json({ source: updated, items: updated.enabledItems });
     }
-    res.json({ source: publicXtreamSource(source), items: enabledItems });
+    res.json({ source: publicXtreamSource(source, ownerId, accountOwner), items: enabledItems });
   } catch (error) { res.status(502).json({ error: error.message }); }
 });
 
 app.put('/api/xtream/sources/:id/selection', async (req, res) => {
   try {
-    const ownerId = requestOwner(req);
+    const ownerId = requestOwner(req), accountOwner = requestAccountOwner(req);
     if (!ownerId) return res.status(401).json({ error: 'Authentication required' });
     if (!Array.isArray(req.body?.enabledKeys)) return res.status(400).json({ error: 'enabledKeys must be an array' });
-    const source = await getXtreamSource(req.params.id, ownerId);
+    const source = await getXtreamSource(req.params.id, accountOwner);
     if (!source) return res.sendStatus(404);
+    const selectedSource = { ...source, ...selectionFor(source, ownerId, accountOwner) };
     // The manager already has the selected catalog rows. Persist them directly
     // instead of downloading every Xtream list again merely to resolve keys.
     // Full provider catalog reloads here were causing browser "Failed to fetch"
@@ -2577,12 +3642,12 @@ app.put('/api/xtream/sources/:id/selection', async (req, res) => {
     }
     const enabledKeys = enabledItems.map(item => item.key);
     const enabledSet = new Set(enabledKeys);
-    const updated = await updateXtreamSource(req.params.id, {
+    const updated = await updateXtreamSelection(req.params.id, {
       enabledKeys,
       enabledItems,
-      archivedKeys: (source.archivedKeys || []).filter(key => !enabledSet.has(key)),
-      archivedItems: (source.archivedItems || []).filter(item => !enabledSet.has(item.key)),
-    }, ownerId);
+      archivedKeys: selectedSource.archivedKeys.filter(key => !enabledSet.has(key)),
+      archivedItems: selectedSource.archivedItems.filter(item => !enabledSet.has(item.key)),
+    }, accountOwner, ownerId);
     if (!updated) return res.sendStatus(404);
     bumpLibraryRevision(ownerId);
     res.json(updated);
@@ -2591,20 +3656,21 @@ app.put('/api/xtream/sources/:id/selection', async (req, res) => {
 
 app.post('/api/xtream/sources/:id/archive/:key', async (req, res) => {
   try {
-    const ownerId = requestOwner(req);
-    const source = await getXtreamSource(req.params.id, ownerId);
+    const ownerId = requestOwner(req), accountOwner = requestAccountOwner(req);
+    const source = await getXtreamSource(req.params.id, accountOwner);
     if (!source) return res.sendStatus(404);
+    const selectedSource = { ...source, ...selectionFor(source, ownerId, accountOwner) };
     const key = String(req.params.key || '');
-    const enabledItems = Array.isArray(source.enabledItems) ? source.enabledItems : [];
+    const enabledItems = selectedSource.enabledItems;
     const item = enabledItems.find(candidate => candidate.key === key);
     if (!item) return res.status(404).json({ error: 'Saved Roku item not found' });
-    const archiveItems = [...(Array.isArray(source.archivedItems) ? source.archivedItems : []).filter(candidate => candidate.key !== key), item];
-    const updated = await updateXtreamSource(source._id, {
-      enabledKeys: (source.enabledKeys || []).filter(candidate => candidate !== key),
+    const archiveItems = [...selectedSource.archivedItems.filter(candidate => candidate.key !== key), item];
+    const updated = await updateXtreamSelection(source._id, {
+      enabledKeys: selectedSource.enabledKeys.filter(candidate => candidate !== key),
       enabledItems: enabledItems.filter(candidate => candidate.key !== key),
       archivedKeys: archiveItems.map(candidate => candidate.key),
       archivedItems: archiveItems,
-    }, ownerId);
+    }, accountOwner, ownerId);
     bumpLibraryRevision(ownerId);
     res.json(updated);
   } catch (error) { res.status(500).json({ error: error.message }); }
@@ -2612,20 +3678,21 @@ app.post('/api/xtream/sources/:id/archive/:key', async (req, res) => {
 
 app.post('/api/xtream/sources/:id/archive/:key/restore', async (req, res) => {
   try {
-    const ownerId = requestOwner(req);
-    const source = await getXtreamSource(req.params.id, ownerId);
+    const ownerId = requestOwner(req), accountOwner = requestAccountOwner(req);
+    const source = await getXtreamSource(req.params.id, accountOwner);
     if (!source) return res.sendStatus(404);
+    const selectedSource = { ...source, ...selectionFor(source, ownerId, accountOwner) };
     const key = String(req.params.key || '');
-    const archivedItems = Array.isArray(source.archivedItems) ? source.archivedItems : [];
+    const archivedItems = selectedSource.archivedItems;
     const item = archivedItems.find(candidate => candidate.key === key);
     if (!item) return res.status(404).json({ error: 'Archived item not found' });
-    const enabledItems = [...(Array.isArray(source.enabledItems) ? source.enabledItems : []).filter(candidate => candidate.key !== key), item];
-    const updated = await updateXtreamSource(source._id, {
+    const enabledItems = [...selectedSource.enabledItems.filter(candidate => candidate.key !== key), item];
+    const updated = await updateXtreamSelection(source._id, {
       enabledKeys: enabledItems.map(candidate => candidate.key),
       enabledItems,
-      archivedKeys: (source.archivedKeys || []).filter(candidate => candidate !== key),
+      archivedKeys: selectedSource.archivedKeys.filter(candidate => candidate !== key),
       archivedItems: archivedItems.filter(candidate => candidate.key !== key),
-    }, ownerId);
+    }, accountOwner, ownerId);
     bumpLibraryRevision(ownerId);
     res.json(updated);
   } catch (error) { res.status(500).json({ error: error.message }); }
@@ -2639,7 +3706,8 @@ app.get('/api/xtream/play/:sourceId/:kind/:id', async (req, res) => {
   const abortUpstream = () => controller.abort(new Error('Downstream client disconnected'));
   res.once('close', abortUpstream);
   try {
-    const source = await getXtreamSource(req.params.sourceId, requestOwner(req));
+    const ticket = resolveStreamTicket(req.query.streamTicket, req.params.sourceId, req.params.kind, req.params.id);
+    const source = await getXtreamSource(req.params.sourceId, ticket?.accountOwnerId || requestAccountOwner(req));
     if (!source) return res.sendStatus(404);
     if (!['channel', 'movie', 'series'].includes(req.params.kind)) return res.sendStatus(400);
     if (req.params.kind === 'channel') return res.redirect(302, await sourceProviderUrl(source, req.params.kind, req.params.id, req.query.ext));
@@ -2776,17 +3844,6 @@ async function getOrStartRokuHls(source, kind, id, extension, requestedStart = 0
     key, mode, hlsStrategy: decision.strategy, hlsVideoMode: decision.videoMode, hlsAudioMode: decision.audioMode, persistent: true, sourceId: String(source._id), mediaId: String(id), kind,
     startSeconds, userId: identity.userId, deviceId: identity.deviceId, viewerId: identity.viewerId,
   }, async () => {
-    // One provider connection, enforced server-side across every process via a
-    // Mongo lease. A second stream is rejected here before ffmpeg ever dials out.
-    const rules = normalizePlaylistRules(source?.rules);
-    let releaseProviderLease;
-    if (rules.maxConcurrentStreams.enabled) {
-      releaseProviderLease = await acquireProviderStreamLease(source._id, rules.maxConcurrentStreams.limit);
-      if (!releaseProviderLease) {
-        throw new MediaCapacityError(`Provider rule: only ${rules.maxConcurrentStreams.limit} stream${rules.maxConcurrentStreams.limit === 1 ? '' : 's'} allowed at a time for this provider`);
-      }
-    }
-    try {
     const inputUrl = await sourceProviderUrl(source, kind, id, extension);
     const directory = path.join(rokuHlsRoot, key);
     await fs.mkdir(directory, { recursive: true });
@@ -2806,9 +3863,8 @@ async function getOrStartRokuHls(source, kind, id, extension, requestedStart = 0
     const child = spawn('ffmpeg', args, { stdio: ['ignore', 'ignore', 'pipe'] });
     const created = {
       directory, manifest, child, inputUrl, error: '',
-      stop: async () => { await terminateChild(child); await fs.rm(directory, { recursive: true, force: true }); await releaseProviderLease?.(); },
+      stop: async () => { await terminateChild(child); await fs.rm(directory, { recursive: true, force: true }); },
     };
-    child.on('close', () => { releaseProviderLease?.().catch(() => {}); });
     child.stderr.on('data', chunk => {
       created.error = appendTail(created.error, chunk);
       const registered = mediaJobs.get(key);
@@ -2831,10 +3887,6 @@ async function getOrStartRokuHls(source, kind, id, extension, requestedStart = 0
       }
     });
     return created;
-    } catch (error) {
-      await releaseProviderLease?.();
-      throw error;
-    }
   });
   return job;
 }
@@ -2862,7 +3914,8 @@ app.get('/api/xtream/hls/:sourceId/:kind/:id/master.m3u8', async (req, res) => {
     // the provider's live manifest exposed malformed headers and provider
     // segment URLs directly to the TV.
     if (!['channel', 'movie', 'series'].includes(req.params.kind)) return res.sendStatus(400);
-    const source = await getXtreamSource(req.params.sourceId, requestOwner(req));
+    const manifestTicket = resolveStreamTicket(req.query.streamTicket, req.params.sourceId, req.params.kind, req.params.id);
+    const source = await getXtreamSource(req.params.sourceId, manifestTicket?.accountOwnerId || requestAccountOwner(req));
     if (!source) return res.sendStatus(404);
     const seekableVod = req.params.kind === 'movie' || req.params.kind === 'series';
     const startSeconds = seekableVod ? hlsStartSeconds(req.query.start) : 0;
@@ -2944,7 +3997,7 @@ app.get('/api/xtream/roku/:sourceId/:kind/:id', async (req, res) => {
   let outputStarted = false;
   let startupTimer;
   try {
-    const source = await getXtreamSource(req.params.sourceId, requestOwner(req));
+    const source = await getXtreamSource(req.params.sourceId, requestAccountOwner(req));
     if (!source) return res.sendStatus(404);
     if (!['movie', 'series'].includes(req.params.kind)) return res.sendStatus(400);
 
@@ -3038,7 +4091,7 @@ app.get('/api/xtream/roku/:sourceId/:kind/:id', async (req, res) => {
     } else res.destroy(error);
   }
 });
-async function buildXtreamSeriesPayload({ limit, selected: suppliedSelected } = {}) {
+async function buildXtreamSeriesPayload({ limit, selected: suppliedSelected, accountOwner, strict = false } = {}) {
   let selected = suppliedSelected || (await getAllXtreamItems('series')).slice().sort((a, b) => Number(b.added || 0) - Number(a.added || 0));
   if (Number.isFinite(limit) && limit > 0) selected = selected.slice(0, limit);
   let cursor = 0;
@@ -3049,14 +4102,15 @@ async function buildXtreamSeriesPayload({ limit, selected: suppliedSelected } = 
       const seriesItem = selected[index];
       const items = [];
       try {
-        const source = await getXtreamSource(seriesItem.sourceId);
+        const source = await getXtreamSource(seriesItem.sourceId, accountOwner);
         if (!source) { groups[index] = items; continue; }
         // Opening a Roku series must be bounded by the provider metadata call,
         // not by one FFprobe process for every episode in the series.
-        const details = await hydrateSeriesDurations(source, await getXtreamSeriesEpisodes(source, seriesItem.id));
+        const details = await hydrateSeriesDurations(source, await getIndexedXtreamSeriesEpisodes(source, seriesItem.id));
         for (const episode of details.episodes) {
           const extension = String(episode.extension || '').toLowerCase();
           const playbackUrl = rokuXtreamPlaybackPath(source._id, 'series', episode.id, extension);
+          const providerUrl = sourceProviderUrl(source, 'series', episode.id, extension);
           const title = episode.title || `${details.title} · ${episode.episodeNumber}`;
           items.push({
             id: episode.id,
@@ -3074,11 +4128,12 @@ async function buildXtreamSeriesPayload({ limit, selected: suppliedSelected } = 
             rokuCategory: seriesItem.rokuCategory,
             language: seriesItem.language,
             added: seriesItem.added,
-            url: playbackUrl, playbackUrl, streamFormat: rokuXtreamStreamFormat(extension),
+            url: playbackUrl, playbackUrl, providerUrl, streamFormat: rokuXtreamStreamFormat(extension),
             originalFormat: extension || 'mp4',
           });
         }
       } catch (error) {
+        if (strict) throw new Error('Provider unavailable. Please retry loading episodes.');
         console.warn(`[Xtream] Could not expand series ${seriesItem.title}: ${error.message}`);
       }
       groups[index] = items;
@@ -3095,7 +4150,7 @@ app.get('/api/roku/library', async (req, res) => {
     // Compatibility for older Roku packages. This remains limited to the
     // saved frontend selection, never the provider's full catalog.
     const [selectedSeries, selectedMovies, selectedChannels] = await Promise.all([
-      getRokuSelectedItems('series', requestOwner(req)), getRokuSelectedItems('movie', requestOwner(req)), getRokuSelectedItems('channel', requestOwner(req)),
+      getRokuSelectedItems('series', requestOwner(req), requestAccountOwner(req)), getRokuSelectedItems('movie', requestOwner(req), requestAccountOwner(req)), getRokuSelectedItems('channel', requestOwner(req), requestAccountOwner(req)),
     ]);
     const [series, movies, channels] = await Promise.all([
       buildXtreamSeriesPayload({ selected: selectedSeries.slice(0, rokuInitialSeriesLimit) }),
@@ -3109,7 +4164,9 @@ app.get('/api/roku/library', async (req, res) => {
 app.get('/api/roku/series', async (req, res) => {
   try {
     if (String(req.query.librarySource || '') === 'server') {
-      const catalog = await getRokuServerCatalog(requestOwner(req), 'series', req.query.category);
+      const catalog = String(req.query.saved || '') === '1'
+        ? await getRokuServerSavedItems(requestOwner(req), 'series', requestAccountOwner(req))
+        : await getRokuServerCatalog(requestOwner(req), 'series', req.query.category, requestAccountOwner(req));
       const items = catalog.items.map(item => ({
         id: `series-search:${item.sourceId}:${item.id}`,
         title: item.title, rokuTitle: rokuText(item.title), category: item.category,
@@ -3117,13 +4174,13 @@ app.get('/api/roku/series', async (req, res) => {
         thumbnail: item.logo, added: item.added, contentKind: 'series-search',
         originalFormat: String(item.extension || 'mp4').replace(/[^a-z0-9]/gi, '').toUpperCase(),
       }));
-      return res.json({ items, page: 0, total: items.length, hasMore: false });
+      return res.json({ items, page: 0, total: items.length, hasMore: false, savedKeys: rokuSourceSavedKeys(catalog.source) });
     }
     const pageInfo = rokuPage(req, rokuCatalogPageLimit);
     pageInfo.limit = rokuCatalogPageLimit;
     pageInfo.offset = pageInfo.page * pageInfo.limit;
     const category = String(req.query.category || '');
-    const selected = (await getRokuSelectedItems('series', requestOwner(req)))
+    const selected = (await getRokuSelectedItems('series', requestOwner(req), requestAccountOwner(req)))
       .filter(item => !category || item.category === category)
       .sort((a, b) => Number(b.added || 0) - Number(a.added || 0));
     const sourcePage = selected.slice(pageInfo.offset, pageInfo.offset + pageInfo.limit);
@@ -3157,14 +4214,16 @@ app.get('/api/roku/series', async (req, res) => {
 app.get('/api/roku/channels', async (req, res) => {
   try {
     if (String(req.query.librarySource || '') === 'server') {
-      const catalog = await getRokuServerCatalog(requestOwner(req), 'channel', req.query.category);
+      const catalog = String(req.query.saved || '') === '1'
+        ? await getRokuServerSavedItems(requestOwner(req), 'channel', requestAccountOwner(req))
+        : await getRokuServerCatalog(requestOwner(req), 'channel', req.query.category, requestAccountOwner(req));
       const items = buildXtreamChannelsPayload(catalog.items);
-      return res.json({ items, page: 0, total: items.length, hasMore: false });
+      return res.json({ items, page: 0, total: items.length, hasMore: false, savedKeys: rokuSourceSavedKeys(catalog.source) });
     }
     const pageInfo = rokuPage(req, rokuCatalogPageLimit);
     pageInfo.limit = rokuCatalogPageLimit;
     pageInfo.offset = pageInfo.page * pageInfo.limit;
-    const selected = (await getRokuSelectedItems('channel', requestOwner(req)))
+    const selected = (await getRokuSelectedItems('channel', requestOwner(req), requestAccountOwner(req)))
       .slice()
       .sort((a, b) => Number(b.added || 0) - Number(a.added || 0));
     const sourcePage = selected.slice(pageInfo.offset, pageInfo.offset + pageInfo.limit);
@@ -3183,6 +4242,7 @@ app.get('/api/roku/channels', async (req, res) => {
 await fs.rm(rokuHlsRoot, { recursive: true, force: true });
 await fs.mkdir(rokuHlsRoot, { recursive: true });
 await ensureBackdropRoot().catch(error => console.warn(`[Backdrop] root init failed: ${error.message}`));
+await initializeAccountDatabases();
 
 const resourceLogIntervalMs = Math.max(60_000, Number.parseInt(process.env.MEDIA_RESOURCE_LOG_INTERVAL_MS || '300000', 10) || 300_000);
 setInterval(async () => {
@@ -3192,8 +4252,8 @@ setInterval(async () => {
   } catch (error) { console.warn(`[Media health] snapshot failed: ${error.message}`); }
 }, resourceLogIntervalMs).unref();
 
-const server = app.listen(port, '0.0.0.0', () => {
-  console.log(`RH Stream API listening on http://0.0.0.0:${port}`);
+const server = app.listen(port, '127.0.0.1', () => {
+  console.log(`RH Stream API listening on http://127.0.0.1:${port}`);
 });
 
 async function shutdown(signal) {

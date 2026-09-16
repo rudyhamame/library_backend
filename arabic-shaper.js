@@ -8,6 +8,14 @@ const forms = {
   'ك':['\uFED9','\uFEDA','\uFEDB','\uFEDC'], 'ل':['\uFEDD','\uFEDE','\uFEDF','\uFEE0'], 'م':['\uFEE1','\uFEE2','\uFEE3','\uFEE4'], 'ن':['\uFEE5','\uFEE6','\uFEE7','\uFEE8'],
   'ه':['\uFEE9','\uFEEA','\uFEEB','\uFEEC'], 'و':['\uFEED','\uFEEE'], 'ى':['\uFEEF','\uFEF0'], 'ي':['\uFEF1','\uFEF2','\uFEF3','\uFEF4']
 };
+// Inverse of `forms`: every Unicode presentation form back to its base letter,
+// so text that already came back shaped (e.g. from a Roku keyboard) can be
+// de-shaped before comparison.
+export const PRESENTATION_TO_BASE = {};
+for (const [base, presentationForms] of Object.entries(forms)) {
+  for (const form of presentationForms) PRESENTATION_TO_BASE[form] = base;
+}
+
 const dual = new Set(Object.entries(forms).filter(([, value]) => value.length === 4).map(([key]) => key));
 const joinsRight = new Set(Object.keys(forms));
 const arabic = /[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]/;
@@ -41,6 +49,21 @@ function shapeWord(word) {
 export function shapeArabicForRoku(value) {
   const source = String(value || '');
   if (!arabic.test(source)) return source;
-  const shaped = source.split(/(\s+)/).map(token => arabic.test(token) ? shapeWord(token) : token).reverse().join('');
+  const output = [];
+  let arabicRun = [];
+  const flushArabic = () => {
+    if (!arabicRun.length) return;
+    output.push(...arabicRun.reverse());
+    arabicRun = [];
+  };
+  for (const token of source.trim().split(/\s+/)) {
+    if (arabic.test(token)) arabicRun.push(shapeWord(token));
+    else {
+      flushArabic();
+      output.push(token);
+    }
+  }
+  flushArabic();
+  const shaped = output.join(' ');
   return shaped.length > 68 ? `${shaped.slice(0, 65)}...` : shaped;
 }

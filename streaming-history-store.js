@@ -21,6 +21,13 @@ async function streamingHistoryCollection() {
 }
 
 const milliseconds = value => Math.max(0, Math.round(Number(value) || 0));
+const formatLastMoment = value => {
+  const totalSeconds = Math.floor(milliseconds(value) / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  return [hours, minutes, seconds].map(part => String(part).padStart(2, '0')).join(':');
+};
 const streamingKind = (value) => {
   const kind = String(value || '').toLowerCase();
   if (kind === 'channel' || kind === 'live') return 'channel';
@@ -28,7 +35,7 @@ const streamingKind = (value) => {
   return 'movie';
 };
 
-export async function saveStreamingHistory({ ownerId, sessionId, itemId, title, kind, sourceId, seriesId, extension, poster, startedAt, endedAt, startPositionMs, endPositionMs, streamingDurationMs, mediaDurationMs, completed, seasonNumber, episodeNumber }) {
+export async function saveStreamingHistory({ ownerId, sessionId, itemId, title, seriesName, kind, sourceId, seriesId, extension, poster, startedAt, endedAt, startPositionMs, endPositionMs, streamingDurationMs, mediaDurationMs, completed, seasonNumber, episodeNumber }) {
   if (!ownerId || !sessionId) throw new Error('Account owner and streaming session ID are required');
   const now = new Date();
   const startDate = startedAt ? new Date(startedAt) : now;
@@ -36,6 +43,7 @@ export async function saveStreamingHistory({ ownerId, sessionId, itemId, title, 
   const update = {
     itemId: String(itemId || ''),
     title: String(title || ''),
+    seriesName: String(seriesName || ''),
     kind: streamingKind(kind),
     sourceId: String(sourceId || ''),
     seriesId: String(seriesId || ''),
@@ -45,6 +53,7 @@ export async function saveStreamingHistory({ ownerId, sessionId, itemId, title, 
     endPositionMs: milliseconds(endPositionMs),
     streamingDurationMs: milliseconds(streamingDurationMs),
     mediaDurationMs: milliseconds(mediaDurationMs),
+    lastMoment: formatLastMoment(endPositionMs),
     updatedAt: now,
   };
   if (kind === 'series' || kind === 'episode') {

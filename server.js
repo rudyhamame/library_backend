@@ -1397,6 +1397,7 @@ app.get('/api/account/partner', async (req, res) => {
   try {
     const accountId = requestAccount(req);
     const realm = requestAccountRealm(req);
+    if (realm !== 'general') return res.status(404).json({ error: 'Partner accounts are available only for General users' });
     if (!accountId) return res.status(401).json({ error: 'Authentication required' });
     const profileId = requestProfile(req);
     res.set('Cache-Control', 'no-store');
@@ -1423,6 +1424,7 @@ app.put('/api/account/partner', async (req, res) => {
   try {
     const accountId = requestAccount(req);
     const realm = requestAccountRealm(req);
+    if (realm !== 'general') return res.status(404).json({ error: 'Partner accounts are available only for General users' });
     if (!accountId) return res.status(401).json({ error: 'Authentication required' });
     const email = String(req.body?.partnerEmail || '').trim();
     const code = String(req.body?.partnerProfileCode || '').trim().toUpperCase();
@@ -1445,6 +1447,7 @@ app.post('/api/partner/invite', async (req, res) => {
   try {
     const accountId = requestAccount(req);
     const realm = requestAccountRealm(req);
+    if (realm !== 'general') return res.status(404).json({ error: 'Partner accounts are available only for General users' });
     const ownerId = requestOwner(req);
     const accountOwner = requestAccountOwner(req);
     const profileId = requestProfile(req);
@@ -1504,6 +1507,7 @@ app.post('/api/partner/invite', async (req, res) => {
 
 app.get('/api/partner/invite', async (req, res) => {
   try {
+    if (requestAccountRealm(req) !== 'general') return res.status(404).json({ error: 'Partner accounts are available only for General users' });
     const ownerId = requestOwner(req);
     if (!ownerId) return res.status(401).json({ error: 'Authentication required' });
     const since = Number.parseInt(String(req.query.since || '0'), 10) || 0;

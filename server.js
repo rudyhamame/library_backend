@@ -1279,6 +1279,21 @@ app.get('/api/account/profiles', async (req, res) => {
     res.json({ items: await getAccountProfiles(accountId) });
   } catch (error) { res.status(Number(error?.status) || 500).json({ error: error.message }); }
 });
+// The Roku session token is already profile-scoped (see requestProfile), so
+// a client like the Roku Settings PIN row - which only ever needs its own
+// profile's id/hasPin, never the whole account's profile list - can resolve
+// itself in one call instead of fetching every profile and filtering client-side.
+app.get('/api/account/profile', async (req, res) => {
+  try {
+    const accountId = requestAccount(req);
+    const profileId = requestProfile(req);
+    if (!accountId || !profileId) return res.status(401).json({ error: 'Sign in to view this profile' });
+    const profile = await getAccountProfile(accountId, profileId);
+    if (!profile) return res.status(404).json({ error: 'Profile not found' });
+    res.set('Cache-Control', 'no-store');
+    res.json({ item: { id: profile.id, name: profile.name, hasPin: Boolean(profile.pinHash) } });
+  } catch (error) { res.status(Number(error?.status) || 500).json({ error: error.message }); }
+});
 app.get('/api/account/profiles/:profileId/avatar', async (req, res) => {
   try {
     const accountId = requestAccount(req);

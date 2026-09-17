@@ -2170,7 +2170,7 @@ app.get('/api/roku/deep-link-item', async (req, res) => {
     const separator = contentId.match(/^([^:|/]+)[:|/]([^:|/]+)$/);
     if (separator) [, seriesId, episodeId] = separator;
     if (!seriesId) {
-      const watched = (await getStreamingHistory(requestProfileOwner(req), 500))
+      const watched = (await getStreamingHistory(requestProfileOwner(req)))
         .find(item => item.kind === 'series' && String(item.sourceId) === sourceId && String(item.itemId) === episodeId && item.seriesId);
       if (watched) seriesId = String(watched.seriesId);
     }
@@ -2228,7 +2228,7 @@ app.get('/api/roku/series/last-watched', async (req, res) => {
     // When there is no manual '*' override, use the most recently played
     // episode for this series. Keep the saved absolute position with it so
     // the Roku episode grid can show where playback will resume.
-    const watchedHistory = await getStreamingHistory(requestProfileOwner(req), 500);
+    const watchedHistory = await getStreamingHistory(requestProfileOwner(req));
     const episodeId = override?.episodeId || watchedHistory.find(item => item.kind === 'series'
       && String(item.sourceId || '') === sourceId
       && String(item.seriesId || '') === seriesId
@@ -2399,7 +2399,7 @@ app.get('/api/streaming-history', async (req, res) => {
     const ownerId = requestProfileOwner(req);
     if (!ownerId) return res.status(401).json({ error: 'Authentication required' });
     res.set('Cache-Control', 'no-store');
-    let items = await getStreamingHistory(ownerId, req.query.limit);
+    let items = await getStreamingHistory(ownerId);
     if (String(req.query.providerScope || '') === 'roku') {
       const accountOwner = requestAccountOwner(req);
       const sources = await getAllXtreamSources(accountOwner);
@@ -2419,7 +2419,7 @@ app.get('/api/streaming-history/continue-watching', async (req, res) => {
     const ownerId = requestProfileOwner(req);
     if (!ownerId) return res.status(401).json({ error: 'Authentication required' });
     const accountOwner = requestAccountOwner(req);
-    let items = await getStreamingContinueWatching(ownerId, req.query.limit);
+    let items = await getStreamingContinueWatching(ownerId);
     // Roku's Welcome page is both profile- and provider-specific. Other
     // clients retain their existing cross-provider history unless they opt in.
     if (String(req.query.providerScope || '') === 'roku') {

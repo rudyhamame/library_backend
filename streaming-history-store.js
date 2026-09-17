@@ -11,8 +11,9 @@ async function streamingHistoryCollection() {
     collectionPromise = new MongoClient(mongoUri, { serverSelectionTimeoutMS: 5000 }).connect()
       .then(async (client) => {
         const collection = client.db(databaseName).collection(collectionName);
-        await collection.createIndex({ ownerId: 1, sessionId: 1 }, { unique: true });
-        await collection.createIndex({ ownerId: 1, startedAt: -1 });
+        // Only the single most recent item per kind (movie/series/channel) is
+        // ever kept per owner - one upsert target per kind, not per session.
+        await collection.createIndex({ ownerId: 1, kind: 1 }, { unique: true });
         return collection;
       })
       .catch((error) => { collectionPromise = undefined; throw error; });
@@ -64,11 +65,12 @@ export async function saveStreamingHistory({ ownerId, sessionId, itemId, title, 
   if (isCompleted) update.completed = true;
   if (startedAt) update.startedAt = Number.isNaN(startDate.getTime()) ? now : startDate;
   if (endDate && !Number.isNaN(endDate.getTime())) update.endedAt = endDate;
-  const insert = { ownerId: String(ownerId), sessionId: String(sessionId), createdAt: now };
+  update.sessionId = String(sessionId);
+  const insert = { ownerId: String(ownerId), kind: update.kind, createdAt: now };
   if (!isCompleted) insert.completed = false;
   if (!startedAt) insert.startedAt = now;
   await (await streamingHistoryCollection()).updateOne(
-    { ownerId: String(ownerId), sessionId: String(sessionId) },
+    { ownerId: String(ownerId), kind: update.kind },
     { $set: update, $setOnInsert: insert },
     { upsert: true },
   );
@@ -82,9 +84,13 @@ export async function getStreamingSession(ownerId, sessionId) {
   return publicItem;
 }
 
-export async function getStreamingHistory(ownerId, limit = 100) {
-  const safeLimit = Math.min(500, Math.max(1, Number.parseInt(limit, 10) || 100));
-  return (await (await streamingHistoryCollection()).find({ ownerId: String(ownerId) }).sort({ startedAt: -1 }).limit(safeLimit).toArray())
+// At most one record per kind (movie/series/channel) is ever stored, so this
+// is just "the last watched item of each kind", not a paged history log.
+export async function getStreamingHistory(ownerId) {
+  // A Roku session updates an existing kind record over time. Sort by the
+  // latest write first so Continue Watching cannot select an older duplicate
+  // just because that record has an earlier/original startedAt value.
+  return (await (await streamingHistoryCollection()).find({ ownerId: String(ownerId) }).sort({ updatedAt: -1, startedAt: -1 }).toArray())
     .map(({ _id, ownerId: _ownerId, ...item }) => item);
 }
 
@@ -118,25 +124,22 @@ export async function getStreamingResume(ownerId, { sourceId, itemId, kind }) {
   return publicItem;
 }
 
-export async function getStreamingContinueWatching(ownerId, limit = 20) {
-  const safeLimit = Math.min(100, Math.max(1, Number.parseInt(limit, 10) || 20));
+export async function getStreamingContinueWatching(ownerId) {
   const [history, overrides] = await Promise.all([
-    getStreamingHistory(ownerId, 500),
+    getStreamingHistory(ownerId),
     getSeriesWatchOverridesByOwner(ownerId).catch(() => []),
   ]);
   const overrideBySeries = new Map(overrides.map(entry => [`${entry.sourceId}:${entry.seriesId}`, entry]));
-  const latestByItem = new Map();
-  for (const item of history) {
-    if (!item.sourceId || !item.itemId) continue;
-    const key = `${item.sourceId}:${item.kind}:${item.itemId}`;
-    if (!latestByItem.has(key)) latestByItem.set(key, item);
-  }
-  const filtered = [...latestByItem.values()]
+  // Storage already holds at most one record per kind, so there is nothing
+  // left to dedupe here - just apply the same "is this worth resuming" filter.
+  const filtered = history
+    .filter(item => item.sourceId && item.itemId)
     .filter((item) => {
-      if (milliseconds(item.endPositionMs) <= 5000) return false;
       // Live channels have no completion or run time - the most recent one
-      // watched always belongs in Continue Watching.
+      // watched always belongs in Continue Watching, even when Roku reports
+      // zero position during a short live session.
       if (item.kind === 'channel') return true;
+      if (milliseconds(item.endPositionMs) <= 5000) return false;
       if (item.completed === true) return false;
       const duration = milliseconds(item.mediaDurationMs);
       return duration <= 0 || milliseconds(item.endPositionMs) < Math.max(duration - 30000, duration * 0.95);
@@ -166,7 +169,7 @@ export async function getStreamingContinueWatching(ownerId, limit = 20) {
     }
     merged.push(item);
   }
-  return merged.slice(0, safeLimit);
+  return merged;
 }
 
 export async function moveStreamingHistoryOwners(fromOwnerIds, toOwnerId) {

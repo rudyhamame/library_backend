@@ -27,6 +27,7 @@ const seriesWatchedRecord = update => ({
     sourceId: update.sourceId,
     seriesId: update.seriesId,
     itemId: update.itemId,
+    sessionId: update.sessionId,
   },
   lastWatched: update.lastMoment,
 });

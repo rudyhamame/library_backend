@@ -78,13 +78,17 @@ export async function getStreamingResume(ownerId, { sourceId, itemId, kind }) {
 }
 
 export async function getStreamingContinueWatching(ownerId) {
-  const filtered = (await getStreamingHistory(ownerId)).filter(item => item.sourceId && item.itemId).filter(item => {
-    if (item.kind === 'channel') return true;
-    if (milliseconds(item.endPositionMs) <= 5000 || item.completed === true) return false;
-    const duration = milliseconds(item.mediaDurationMs);
-    return duration <= 0 || milliseconds(item.endPositionMs) < Math.max(duration - 30000, duration * 0.95);
-  });
+  const filtered = (await getStreamingHistory(ownerId)).filter(isContinueWatchingItem);
   return filtered;
+}
+
+export function isContinueWatchingItem(item) {
+  if (!item?.sourceId || !item?.itemId) return false;
+  if (item.kind === 'channel') return true;
+  if (item.completed === true) return false;
+  const position = milliseconds(item.endPositionMs);
+  const duration = milliseconds(item.mediaDurationMs);
+  return duration <= 0 || position < Math.max(duration - 30000, duration * 0.95);
 }
 
 // Kept for old device-link callers; history is now nested under profiles.

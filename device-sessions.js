@@ -465,6 +465,7 @@ async function approveSignupSession(code, accountId) {
   const session = getDeviceSession(code);
   if (!session) throw Object.assign(new Error('Pairing code expired or invalid'), { status: 404 });
   const deviceCollection = await profiles();
+  const accountCollection = await accounts('roku');
   const deviceOwnerId = ownerIdFor(session.deviceId);
   await consolidateAccountLibrary(accountId);
   session.accountId = String(accountId);
@@ -475,7 +476,7 @@ async function approveSignupSession(code, accountId) {
     { $setOnInsert: { ownerId: deviceOwnerId, deviceId: session.deviceId, createdAt: new Date() }, $set: { accountId, profileId: null, linkedAt: new Date(), updatedAt: new Date() } },
     { upsert: true },
   );
-  await linkAccountDevice(accountCollection, account._id, session);
+  await linkAccountDevice(accountCollection, accountId, session);
   session.approvedAt = Date.now();
   return issueToken(session, 'roku');
 }
@@ -600,6 +601,7 @@ async function consumePairing(code, email, password, setup, firstName = '', last
     { $setOnInsert: { ownerId: deviceOwnerId, deviceId: session.deviceId, createdAt: new Date() }, $set: { accountId: account._id, profileId: session.profileId, linkedAt: new Date(), updatedAt: new Date() } },
     { upsert: true },
   );
+  await linkAccountDevice(accountCollection, account._id, session);
   session.approvedAt = Date.now();
   return { token: issueToken(session, 'browser'), deviceId: session.deviceId };
 }

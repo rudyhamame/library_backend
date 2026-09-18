@@ -28,8 +28,7 @@ export function normalizedAccountLibrary(library) {
       movies: Array.isArray(library?.savedSelections?.movies) ? library.savedSelections.movies : [],
       live: Array.isArray(library?.savedSelections?.live) ? library.savedSelections.live : [],
     },
-    series_last_watched: library?.series_last_watched && typeof library.series_last_watched === 'object' && !Array.isArray(library.series_last_watched)
-      ? library.series_last_watched : {},
+    series_last_watched: Array.isArray(library?.series_last_watched) ? library.series_last_watched : [],
     last_kinds_watched: {
       episode: library?.last_kinds_watched?.episode || library?.lastKindsWatched?.episode || null,
       movie: library?.last_kinds_watched?.movie || library?.lastKindsWatched?.movie || null,

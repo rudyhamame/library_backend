@@ -8,7 +8,6 @@ const db = client.db(process.env.MONGODB_DB || 'rh_roku');
 const names = {
   categories: process.env.MONGODB_LIBRARY_CATEGORY_COLLECTION || 'library_categories',
   favorites: process.env.MONGODB_FAVORITES_COLLECTION || 'favorites',
-  overrides: process.env.MONGODB_SERIES_WATCH_OVERRIDE_COLLECTION || 'series_watch_overrides',
   history: process.env.MONGODB_STREAMING_HISTORY_COLLECTION || 'streaming_history',
 };
 
@@ -36,10 +35,6 @@ try {
         if (!library.favorites.some(row => row.profileId === favorite.profileId && row.sourceId === favorite.sourceId && row.kind === favorite.kind && row.itemId === favorite.itemId)) library.favorites.push(favorite);
         return library;
       }, favorite.profileId);
-      for (const override of root.seriesWatchOverrides || []) await updateAccountLibrary(override.profileOwnerId || defaultOwner, library => {
-        if (!library.seriesWatchOverrides.some(row => row.sourceId === override.sourceId && row.seriesId === override.seriesId)) library.seriesWatchOverrides.push(override);
-        return library;
-      });
       await collection.updateOne({ _id: account._id }, { $unset: { library: '' } });
     }
   }
@@ -66,17 +61,6 @@ try {
       if (!library.favorites.some(item => item.profileId === favorite.profileId && item.sourceId === favorite.sourceId && item.kind === favorite.kind && item.itemId === favorite.itemId)) library.favorites.push(favorite);
       return library;
     }, row.profileId);
-    migrated++;
-  }
-  for (const row of rows.overrides) {
-    try { await accountForLibraryOwner(row.ownerId); }
-    catch { unmapped.push({ kind: 'overrides', ownerId: row.ownerId }); continue; }
-    await updateAccountLibrary(row.ownerId, library => {
-      const { _id, ownerId, ...override } = row;
-      override.profileOwnerId = String(ownerId);
-      if (!library.seriesWatchOverrides.some(item => item.profileOwnerId === override.profileOwnerId && item.sourceId === override.sourceId && item.seriesId === override.seriesId)) library.seriesWatchOverrides.push(override);
-      return library;
-    });
     migrated++;
   }
   for (const row of rows.history) {

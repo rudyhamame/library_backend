@@ -2044,7 +2044,10 @@ app.get('/api/roku/bootstrap', async (req, res) => {
     let rails = { series: [], movie: [], channel: [] };
     let catalogMeta = null;
     if (selectedSource) {
-      for (const kind of ['series', 'movie', 'channel']) void ensureCatalogSnapshot(accountOwner, selectedSource, kind);
+      // The bootstrap response owns the Welcome counters. Wait for the first
+      // snapshot of every kind so Series and Movies cannot render as zero
+      // while their downloads are still running in the background.
+      await Promise.all(['series', 'movie', 'channel'].map(kind => ensureCatalogSnapshot(accountOwner, selectedSource, kind)));
       const r = await getProviderCatalogRails(accountOwner, selectedSourceId, welcomeRailLimit).catch(() => null);
       if (r) rails = { series: r.series || [], movie: r.movie || [], channel: r.channel || [] };
       catalogMeta = await getProviderCatalogMeta(accountOwner, selectedSourceId).catch(() => null);

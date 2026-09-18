@@ -92,8 +92,6 @@ export function buildAccountRoot({
     account: {
       id: accountId,
       email: text(account.email),
-      firstName: text(account.firstName),
-      lastName: text(account.lastName),
       realm: text(account.realm || 'roku'),
       createdAt: account.createdAt || null,
       updatedAt: account.updatedAt || null,

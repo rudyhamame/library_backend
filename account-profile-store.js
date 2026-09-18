@@ -222,10 +222,10 @@ export async function deleteAccountProfile(accountId, profileId) {
     process.env.MONGODB_ANDROID_STARTUP_COLLECTION || 'android_startup_snapshots',
   ];
   await Promise.all(names.map(name => record.database.collection(name).deleteMany({ ownerId })));
-  if (record.account.metadata?.devices?.some(device => device.profileId === String(profileId))) {
+  if (record.account.devices?.some(device => device.profileId === String(profileId))) {
     await record.collection.updateOne(
       { _id: record.id },
-      { $unset: { 'metadata.devices.$[device].profileId': '' }, $set: { updatedAt: new Date() } },
+      { $unset: { 'devices.$[device].profileId': '' }, $set: { updatedAt: new Date() } },
       { arrayFilters: [{ 'device.profileId': String(profileId) }] },
     );
   }

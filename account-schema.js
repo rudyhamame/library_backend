@@ -10,19 +10,17 @@ export const collectionNames = {
 export const identityValidator = {
   $jsonSchema: {
     bsonType: 'object',
-    required: ['_id', 'email', 'passwordHash', 'account', 'credentials', 'preferences', 'providers', 'profiles', 'metadata'],
+    required: ['_id', 'email', 'passwordHash', 'preferences', 'providers', 'profiles', 'devices'],
     properties: {
       _id: { bsonType: ['objectId', 'string'] },
       email: { bsonType: 'string' },
       passwordHash: { bsonType: 'string' },
-      account: { bsonType: 'object', required: ['email'], properties: { email: { bsonType: 'string' } } },
-      credentials: { bsonType: 'object' },
       preferences: { bsonType: 'object' },
       selectedProviderId: { bsonType: ['string', 'null'] },
       providers: { bsonType: 'array' },
       profiles: { bsonType: 'array' },
       library: { bsonType: 'object' },
-      metadata: { bsonType: 'object', properties: { devices: { bsonType: 'array' } } },
+      devices: { bsonType: 'array' },
       updatedAt: { bsonType: 'date' },
     },
   },

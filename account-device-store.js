@@ -26,10 +26,10 @@ async function locatedRows(filter = {}) {
   const result = [];
   for (const collection of await collections()) {
     const query = ObjectId.isValid(filter.accountId) ? { _id: new ObjectId(String(filter.accountId)) } : {};
-    if (filter.deviceId && typeof filter.deviceId === 'string') query['metadata.devices.deviceId'] = filter.deviceId;
-    const accounts = await collection.find(query, { projection: { metadata: 1 } }).toArray();
+    if (filter.deviceId && typeof filter.deviceId === 'string') query['devices.deviceId'] = filter.deviceId;
+    const accounts = await collection.find(query, { projection: { devices: 1 } }).toArray();
     for (const account of accounts) {
-      for (const device of Array.isArray(account.metadata?.devices) ? account.metadata.devices : []) {
+      for (const device of Array.isArray(account.devices) ? account.devices : []) {
         const row = { ...device, _id: `device:${device.deviceId}`, accountId: account._id };
         if (matches(row, filter)) result.push({ row, collection, account });
       }
@@ -61,15 +61,15 @@ async function updateOne(filter, update, options = {}) {
     const existing = await locatedRows({ deviceId });
     for (const entry of existing) {
       if (String(entry.account._id) !== String(target.id)) {
-        await entry.collection.updateOne({ _id: entry.account._id }, { $pull: { 'metadata.devices': { deviceId } }, $set: { updatedAt: new Date() } });
+        await entry.collection.updateOne({ _id: entry.account._id }, { $pull: { devices: { deviceId } }, $set: { updatedAt: new Date() } });
       }
     }
     const current = existing.find(entry => String(entry.account._id) === String(target.id));
     if (current) return updateOne({ accountId: target.id, deviceId }, update);
     const device = { ...deviceFields(update.$setOnInsert), ...deviceFields(update.$set), deviceId };
     const result = await target.collection.updateOne(
-      { _id: target.id, 'metadata.devices.deviceId': { $ne: deviceId } },
-      { $push: { 'metadata.devices': device }, $set: { updatedAt: new Date() } },
+      { _id: target.id, 'devices.deviceId': { $ne: deviceId } },
+      { $push: { devices: device }, $set: { updatedAt: new Date() } },
     );
     if (result.modifiedCount) return result;
     return updateOne({ accountId: target.id, deviceId }, update);
@@ -78,15 +78,15 @@ async function updateOne(filter, update, options = {}) {
   if (!entry) return { matchedCount: 0, modifiedCount: 0 };
   const { collection, account, row } = entry;
   if (Object.hasOwn(update.$unset || {}, 'accountId')) {
-    return collection.updateOne({ _id: account._id }, { $pull: { 'metadata.devices': { deviceId: row.deviceId } }, $set: { updatedAt: new Date() } });
+    return collection.updateOne({ _id: account._id }, { $pull: { devices: { deviceId: row.deviceId } }, $set: { updatedAt: new Date() } });
   }
-  const set = Object.fromEntries(Object.entries(deviceFields(update.$set)).map(([key, value]) => [`metadata.devices.$.${key}`, value]));
-  const unset = Object.fromEntries(Object.keys(update.$unset || {}).filter(key => key !== 'accountId').map(key => [`metadata.devices.$.${key}`, '']));
+  const set = Object.fromEntries(Object.entries(deviceFields(update.$set)).map(([key, value]) => [`devices.$.${key}`, value]));
+  const unset = Object.fromEntries(Object.keys(update.$unset || {}).filter(key => key !== 'accountId').map(key => [`devices.$.${key}`, '']));
   const operation = {};
   if (Object.keys(set).length) operation.$set = set;
   if (Object.keys(unset).length) operation.$unset = unset;
   if (!Object.keys(operation).length) return { matchedCount: 1, modifiedCount: 0 };
-  return collection.updateOne({ _id: account._id, 'metadata.devices.deviceId': row.deviceId }, operation);
+  return collection.updateOne({ _id: account._id, 'devices.deviceId': row.deviceId }, operation);
 }
 
 export async function linkedDeviceStore() {

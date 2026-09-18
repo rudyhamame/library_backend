@@ -21,7 +21,7 @@ import { getFavorites, toggleFavorite } from './favorites-store.js';
 import { getSeriesWatchOverride, toggleSeriesWatchOverride } from './series-watch-overrides.js';
 import { accountOwnerId, profileOwnerId } from './account-library-owner.js';
 import { syncCatalogItems } from './catalog-store.js';
-import { authorizeDeviceSession, autoLoginDeviceSession, castHandoffLink, changeAccountPassword, claimAutomaticPairing, confirmPasswordReset, createDeviceSession, deleteAccount, getAccountBasicInfo, getDeviceWeatherLocations, getLinkedDevices, getPairingInfo, getRokuDeviceSessionStatus, getRokuSourcePreferenceByOwner, initializeAccountDatabases, isProfileOnline, isRokuSessionLinked, listAllAccountsBasic, listAllLinkedDevices, loginAccount, loginDeviceSession, recordDeviceHeartbeat, registerAccount, registerBrowserDevice, requestDeviceSignupVerification, requestPasswordReset, resendDeviceSignupVerification, resolveAccountByEmail, resolveDeviceToken, saveDeviceWeatherLocations, selectAccountProfile, setupDeviceSession, unlinkAccountDevice, verifyDeviceSignupCode } from './device-sessions.js';
+import { authorizeDeviceSession, autoLoginDeviceSession, castHandoffLink, changeAccountPassword, claimAutomaticPairing, confirmPasswordReset, createDeviceSession, deleteAccount, getAccountBasicInfo, getDeviceSession, getDeviceWeatherLocations, getLinkedDevices, getPairingInfo, getRokuDeviceSessionStatus, getRokuSourcePreferenceByOwner, initializeAccountDatabases, isProfileOnline, isRokuSessionLinked, listAllAccountsBasic, listAllLinkedDevices, loginAccount, loginDeviceSession, recordDeviceHeartbeat, registerAccount, registerBrowserDevice, requestDeviceSignupVerification, requestPasswordReset, resendDeviceSignupVerification, resolveAccountByEmail, resolveDeviceToken, saveDeviceWeatherLocations, selectAccountProfile, setupDeviceSession, unlinkAccountDevice, verifyDeviceSignupCode } from './device-sessions.js';
 import { createAccountProfile, deleteAccountProfile, getAccountProfile, getAccountProfiles, getProfileByCode, getProfilePartnerCode, getProfilePartnerEmail, setProfilePartnerEmail, setProfileRokuSourcePreference, updateAccountProfile } from './account-profile-store.js';
 import { createLibraryCategory, deleteLibraryCategory, getManagedLibrary, renameLibraryCategory, replaceLibraryCategoryItems } from './library-category-store.js';
 import { enforceLibraryOnly } from './library-route-policy.js';
@@ -1036,12 +1036,20 @@ app.post('/api/roku/device-session/on-device-auth', async (req, res) => {
   try {
     const body = req.body;
     const code = String(rokuBodyField(body, 'code') || '').trim();
+    const deviceId = String(rokuBodyField(body, 'deviceId') || '').trim();
     const mode = rokuBodyField(body, 'mode') === 'signup' ? 'signup' : 'signin';
     const email = rokuBodyField(body, 'email');
     const password = rokuBodyField(body, 'password');
     const firstName = rokuBodyField(body, 'firstName');
     const lastName = rokuBodyField(body, 'lastName');
     const verificationCode = rokuBodyField(body, 'verificationCode');
+    let activeCode = code;
+    let recoveredSession = false;
+    if (mode === 'signup' && deviceId && !getDeviceSession(code)) {
+      const fresh = await createDeviceSession(deviceId);
+      activeCode = fresh.code;
+      recoveredSession = true;
+    }
     const authPhase = mode === 'signup' && rokuBodyField(body, 'verificationResend')
       ? 'resend'
       : mode === 'signup' && rokuBodyField(body, 'verificationOnly')
@@ -1052,21 +1060,22 @@ app.post('/api/roku/device-session/on-device-auth', async (req, res) => {
             ? 'finalize'
             : 'signin';
     const result = mode === 'signup' && rokuBodyField(body, 'verificationResend')
-      ? await resendDeviceSignupVerification(code, email)
+      ? await resendDeviceSignupVerification(activeCode, email)
       : mode === 'signup' && rokuBodyField(body, 'verificationOnly')
-        ? await verifyDeviceSignupCode(code, email, verificationCode)
+        ? await verifyDeviceSignupCode(activeCode, email, verificationCode)
         : mode === 'signup' && rokuBodyField(body, 'verificationRequest')
-          ? await requestDeviceSignupVerification(code, email, password, firstName, lastName)
+          ? await requestDeviceSignupVerification(activeCode, email, password, firstName, lastName)
       : mode === 'signup'
-        ? await setupDeviceSession(code, email, password, firstName, lastName, verificationCode, rokuBodyField(body, 'verificationBypassed'))
-      : await loginDeviceSession(code, email, password);
+        ? await setupDeviceSession(activeCode, email, password, firstName, lastName, verificationCode, rokuBodyField(body, 'verificationBypassed'))
+      : await loginDeviceSession(activeCode, email, password);
+    if (recoveredSession && !result.error) result.sessionCode = activeCode;
     if (result.error) {
       console.log(`[roku on-device-auth] phase=${authPhase} outcome=error message=${result.error}`);
       return res.status(result.error.includes('expired') ? 404 : result.error.includes('Incorrect') ? 401 : 400).json(result);
     }
     console.log(`[roku on-device-auth] phase=${authPhase} outcome=${result.token ? 'token' : result.verificationValid ? 'verification-valid' : result.verificationResent ? 'resent' : result.verificationRequired ? 'verification-required' : result.verificationNotRequired ? 'verification-not-required' : 'ok'}`);
     if (!result.token && (result.verificationRequired || result.verificationNotRequired || result.verificationValid || result.verificationResent)) return res.json(result);
-    const rokuSession = await getRokuDeviceSessionStatus(code);
+    const rokuSession = await getRokuDeviceSessionStatus(activeCode);
     if (!rokuSession || rokuSession.status !== 'approved' || !rokuSession.token) {
       return res.status(500).json({ error: 'Roku authorization could not be completed' });
     }

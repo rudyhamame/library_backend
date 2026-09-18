@@ -197,15 +197,15 @@ function validPassword(password) { return typeof password === 'string' && passwo
 function normalizeEmail(email) { return String(email || '').trim().toLowerCase(); }
 function validEmail(email) { return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) && email.length <= 254; }
 
-function identityAccountDocument({ email, passwordHash, firstName = '', lastName = '', createdAt = new Date(), updatedAt = new Date() }) {
+function identityAccountDocument({ email, passwordHash, createdAt = new Date(), updatedAt = new Date() }) {
   return {
-    email, passwordHash, firstName, lastName, createdAt, updatedAt,
-    account: { email, firstName, lastName },
-    credentials: { passwordHash },
+    email, passwordHash, createdAt, updatedAt,
     preferences: {}, selectedProviderId: null, providers: [], profiles: [],
-    metadata: { realm: 'roku', devices: [] },
+    realm: 'roku', devices: [],
   };
 }
+
+function accountPasswordHash(account) { return account?.passwordHash || ''; }
 
 const resetCodes = new Map();
 const resetCodeTtlMs = 15 * 60 * 1000;
@@ -242,7 +242,7 @@ export async function confirmPasswordReset(code, newPassword) {
   const passwordHash = hashPassword(newPassword);
   await (await accounts(entry.realm)).updateOne(
     { _id: new ObjectId(entry.accountId) },
-    { $set: { passwordHash, 'credentials.passwordHash': passwordHash, updatedAt: new Date() } },
+    { $set: { passwordHash, updatedAt: new Date() }, $unset: { account: '', credentials: '', firstName: '', lastName: '' } },
   );
   resetCodes.delete(normalizedCode);
   return { ok: true };
@@ -331,9 +331,9 @@ export async function getRokuSourcePreferenceByOwner(ownerId) {
 // the invite the partner receives.
 export async function getAccountBasicInfo(accountId, realm = 'roku') {
   if (!accountId || !ObjectId.isValid(accountId)) return null;
-  const account = await (await accounts(realm)).findOne({ _id: new ObjectId(accountId) }, { projection: { email: 1, firstName: 1, lastName: 1 } });
+  const account = await (await accounts(realm)).findOne({ _id: new ObjectId(accountId) }, { projection: { email: 1 } });
   if (!account) return null;
-  return { email: account.email, name: [account.firstName, account.lastName].filter(Boolean).join(' ').trim() };
+  return { email: account.email, name: '' };
 }
 
 // Read-only lookup used to route a Watch with Partner invite - no password
@@ -342,9 +342,9 @@ export async function getAccountBasicInfo(accountId, realm = 'roku') {
 export async function resolveAccountByEmail(email, realm = 'roku') {
   const normalizedEmail = normalizeEmail(email);
   if (!validEmail(normalizedEmail)) return null;
-  const account = await (await accounts(realm)).findOne({ email: normalizedEmail }, { projection: { _id: 1, email: 1, firstName: 1, lastName: 1 } });
+  const account = await (await accounts(realm)).findOne({ email: normalizedEmail }, { projection: { _id: 1, email: 1 } });
   if (!account) return null;
-  return { accountId: String(account._id), ownerId: accountOwnerId(account._id), email: account.email, name: [account.firstName, account.lastName].filter(Boolean).join(' ').trim() };
+  return { accountId: String(account._id), ownerId: accountOwnerId(account._id), email: account.email, name: '' };
 }
 
 // Every account's ownerId, for the ops dashboard to join against
@@ -562,7 +562,7 @@ async function consumePairing(code, email, password, setup, firstName = '', last
     }
     let created;
     try {
-      created = await accountCollection.insertOne(identityAccountDocument({ email: normalizedEmail, passwordHash: session.signupPasswordHash || hashPassword(password), firstName: '', lastName: '' }));
+      created = await accountCollection.insertOne(identityAccountDocument({ email: normalizedEmail, passwordHash: session.signupPasswordHash || hashPassword(password) }));
     } catch (error) {
       if (error?.code === 11000) return { error: 'An account with this email already exists. Sign in instead.' };
       throw error;
@@ -577,7 +577,7 @@ async function consumePairing(code, email, password, setup, firstName = '', last
       const created = await accountCollection.insertOne(identityAccountDocument({ email: normalizedEmail, passwordHash: profile.passwordHash, createdAt: profile.createdAt || new Date() }));
       account = { _id: created.insertedId };
     }
-    if (!account || !verifyPassword(password, account.passwordHash)) return { error: 'Incorrect email or password' };
+    if (!account || !verifyPassword(password, accountPasswordHash(account))) return { error: 'Incorrect email or password' };
   }
   session.accountId = String(account._id);
   const canonicalOwner = await consolidateAccountLibrary(account._id);
@@ -608,7 +608,7 @@ export async function registerAccount(email, password, firstName = '', lastName 
   let passwordHash = hashPassword(password);
   if (!verificationId) {
     if (await isEmailVerified(normalizedEmail, realm)) {
-      const created = await collection.insertOne(identityAccountDocument({ email: normalizedEmail, passwordHash, firstName: String(firstName || '').trim().slice(0, 60), lastName: String(lastName || '').trim().slice(0, 60) }));
+      const created = await collection.insertOne(identityAccountDocument({ email: normalizedEmail, passwordHash }));
       return { ok: true };
     }
     const id = randomBytes(18).toString('base64url');
@@ -627,7 +627,7 @@ export async function registerAccount(email, password, firstName = '', lastName 
   passwordHash = pending.passwordHash;
   await markEmailVerified(normalizedEmail, realm);
   try {
-    const created = await collection.insertOne(identityAccountDocument({ email: normalizedEmail, passwordHash, firstName: pending.firstName, lastName: pending.lastName }));
+    const created = await collection.insertOne(identityAccountDocument({ email: normalizedEmail, passwordHash }));
   } catch (error) {
     if (error?.code === 11000) return { error: 'An account with this email already exists. Sign in instead.' };
     throw error;
@@ -841,7 +841,7 @@ export async function loginAccount(email, password, deviceId = '', realm = 'gene
   const normalizedEmail = normalizeEmail(email);
   if (!validEmail(normalizedEmail) || !validPassword(password)) return { error: 'Incorrect email or password' };
   const account = await (await accounts(accountRealm)).findOne({ email: normalizedEmail });
-  if (!account || !verifyPassword(password, account.passwordHash)) return { error: 'Incorrect email or password' };
+  if (!account || !verifyPassword(password, accountPasswordHash(account))) return { error: 'Incorrect email or password' };
   const linked = await (await profiles()).find({ accountId: account._id }).toArray();
   const ownerId = await consolidateAccountLibrary(account._id, accountRealm) || accountOwnerId(account._id);
   if (!linked.length) return { token: issueToken({ ownerId, accountId: String(account._id), realm: accountRealm }, 'browser'), devices: [] };
@@ -884,9 +884,9 @@ export async function changeAccountPassword(accountId, currentPassword, newPassw
   if (!validPassword(currentPassword) || !validPassword(newPassword)) return { error: 'Passwords must contain at least 8 characters' };
   const collection = await accounts(realm);
   const account = await collection.findOne({ _id: new ObjectId(accountId) });
-  if (!account || !verifyPassword(currentPassword, account.passwordHash)) return { error: 'Current password is incorrect' };
+  if (!account || !verifyPassword(currentPassword, accountPasswordHash(account))) return { error: 'Current password is incorrect' };
   const passwordHash = hashPassword(newPassword);
-  await collection.updateOne({ _id: account._id }, { $set: { passwordHash, 'credentials.passwordHash': passwordHash, updatedAt: new Date() } });
+  await collection.updateOne({ _id: account._id }, { $set: { passwordHash, updatedAt: new Date() }, $unset: { account: '', credentials: '', firstName: '', lastName: '' } });
   return { ok: true };
 }
 
@@ -896,7 +896,7 @@ export async function deleteAccount(accountId, currentPassword, realm = 'roku') 
   const collection = await accounts(realm);
   const normalizedAccountId = new ObjectId(String(accountId));
   const account = await collection.findOne({ _id: normalizedAccountId });
-  if (!account || !verifyPassword(currentPassword, account.passwordHash)) return { error: 'Current password is incorrect' };
+  if (!account || !verifyPassword(currentPassword, accountPasswordHash(account))) return { error: 'Current password is incorrect' };
   await deleteAccountProfilesAndData(accountId);
   await collection.deleteOne({ _id: normalizedAccountId });
   for (const [code, session] of sessions) if (String(session.accountId || '') === String(accountId)) sessions.delete(code);

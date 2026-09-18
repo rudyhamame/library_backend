@@ -53,8 +53,10 @@ async function accounts(realm = 'roku') {
     promise = new MongoClient(mongoUri, { serverSelectionTimeoutMS: 5000 }).connect()
       .then(async client => {
         const dbName = normalizedRealm === 'general' ? generalDatabaseName : databaseName;
-        const collection = client.db(dbName).collection(accountCollectionName);
-        await collection.createIndex({ email: 1 }, { unique: true });
+        const collection = client.db(dbName).collection(normalizedRealm === 'roku' ? 'identity' : accountCollectionName);
+        const options = { unique: true };
+        if (normalizedRealm === 'roku') options.name = 'identity_auth_email';
+        await collection.createIndex({ email: 1 }, options);
         return collection;
       })
       .catch(error => { accountsPromises.delete(normalizedRealm); throw error; });
@@ -70,8 +72,10 @@ async function verifiedEmails(realm = 'roku') {
     promise = new MongoClient(mongoUri, { serverSelectionTimeoutMS: 5000 }).connect()
       .then(async client => {
         const dbName = normalizedRealm === 'general' ? generalDatabaseName : databaseName;
-        const collection = client.db(dbName).collection(verifiedEmailCollectionName);
-        await collection.createIndex({ email: 1 }, { unique: true });
+        const collection = client.db(dbName).collection(normalizedRealm === 'roku' ? 'meta' : verifiedEmailCollectionName);
+        const options = { unique: true };
+        if (normalizedRealm === 'roku') options.name = 'meta_type_email';
+        await collection.createIndex(normalizedRealm === 'roku' ? { type: 1, email: 1 } : { email: 1 }, options);
         return collection;
       })
       .catch(error => { verifiedEmailPromises.delete(normalizedRealm); throw error; });
@@ -87,8 +91,10 @@ async function signupVerificationStore(realm = 'roku') {
     promise = new MongoClient(mongoUri, { serverSelectionTimeoutMS: 5000 }).connect()
       .then(async client => {
         const dbName = normalizedRealm === 'general' ? generalDatabaseName : databaseName;
-        const collection = client.db(dbName).collection(signupVerificationCollectionName);
-        await collection.createIndex({ email: 1 }, { unique: true });
+        const collection = client.db(dbName).collection(normalizedRealm === 'roku' ? 'meta' : signupVerificationCollectionName);
+        const options = { unique: true };
+        if (normalizedRealm === 'roku') options.name = 'meta_type_email';
+        await collection.createIndex(normalizedRealm === 'roku' ? { type: 1, email: 1 } : { email: 1 }, options);
         return collection;
       })
       .catch(error => { signupVerificationPromises.delete(normalizedRealm); throw error; });
@@ -98,13 +104,13 @@ async function signupVerificationStore(realm = 'roku') {
 }
 
 async function isEmailVerified(email, realm) {
-  return Boolean(await (await verifiedEmails(realm)).findOne({ email, status: 'VERIFIED' }, { projection: { _id: 1 } }));
+  return Boolean(await (await verifiedEmails(realm)).findOne({ email, type: 'verified-account', status: 'VERIFIED' }, { projection: { _id: 1 } }));
 }
 
 async function markEmailVerified(email, realm) {
   await (await verifiedEmails(realm)).updateOne(
-    { email },
-    { $set: { email, status: 'VERIFIED', verifiedAt: new Date(), updatedAt: new Date() } },
+    { email, type: 'verified-account' },
+    { $set: { email, type: 'verified-account', status: 'VERIFIED', verifiedAt: new Date(), updatedAt: new Date() } },
     { upsert: true },
   );
 }
@@ -172,6 +178,16 @@ function validPassword(password) { return typeof password === 'string' && passwo
 function normalizeEmail(email) { return String(email || '').trim().toLowerCase(); }
 function validEmail(email) { return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) && email.length <= 254; }
 
+function identityAccountDocument({ email, passwordHash, firstName = '', lastName = '', createdAt = new Date(), updatedAt = new Date() }) {
+  return {
+    email, passwordHash, firstName, lastName, createdAt, updatedAt,
+    account: { email, firstName, lastName },
+    credentials: { passwordHash },
+    preferences: {}, selectedProviderId: null, providers: [], profiles: [],
+    metadata: { realm: 'roku' },
+  };
+}
+
 const resetCodes = new Map();
 const resetCodeTtlMs = 15 * 60 * 1000;
 const signupVerifications = new Map();
@@ -204,9 +220,10 @@ export async function confirmPasswordReset(code, newPassword) {
   const entry = resetCodes.get(normalizedCode);
   if (!entry) return { error: 'Reset code expired or invalid' };
   if (!validPassword(newPassword)) return { error: 'Password must contain at least 8 characters' };
+  const passwordHash = hashPassword(newPassword);
   await (await accounts(entry.realm)).updateOne(
     { _id: new ObjectId(entry.accountId) },
-    { $set: { passwordHash: hashPassword(newPassword), updatedAt: new Date() } },
+    { $set: { passwordHash, 'credentials.passwordHash': passwordHash, updatedAt: new Date() } },
   );
   resetCodes.delete(normalizedCode);
   return { ok: true };
@@ -271,7 +288,7 @@ export async function setRokuSourcePreference(accountId, sourceId) {
   if (!accountId || !ObjectId.isValid(accountId)) throw new Error('Account authentication is required');
   const value = String(sourceId || '').trim();
   const account = await (await accounts()).findOne({ _id: new ObjectId(accountId) }, { projection: { rokuSourceId: 1, ownerId: 1 } });
-  await (await accounts()).updateOne({ _id: new ObjectId(accountId) }, { $set: { rokuSourceId: value, updatedAt: new Date() } });
+  await (await accounts()).updateOne({ _id: new ObjectId(accountId) }, { $set: { rokuSourceId: value, selectedProviderId: value || null, 'preferences.selectedProviderId': value, updatedAt: new Date() } });
   // Same staleness fix as setProfileRokuSourcePreference, for accounts still
   // on the pre-profile source preference (see getRokuSourcePreferenceByOwner).
   if (account?.ownerId && value !== String(account.rokuSourceId || '')) {
@@ -433,15 +450,16 @@ export async function requestDeviceSignupVerification(code, email, password, fir
   const { normalizedEmail } = context;
   if (await isEmailVerified(normalizedEmail, 'roku')) return { verificationNotRequired: true };
   const store = await signupVerificationStore('roku');
-  const pending = await store.findOne({ email: normalizedEmail });
+  const pending = await store.findOne({ email: normalizedEmail, type: 'signup-verification' });
   if (pending && pending.email === normalizedEmail) {
     return { verificationRequired: true, verificationPending: true };
   }
   const signupCode = String(randomInt(100000, 1000000));
   await store.updateOne(
-    { email: normalizedEmail },
+    { email: normalizedEmail, type: 'signup-verification' },
     { $set: {
       email: normalizedEmail,
+      type: 'signup-verification',
       code: signupCode,
       passwordHash: validPassword(password) ? hashPassword(password) : '',
       firstName: String(firstName || '').trim().slice(0, 60),
@@ -453,7 +471,7 @@ export async function requestDeviceSignupVerification(code, email, password, fir
   );
   try { await sendSignupVerificationEmail(normalizedEmail, signupCode); }
   catch (error) {
-    await store.updateOne({ email: normalizedEmail }, { $set: { resendAvailableAt: Date.now() } });
+    await store.updateOne({ email: normalizedEmail, type: 'signup-verification' }, { $set: { resendAvailableAt: Date.now() } });
     console.error('[signup verification] email send failed:', error.message);
     return { error: 'Verification email could not be sent. Please try again.' };
   }
@@ -465,7 +483,7 @@ export async function resendDeviceSignupVerification(code, email) {
   if (context.error) return context;
   const { normalizedEmail } = context;
   const store = await signupVerificationStore('roku');
-  const pending = await store.findOne({ email: normalizedEmail });
+  const pending = await store.findOne({ email: normalizedEmail, type: 'signup-verification' });
   if (!pending || pending.email !== normalizedEmail) return { error: 'Verification session expired or invalid' };
   const resendAvailableAt = Number(pending.resendAvailableAt || 0);
   if (resendAvailableAt > Date.now()) {
@@ -474,7 +492,7 @@ export async function resendDeviceSignupVerification(code, email) {
   }
   const signupCode = String(randomInt(100000, 1000000));
   await store.updateOne(
-    { email: normalizedEmail },
+    { email: normalizedEmail, type: 'signup-verification' },
     { $set: { code: signupCode, resendAvailableAt: Date.now() + 60 * 1000, updatedAt: new Date() } },
   );
   try { await sendSignupVerificationEmail(normalizedEmail, signupCode, true); }
@@ -505,22 +523,22 @@ async function consumePairing(code, email, password, setup, firstName = '', last
     if (!verificationCode && !verificationBypassed) {
       return requestDeviceSignupVerification(code, normalizedEmail, password, firstName, lastName);
     }
-    const pending = await (await signupVerificationStore('roku')).findOne({ email: normalizedEmail });
+    const pending = await (await signupVerificationStore('roku')).findOne({ email: normalizedEmail, type: 'signup-verification' });
     if (verificationBypassed) {
       if (!(await isEmailVerified(normalizedEmail, 'roku'))) return { error: 'Verification code expired or invalid' };
-      await (await signupVerificationStore('roku')).deleteOne({ email: normalizedEmail });
+      await (await signupVerificationStore('roku')).deleteOne({ email: normalizedEmail, type: 'signup-verification' });
     } else if (!pending) {
-      await (await signupVerificationStore('roku')).deleteOne({ email: normalizedEmail });
+      await (await signupVerificationStore('roku')).deleteOne({ email: normalizedEmail, type: 'signup-verification' });
       return { error: 'Verification code expired or invalid' };
     } else {
       if (pending.email !== normalizedEmail || pending.code !== String(verificationCode).trim()) return { error: 'Incorrect verification code' };
       await markEmailVerified(normalizedEmail, 'roku');
       if (!pending.passwordHash && !validPassword(password)) return { error: 'Password must contain at least 8 characters' };
-      await (await signupVerificationStore('roku')).deleteOne({ email: normalizedEmail });
+      await (await signupVerificationStore('roku')).deleteOne({ email: normalizedEmail, type: 'signup-verification' });
     }
     let created;
     try {
-      created = await accountCollection.insertOne({ email: normalizedEmail, passwordHash: pending?.passwordHash || hashPassword(password), firstName: pending?.firstName || String(firstName || '').trim().slice(0, 60), lastName: pending?.lastName || String(lastName || '').trim().slice(0, 60), createdAt: new Date(), updatedAt: new Date() });
+      created = await accountCollection.insertOne(identityAccountDocument({ email: normalizedEmail, passwordHash: pending?.passwordHash || hashPassword(password), firstName: pending?.firstName || String(firstName || '').trim().slice(0, 60), lastName: pending?.lastName || String(lastName || '').trim().slice(0, 60) }));
     } catch (error) {
       if (error?.code === 11000) return { error: 'An account with this email already exists. Sign in instead.' };
       throw error;
@@ -532,7 +550,7 @@ async function consumePairing(code, email, password, setup, firstName = '', last
     // A profile created by the earlier device-password implementation can be
     // adopted on its first successful sign-in without losing its library.
     if (!account && profile?.email === normalizedEmail && verifyPassword(password, profile.passwordHash)) {
-      const created = await accountCollection.insertOne({ email: normalizedEmail, passwordHash: profile.passwordHash, createdAt: profile.createdAt || new Date(), updatedAt: new Date() });
+      const created = await accountCollection.insertOne(identityAccountDocument({ email: normalizedEmail, passwordHash: profile.passwordHash, createdAt: profile.createdAt || new Date() }));
       account = { _id: created.insertedId };
     }
     if (!account || !verifyPassword(password, account.passwordHash)) return { error: 'Incorrect email or password' };
@@ -566,7 +584,7 @@ export async function registerAccount(email, password, firstName = '', lastName 
   let passwordHash = hashPassword(password);
   if (!verificationId) {
     if (await isEmailVerified(normalizedEmail, realm)) {
-      const created = await collection.insertOne({ email: normalizedEmail, passwordHash, firstName: String(firstName || '').trim().slice(0, 60), lastName: String(lastName || '').trim().slice(0, 60), createdAt: new Date(), updatedAt: new Date() });
+      const created = await collection.insertOne(identityAccountDocument({ email: normalizedEmail, passwordHash, firstName: String(firstName || '').trim().slice(0, 60), lastName: String(lastName || '').trim().slice(0, 60) }));
       await ensureDefaultProfile(String(created.insertedId), firstName || 'Main');
       return { ok: true };
     }
@@ -586,7 +604,7 @@ export async function registerAccount(email, password, firstName = '', lastName 
   passwordHash = pending.passwordHash;
   await markEmailVerified(normalizedEmail, realm);
   try {
-    const created = await collection.insertOne({ email: normalizedEmail, passwordHash, firstName: pending.firstName, lastName: pending.lastName, createdAt: new Date(), updatedAt: new Date() });
+    const created = await collection.insertOne(identityAccountDocument({ email: normalizedEmail, passwordHash, firstName: pending.firstName, lastName: pending.lastName }));
     await ensureDefaultProfile(String(created.insertedId), firstName || 'Main');
   } catch (error) {
     if (error?.code === 11000) return { error: 'An account with this email already exists. Sign in instead.' };
@@ -866,7 +884,8 @@ export async function changeAccountPassword(accountId, currentPassword, newPassw
   const collection = await accounts(realm);
   const account = await collection.findOne({ _id: new ObjectId(accountId) });
   if (!account || !verifyPassword(currentPassword, account.passwordHash)) return { error: 'Current password is incorrect' };
-  await collection.updateOne({ _id: account._id }, { $set: { passwordHash: hashPassword(newPassword), updatedAt: new Date() } });
+  const passwordHash = hashPassword(newPassword);
+  await collection.updateOne({ _id: account._id }, { $set: { passwordHash, 'credentials.passwordHash': passwordHash, updatedAt: new Date() } });
   return { ok: true };
 }
 

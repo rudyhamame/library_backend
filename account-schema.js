@@ -10,9 +10,11 @@ export const collectionNames = {
 export const identityValidator = {
   $jsonSchema: {
     bsonType: 'object',
-    required: ['_id', 'account', 'credentials', 'preferences', 'providers', 'profiles', 'metadata'],
+    required: ['_id', 'email', 'passwordHash', 'account', 'credentials', 'preferences', 'providers', 'profiles', 'metadata'],
     properties: {
-      _id: { bsonType: 'string' },
+      _id: { bsonType: ['objectId', 'string'] },
+      email: { bsonType: 'string' },
+      passwordHash: { bsonType: 'string' },
       account: { bsonType: 'object', required: ['email'], properties: { email: { bsonType: 'string' } } },
       credentials: { bsonType: 'object' },
       preferences: { bsonType: 'object' },
@@ -28,7 +30,7 @@ export const identityValidator = {
 export const metaValidator = {
   $jsonSchema: {
     bsonType: 'object',
-    required: ['_id', 'type', 'createdAt', 'updatedAt'],
+    required: ['_id', 'createdAt', 'updatedAt'],
     properties: {
       _id: { bsonType: 'string' },
       type: { bsonType: 'string', enum: ['verified-account', 'signup-verification', 'password-reset', 'roku-auth', 'system'] },

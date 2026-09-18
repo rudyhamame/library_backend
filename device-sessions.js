@@ -18,7 +18,6 @@ const databaseName = process.env.MONGODB_DB || 'rh_roku';
 const generalDatabaseName = process.env.MONGODB_GENERAL_DB || 'rh_general';
 const accountCollectionName = process.env.MONGODB_ACCOUNT_COLLECTION || 'accounts';
 const verifiedEmailCollectionName = process.env.MONGODB_VERIFIED_EMAIL_COLLECTION || 'verified_emails';
-const signupVerificationCollectionName = process.env.MONGODB_SIGNUP_VERIFICATION_COLLECTION || 'signup_verifications';
 const signingSecret = process.env.DEVICE_AUTH_SECRET || 'local-development-secret-change-before-production';
 const frontendUrl = process.env.FRONTEND_URL || 'http://127.0.0.1:8787';
 let profilesPromise;
@@ -86,19 +85,36 @@ async function signupVerificationStore(realm = 'roku') {
     promise = new MongoClient(mongoUri, { serverSelectionTimeoutMS: 5000 }).connect()
       .then(async client => {
         const dbName = normalizedRealm === 'general' ? generalDatabaseName : databaseName;
-        const collection = client.db(dbName).collection(normalizedRealm === 'roku' ? 'meta' : signupVerificationCollectionName);
-        const options = { unique: true };
-        if (normalizedRealm === 'roku') {
-          options.name = 'meta_auth_email';
-          options.partialFilterExpression = { type: { $in: ['verified-account', 'signup-verification'] } };
-        }
-        await collection.createIndex(normalizedRealm === 'roku' ? { type: 1, email: 1 } : { email: 1 }, options);
-        return collection;
+        return client.db(dbName).collection(normalizedRealm === 'roku' ? 'meta' : (process.env.MONGODB_SIGNUP_VERIFICATION_COLLECTION || 'signup_verifications'));
       })
       .catch(error => { signupVerificationPromises.delete(normalizedRealm); throw error; });
     signupVerificationPromises.set(normalizedRealm, promise);
   }
   return promise;
+}
+
+const unverifiedAccountsId = 'unverified_accounts';
+async function findUnverifiedAccount(email) {
+  const normalizedEmail = normalizeEmail(email);
+  const row = await (await signupVerificationStore('roku')).findOne({ _id: unverifiedAccountsId }, { projection: { unverified_accounts: 1 } });
+  return (row?.unverified_accounts || []).find(item => item.email === normalizedEmail) || null;
+}
+
+async function saveUnverifiedAccount(email, changes) {
+  const normalizedEmail = normalizeEmail(email);
+  const collection = await signupVerificationStore('roku');
+  const row = await collection.findOne({ _id: unverifiedAccountsId }, { projection: { unverified_accounts: 1 } });
+  const entries = Array.isArray(row?.unverified_accounts) ? row.unverified_accounts.slice() : [];
+  const index = entries.findIndex(item => item.email === normalizedEmail);
+  const next = { ...(index >= 0 ? entries[index] : { _id: metaRecordId('signup-verification', normalizedEmail), email: normalizedEmail, createdAt: new Date() }), ...changes, email: normalizedEmail };
+  if (index >= 0) entries[index] = next; else entries.push(next);
+  await collection.updateOne({ _id: unverifiedAccountsId }, { $set: { unverified_accounts: entries, updatedAt: new Date() }, $setOnInsert: { createdAt: new Date() } }, { upsert: true });
+  return next;
+}
+
+async function deleteUnverifiedAccount(email) {
+  const collection = await signupVerificationStore('roku');
+  await collection.updateOne({ _id: unverifiedAccountsId }, { $pull: { unverified_accounts: { email: normalizeEmail(email) } }, $set: { updatedAt: new Date() } });
 }
 
 async function isEmailVerified(email, realm) {
@@ -419,26 +435,26 @@ export async function verifyDeviceSignupCode(code, email, verificationCode) {
   if (session.purpose === 'android-remote') return { error: 'Sign in through the RH Android app, then scan again' };
   const normalizedEmail = normalizeEmail(email);
   if (!validEmail(normalizedEmail)) return { error: 'Enter a valid email address' };
-  const pending = await (await signupVerificationStore('roku')).findOne({ email: normalizedEmail, type: 'signup-verification' });
+  const pending = await findUnverifiedAccount(normalizedEmail);
   if (!pending) return { error: 'Verification code not found' };
   if (pending.email !== normalizedEmail || pending.code !== String(verificationCode || '').trim()) {
     return { error: 'Incorrect verification code', verificationInvalid: true };
   }
-  if (!pending.passwordHash) return { error: 'Signup details are missing. Please enter the password again.' };
+  if (!session.signupPasswordHash) return { error: 'Signup details are missing. Please enter the password again.' };
   const accountCollection = await accounts('roku');
   const existing = await accountCollection.findOne({ email: normalizedEmail }, { projection: { _id: 1 } });
   if (existing) return { error: 'An account with this email already exists. Sign in instead.' };
   let created;
   try {
     created = await accountCollection.insertOne(identityAccountDocument({
-      email: normalizedEmail, passwordHash: pending.passwordHash,
-      firstName: pending.firstName || '', lastName: pending.lastName || '',
+      email: normalizedEmail, passwordHash: session.signupPasswordHash,
+      firstName: '', lastName: '',
     }));
   } catch (error) {
     if (error?.code === 11000) return { error: 'An account with this email already exists. Sign in instead.' };
     throw error;
   }
-  await (await signupVerificationStore('roku')).deleteOne({ email: normalizedEmail, type: 'signup-verification' });
+  await deleteUnverifiedAccount(normalizedEmail);
   return { verificationValid: true, token: await approveSignupSession(code, created.insertedId) };
 }
 
@@ -478,42 +494,21 @@ export async function requestDeviceSignupVerification(code, email, password, fir
   const { normalizedEmail } = context;
   context.session.expiresAt = null;
   if (await isEmailVerified(normalizedEmail, 'roku')) return { verificationNotRequired: true };
-  const store = await signupVerificationStore('roku');
-  const pending = await store.findOne({ email: normalizedEmail, type: 'signup-verification' });
+  const pending = await findUnverifiedAccount(normalizedEmail);
   if (pending && pending.email === normalizedEmail) {
     {
       // Keep the current signup attempt authoritative if the viewer backed
       // out and started again with the same email.
-      await store.updateOne(
-        { email: normalizedEmail, type: 'signup-verification' },
-        { $set: {
-          passwordHash: validPassword(password) ? hashPassword(password) : pending.passwordHash || '',
-          firstName: String(firstName || '').trim().slice(0, 60),
-          lastName: String(lastName || '').trim().slice(0, 60),
-          updatedAt: new Date(),
-        } },
-      );
+      context.session.signupPasswordHash = validPassword(password) ? hashPassword(password) : context.session.signupPasswordHash || '';
       return { verificationRequired: true, verificationPending: true };
     }
   }
   const signupCode = String(randomInt(100000, 1000000));
-  await store.updateOne(
-    { email: normalizedEmail, type: 'signup-verification' },
-    { $set: {
-      email: normalizedEmail,
-      type: 'signup-verification',
-      code: signupCode,
-      passwordHash: validPassword(password) ? hashPassword(password) : '',
-      firstName: String(firstName || '').trim().slice(0, 60),
-      lastName: String(lastName || '').trim().slice(0, 60),
-      resendAvailableAt: Date.now() + 60 * 1000,
-      updatedAt: new Date(),
-    }, $setOnInsert: { _id: metaRecordId('signup-verification', normalizedEmail), createdAt: new Date() } },
-    { upsert: true },
-  );
+  context.session.signupPasswordHash = validPassword(password) ? hashPassword(password) : '';
+  await saveUnverifiedAccount(normalizedEmail, { code: signupCode, resendAvailableAt: Date.now() + 60 * 1000, updatedAt: new Date() });
   try { await sendSignupVerificationEmail(normalizedEmail, signupCode); }
   catch (error) {
-    await store.updateOne({ email: normalizedEmail, type: 'signup-verification' }, { $set: { resendAvailableAt: Date.now() } });
+    await saveUnverifiedAccount(normalizedEmail, { resendAvailableAt: Date.now() });
     console.error('[signup verification] email send failed:', error.message);
     return { error: 'Verification email could not be sent. Please try again.' };
   }
@@ -524,8 +519,7 @@ export async function resendDeviceSignupVerification(code, email) {
   const context = await getSignupSession(code, email);
   if (context.error) return context;
   const { normalizedEmail } = context;
-  const store = await signupVerificationStore('roku');
-  const pending = await store.findOne({ email: normalizedEmail, type: 'signup-verification' });
+  const pending = await findUnverifiedAccount(normalizedEmail);
   if (!pending || pending.email !== normalizedEmail) return { error: 'Verification session not found. Request a new code.' };
   const resendAvailableAt = Number(pending.resendAvailableAt || 0);
   if (resendAvailableAt > Date.now()) {
@@ -533,13 +527,10 @@ export async function resendDeviceSignupVerification(code, email) {
     return { error: `Send code again is available in ${secondsRemaining} seconds` };
   }
   const signupCode = String(randomInt(100000, 1000000));
-  await store.updateOne(
-    { email: normalizedEmail, type: 'signup-verification' },
-    { $set: { code: signupCode, resendAvailableAt: Date.now() + 60 * 1000, updatedAt: new Date() } },
-  );
+  await saveUnverifiedAccount(normalizedEmail, { code: signupCode, resendAvailableAt: Date.now() + 60 * 1000, updatedAt: new Date() });
   try { await sendSignupVerificationEmail(normalizedEmail, signupCode, true); }
   catch (error) {
-    await store.updateOne({ email: normalizedEmail, type: 'signup-verification' }, { $set: { resendAvailableAt: Date.now() } });
+    await saveUnverifiedAccount(normalizedEmail, { resendAvailableAt: Date.now() });
     console.error('[signup verification] email send failed:', error.message);
     return { error: 'Verification email could not be sent. Please try again.' };
   }
@@ -565,22 +556,22 @@ async function consumePairing(code, email, password, setup, firstName = '', last
     if (!verificationCode && !verificationBypassed) {
       return requestDeviceSignupVerification(code, normalizedEmail, password, firstName, lastName);
     }
-    const pending = await (await signupVerificationStore('roku')).findOne({ email: normalizedEmail, type: 'signup-verification' });
+    const pending = await findUnverifiedAccount(normalizedEmail);
     if (verificationBypassed) {
       if (!(await isEmailVerified(normalizedEmail, 'roku'))) return { error: 'Verification code expired or invalid' };
-      await (await signupVerificationStore('roku')).deleteOne({ email: normalizedEmail, type: 'signup-verification' });
+      await deleteUnverifiedAccount(normalizedEmail);
     } else if (!pending) {
-      await (await signupVerificationStore('roku')).deleteOne({ email: normalizedEmail, type: 'signup-verification' });
+      await deleteUnverifiedAccount(normalizedEmail);
       return { error: 'Verification code expired or invalid' };
     } else {
       if (pending.email !== normalizedEmail || pending.code !== String(verificationCode).trim()) return { error: 'Incorrect verification code' };
       await markEmailVerified(normalizedEmail, 'roku');
-      if (!pending.passwordHash && !validPassword(password)) return { error: 'Password must contain at least 8 characters' };
-      await (await signupVerificationStore('roku')).deleteOne({ email: normalizedEmail, type: 'signup-verification' });
+      if (!session.signupPasswordHash && !validPassword(password)) return { error: 'Password must contain at least 8 characters' };
+      await deleteUnverifiedAccount(normalizedEmail);
     }
     let created;
     try {
-      created = await accountCollection.insertOne(identityAccountDocument({ email: normalizedEmail, passwordHash: pending?.passwordHash || hashPassword(password), firstName: pending?.firstName || String(firstName || '').trim().slice(0, 60), lastName: pending?.lastName || String(lastName || '').trim().slice(0, 60) }));
+      created = await accountCollection.insertOne(identityAccountDocument({ email: normalizedEmail, passwordHash: session.signupPasswordHash || hashPassword(password), firstName: '', lastName: '' }));
     } catch (error) {
       if (error?.code === 11000) return { error: 'An account with this email already exists. Sign in instead.' };
       throw error;

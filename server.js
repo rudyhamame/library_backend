@@ -18,7 +18,6 @@ import { MediaCapacityError, MediaJobManager, defaultMediaLimits, memoryPressure
 import { HlsStrategy, PlaybackStrategy, choosePlaybackStrategy, determineHlsStrategy, hlsCodecArgs } from './playback-strategy.js';
 import { clearStreamingHistory, deleteStreamingSession, getStreamingContinueWatching, getStreamingHistory, getStreamingResume, saveStreamingHistory } from './streaming-history-store.js';
 import { getFavorites, toggleFavorite } from './favorites-store.js';
-import { getSeriesWatchOverride, toggleSeriesWatchOverride } from './series-watch-overrides.js';
 import { accountOwnerId, profileOwnerId } from './account-library-owner.js';
 import { syncCatalogItems } from './catalog-store.js';
 import { authorizeDeviceSession, autoLoginDeviceSession, castHandoffLink, changeAccountPassword, claimAutomaticPairing, confirmPasswordReset, createDeviceSession, deleteAccount, getAccountBasicInfo, getDeviceSession, getDeviceWeatherLocations, getLinkedDevices, getPairingInfo, getRokuDeviceSessionStatus, getRokuSourcePreferenceByOwner, initializeAccountDatabases, isProfileOnline, isRokuSessionLinked, listAllAccountsBasic, listAllLinkedDevices, loginAccount, loginDeviceSession, recordDeviceHeartbeat, registerAccount, registerBrowserDevice, requestDeviceSignupVerification, requestPasswordReset, resendDeviceSignupVerification, resolveAccountByEmail, resolveDeviceToken, saveDeviceWeatherLocations, selectAccountProfile, setupDeviceSession, unlinkAccountDevice, verifyDeviceSignupCode } from './device-sessions.js';
@@ -2279,10 +2278,6 @@ app.get('/api/roku/series/detail', async (req, res) => {
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
-// Roku '*' on an episode row: mark it as the "last watched" episode for that
-// series. Pressing '*' again on the same episode clears it (reverts to the
-// automatically-detected one). This is what the episode list highlights
-// yellow, and what Continue Watching shows instead of the natural pick.
 app.get('/api/roku/series/last-watched', async (req, res) => {
   try {
     const ownerId = requestOwner(req);
@@ -2290,12 +2285,10 @@ app.get('/api/roku/series/last-watched', async (req, res) => {
     const sourceId = String(req.query.sourceId || '');
     const seriesId = String(req.query.seriesId || '');
     if (!sourceId || !seriesId) return res.status(400).json({ error: 'sourceId and seriesId are required' });
-    const override = await getSeriesWatchOverride(ownerId, sourceId, seriesId);
-    // When there is no manual '*' override, use the most recently played
-    // episode for this series. Keep the saved absolute position with it so
-    // the Roku episode grid can show where playback will resume.
+    // The last episode is derived only from playback history. There is no
+    // manual watched/unwatched override.
     const watchedHistory = await getStreamingHistory(requestProfileOwner(req));
-    const episodeId = override?.episodeId || watchedHistory.find(item => item.kind === 'series'
+    const episodeId = watchedHistory.find(item => item.kind === 'series'
       && String(item.sourceId || '') === sourceId
       && String(item.seriesId || '') === seriesId
       && String(item.itemId || '') !== '')?.itemId || '';
@@ -2309,25 +2302,6 @@ app.get('/api/roku/series/last-watched', async (req, res) => {
       positionMs: Math.max(0, Number(watched?.endPositionMs) || 0),
     });
   } catch (error) { res.status(500).json({ error: error.message }); }
-});
-
-app.post('/api/roku/series/last-watched/toggle', async (req, res) => {
-  try {
-    const ownerId = requestOwner(req);
-    if (!ownerId) return res.status(401).json({ error: 'Authentication required' });
-    const pick = key => req.body?.[key] ?? req.query?.[key] ?? '';
-    const result = await toggleSeriesWatchOverride({
-      ownerId,
-      sourceId: pick('sourceId'), seriesId: pick('seriesId'), episodeId: pick('episodeId'),
-      episodeTitle: pick('episodeTitle'), seasonNumber: pick('seasonNumber'), episodeNumber: pick('episodeNumber'),
-    });
-    const resume = result.active
-      ? await getStreamingResume(requestProfileOwner(req), {
-        sourceId: pick('sourceId'), itemId: pick('episodeId'), kind: 'series',
-      })
-      : null;
-    res.json({ ...result, positionMs: Math.max(0, Number(resume?.endPositionMs) || 0) });
-  } catch (error) { res.status(400).json({ error: error.message }); }
 });
 
 async function buildXtreamMoviesPayload({ limit, selected } = {}) {

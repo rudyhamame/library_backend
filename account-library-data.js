@@ -25,7 +25,6 @@ export function normalizedAccountLibrary(library) {
     categories: Array.isArray(library?.categories) ? library.categories : [],
     assignments: Array.isArray(library?.assignments) ? library.assignments : [],
     favorites: Array.isArray(library?.favorites) ? library.favorites : [],
-    seriesWatchOverrides: Array.isArray(library?.seriesWatchOverrides) ? library.seriesWatchOverrides : [],
     savedSelections: library?.savedSelections && typeof library.savedSelections === 'object' ? library.savedSelections : {},
     last_kinds_watched: {
       episode: library?.last_kinds_watched?.episode || library?.lastKindsWatched?.episode || null,

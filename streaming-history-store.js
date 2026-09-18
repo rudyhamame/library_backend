@@ -1,5 +1,4 @@
 import { getAccountLibrary, updateAccountLibrary } from './account-library-data.js';
-import { getSeriesWatchOverridesByOwner } from './series-watch-overrides.js';
 
 const milliseconds = value => Math.max(0, Math.round(Number(value) || 0));
 const formatLastMoment = value => {
@@ -79,19 +78,13 @@ export async function getStreamingResume(ownerId, { sourceId, itemId, kind }) {
 }
 
 export async function getStreamingContinueWatching(ownerId) {
-  const [history, overrides] = await Promise.all([getStreamingHistory(ownerId), getSeriesWatchOverridesByOwner(ownerId).catch(() => [])]);
-  const overrideBySeries = new Map(overrides.map(entry => [`${entry.sourceId}:${entry.seriesId}`, entry]));
-  const filtered = history.filter(item => item.sourceId && item.itemId).filter(item => {
+  const filtered = (await getStreamingHistory(ownerId)).filter(item => item.sourceId && item.itemId).filter(item => {
     if (item.kind === 'channel') return true;
     if (milliseconds(item.endPositionMs) <= 5000 || item.completed === true) return false;
     const duration = milliseconds(item.mediaDurationMs);
     return duration <= 0 || milliseconds(item.endPositionMs) < Math.max(duration - 30000, duration * 0.95);
   });
-  return filtered.map(item => {
-    if (item.kind !== 'series' || !item.seriesId) return item;
-    const override = overrideBySeries.get(`${item.sourceId}:${item.seriesId}`);
-    return override ? { ...item, itemId: override.episodeId, title: override.episodeTitle || item.title, seasonNumber: override.seasonNumber || 0, episodeNumber: override.episodeNumber || 0, watchOverride: true } : item;
-  });
+  return filtered;
 }
 
 // Kept for old device-link callers; history is now nested under profiles.

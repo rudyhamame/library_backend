@@ -28,7 +28,6 @@ export function buildAccountRoot({
   favorites = [],
   playback = [],
   history = [],
-  watchOverrides = [],
   catalogRefs = [],
   generatedAt = new Date(),
 }) {
@@ -77,7 +76,6 @@ export function buildAccountRoot({
       savedSelections: profile.library?.savedSelections || {},
       categories: profile.library?.categories || [],
       assignments: profile.library?.assignments || [],
-      seriesWatchOverrides: profile.library?.seriesWatchOverrides || [],
       updatedAt: profile.updatedAt || null,
     };
   });
@@ -107,7 +105,6 @@ export function buildAccountRoot({
     categories: categories ? withoutMongoId(categories) : { categories: [], assignments: [] },
     playback: accountPlayback,
     lastWatched,
-    watchOverrides: watchOverrides.map(withoutMongoId),
     catalogRefs: catalogRefs.map(withoutMongoId),
     generatedAt,
   };

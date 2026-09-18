@@ -24,14 +24,13 @@ async function ownerRows(collection, ownerId) {
 async function migrateAccount(db, account, roots) {
   const accountId = String(account._id);
   const ownerId = account.ownerId || accountOwnerId(account._id);
-  const [profiles, providers, categories, favorites, playback, history, watchOverrides] = await Promise.all([
+  const [profiles, providers, categories, favorites, playback, history] = await Promise.all([
     Promise.resolve(Array.isArray(account.profiles) ? account.profiles : []),
     Promise.resolve(Array.isArray(account.providers) ? account.providers : []),
     Promise.resolve({ categories: (account.profiles || []).flatMap(profile => profile.library?.categories || []), assignments: (account.profiles || []).flatMap(profile => profile.library?.assignments || []) }),
     Promise.resolve((account.profiles || []).flatMap(profile => profile.library?.favorites || [])),
     ownerRows(db.collection(names.playback), ownerId),
     Promise.resolve((account.profiles || []).flatMap(profile => Object.values(profile.library?.last_kinds_watched || {}).filter(Boolean).map(item => ({ ...item, ownerId: profile.ownerId })))),
-    Promise.resolve((account.profiles || []).flatMap(profile => profile.library?.seriesWatchOverrides || [])),
   ]);
   const providerIds = providers.map(provider => provider._id);
   const [catalogRefs, syncRows, mediaRefs, episodeRefs] = await Promise.all([
@@ -57,7 +56,7 @@ async function migrateAccount(db, account, roots) {
   ]);
   const root = buildAccountRoot({
     account: { ...account, ownerId, realm: 'roku' }, profiles, providers, categories,
-    favorites, playback, history, watchOverrides,
+    favorites, playback, history,
     catalogRefs: [...catalogRefs, ...syncRows, ...mediaRefs, ...episodeRefs],
   });
   await roots.replaceOne({ _id: ownerId }, root, { upsert: true });

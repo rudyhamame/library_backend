@@ -25,7 +25,7 @@ try {
   const priorOwnerIds = [...new Set(linkedProfiles.map(profile => profile.ownerId).filter(Boolean))];
   await accounts.updateOne({ _id: account._id }, { $set: {
     'profiles.$[].library.categories': [], 'profiles.$[].library.assignments': [],
-    'profiles.$[].library.favorites': [], 'profiles.$[].library.seriesWatchOverrides': [],
+    'profiles.$[].library.favorites': [],
     'profiles.$[].library.savedSelections': {}, updatedAt: new Date(),
   } });
   console.log(JSON.stringify({ accountLibraries: 1, providersRetained: Array.isArray(account.providers) ? account.providers.length : 0, selectedItems: 0, archivedItems: 0 }));

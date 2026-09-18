@@ -22,14 +22,6 @@ try {
     for (const account of await collection.find({ library: { $exists: true } }).toArray()) {
       const root = account.library || {};
       const defaultOwner = accountOwnerId(account._id);
-      for (const category of root.categories || []) await updateAccountLibrary(category.profileOwnerId || defaultOwner, library => {
-        if (!library.categories.some(row => row.id === category.id)) library.categories.push(category);
-        return library;
-      });
-      for (const assignment of root.assignments || []) await updateAccountLibrary(assignment.profileOwnerId || defaultOwner, library => {
-        if (!library.assignments.some(row => row.itemKey === assignment.itemKey)) library.assignments.push(assignment);
-        return library;
-      });
       for (const favorite of root.favorites || []) await updateAccountLibrary(defaultOwner, library => {
         if (!library.favorites.some(row => row.profileId === favorite.profileId && row.sourceId === favorite.sourceId && row.kind === favorite.kind && row.itemId === favorite.itemId)) library.favorites.push(favorite);
         return library;
@@ -84,7 +76,18 @@ try {
     for (const [ownerId, selection] of Object.entries(selections)) {
       try {
         await updateAccountLibrary(ownerId, library => {
-          library.savedSelections[String(source._id)] ||= Object.fromEntries(fields.map(field => [field, selection[field] || []]));
+          const saved = library.savedSelections || { series: [], movies: [], live: [] };
+          const add = (kind, url) => {
+            const value = String(url || '');
+            if (value && !saved[kind].includes(value)) saved[kind].push(value);
+          };
+          for (const item of (selection.enabledItems || [])) {
+            const url = item?.providerUrl || item?.url;
+            if (!url) continue;
+            const kind = String(item.kind || '').toLowerCase();
+            add(kind === 'series' ? 'series' : (kind === 'live' || kind === 'channel' ? 'live' : 'movies'), url);
+          }
+          library.savedSelections = saved;
           return library;
         });
       } catch { unmapped.push({ kind: 'savedSelections', ownerId }); resolved = false; }

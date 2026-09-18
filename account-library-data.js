@@ -12,6 +12,14 @@ async function accountCollections() {
   return [client.db(rokuDb).collection('identity'), client.db(generalDb).collection(process.env.MONGODB_ACCOUNT_COLLECTION || 'accounts')];
 }
 
+export async function allAccountDocuments() {
+  const rows = [];
+  for (const collection of await accountCollections()) {
+    for (const account of await collection.find({}).toArray()) rows.push({ collection, account });
+  }
+  return rows;
+}
+
 export function normalizedAccountLibrary(library) {
   return {
     categories: Array.isArray(library?.categories) ? library.categories : [],

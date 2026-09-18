@@ -223,9 +223,6 @@ export async function deleteAccountProfile(accountId, profileId) {
     process.env.MONGODB_ANDROID_STARTUP_COLLECTION || 'android_startup_snapshots',
   ];
   await Promise.all(names.map(name => record.database.collection(name).deleteMany({ ownerId })));
-  await record.database.collection(process.env.MONGODB_XTREAM_COLLECTION || 'xtream_sources').updateMany(
-    { ownerId: accountOwnerId(accountId) }, { $unset: { [`selections.${ownerId}`]: '' } },
-  );
   if (record.account.metadata?.devices?.some(device => device.profileId === String(profileId))) {
     await record.collection.updateOne(
       { _id: record.id },
@@ -242,7 +239,6 @@ export async function deleteAccountProfilesAndData(accountId) {
   const rows = profilesOf(record.account);
   const ownerIds = [...new Set([accountOwnerId(accountId), ...rows.map(row => String(row.ownerId || '')).filter(Boolean)])];
   const names = [
-    process.env.MONGODB_XTREAM_COLLECTION || 'xtream_sources',
     process.env.MONGODB_PLAYBACK_COLLECTION || 'playback_progress',
     process.env.MONGODB_STREAMING_HISTORY_COLLECTION || 'streaming_history',
     process.env.MONGODB_AI_RECOMMENDATIONS_COLLECTION || 'ai_recommendations',

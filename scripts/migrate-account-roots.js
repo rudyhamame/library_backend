@@ -10,7 +10,6 @@ const client = new MongoClient(mongoUri, { serverSelectionTimeoutMS: 10_000 });
 const names = {
   roots: process.env.MONGODB_ACCOUNT_ROOT_COLLECTION || 'account_roots',
   accounts: process.env.MONGODB_ACCOUNT_COLLECTION || 'accounts',
-  providers: process.env.MONGODB_XTREAM_COLLECTION || 'xtream_sources',
   playback: process.env.MONGODB_PLAYBACK_COLLECTION || 'playback_progress',
   history: process.env.MONGODB_STREAMING_HISTORY_COLLECTION || 'streaming_history',
   catalog: process.env.MONGODB_PROVIDER_CATALOG_COLLECTION || 'provider_catalog_items',
@@ -28,7 +27,7 @@ async function migrateAccount(db, account, roots) {
   const ownerId = account.ownerId || accountOwnerId(account._id);
   const [profiles, providers, categories, favorites, playback, history, watchOverrides] = await Promise.all([
     Promise.resolve(Array.isArray(account.profiles) ? account.profiles : []),
-    ownerRows(db.collection(names.providers), ownerId),
+    Promise.resolve(Array.isArray(account.providers) ? account.providers : []),
     Promise.resolve({ categories: (account.profiles || []).flatMap(profile => profile.library?.categories || []), assignments: (account.profiles || []).flatMap(profile => profile.library?.assignments || []) }),
     Promise.resolve((account.profiles || []).flatMap(profile => profile.library?.favorites || [])),
     ownerRows(db.collection(names.playback), ownerId),

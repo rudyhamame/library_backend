@@ -79,7 +79,23 @@ try {
     migrated++;
   }
   const sourceCollection = db.collection(process.env.MONGODB_XTREAM_COLLECTION || 'xtream_sources');
-  for (const source of await sourceCollection.find({}).toArray()) {
+  const sourceRows = await sourceCollection.find({}).toArray();
+  let sourcesMigrated = 0;
+  for (const source of sourceRows) {
+    let accountRecord;
+    try { accountRecord = await accountForLibraryOwner(source.ownerId); }
+    catch { unmapped.push({ kind: 'xtream_sources', ownerId: source.ownerId, sourceId: source._id }); continue; }
+    const provider = { ...source };
+    delete provider.ownerId;
+    delete provider.selections;
+    for (const field of ['enabledKeys', 'enabledItems', 'archivedKeys', 'archivedItems']) delete provider[field];
+    const providers = Array.isArray(accountRecord.account.providers) ? accountRecord.account.providers : [];
+    if (!providers.some(item => String(item._id) === String(provider._id))) {
+      await accountRecord.collection.updateOne(
+        { _id: accountRecord.account._id },
+        { $push: { providers: provider }, $set: { updatedAt: new Date() } },
+      );
+    }
     const selections = { ...(source.selections || {}) };
     const fields = ['enabledKeys', 'enabledItems', 'archivedKeys', 'archivedItems'];
     if (fields.some(field => (source[field] || []).length)) selections[String(source.ownerId)] ||= Object.fromEntries(fields.map(field => [field, source[field] || []]));
@@ -92,9 +108,10 @@ try {
         });
       } catch { unmapped.push({ kind: 'savedSelections', ownerId }); resolved = false; }
     }
-    if (resolved) await sourceCollection.updateOne({ _id: source._id }, { $set: Object.fromEntries(fields.map(field => [field, []])), $unset: { selections: '' } });
+    if (resolved) sourcesMigrated++;
   }
-  console.log(JSON.stringify({ migrated, counts: Object.fromEntries(Object.entries(rows).map(([kind, data]) => [kind, data.length])), unmapped }));
+  if (!unmapped.some(row => row.kind === 'xtream_sources')) await sourceCollection.drop().catch(error => { if (error.codeName !== 'NamespaceNotFound') throw error; });
+  console.log(JSON.stringify({ migrated, sourcesMigrated, counts: Object.fromEntries(Object.entries(rows).map(([kind, data]) => [kind, data.length])), unmapped }));
   if (unmapped.length) process.exitCode = 1;
 } finally {
   await client.close();

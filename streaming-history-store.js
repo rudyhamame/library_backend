@@ -102,10 +102,18 @@ export async function getStreamingResume(ownerId, { sourceId, itemId, kind, seri
 export async function getSeriesLastWatched(ownerId, sourceId, seriesId) {
   if (!ownerId || !sourceId || !seriesId) return null;
   const library = await getAccountLibrary(ownerId);
-  const keyed = library.series_last_watched[seriesHistoryKey(sourceId, seriesId)];
+  const key = seriesHistoryKey(sourceId, seriesId);
+  const keyed = library.series_last_watched[key];
   if (keyed) return keyed;
   const legacy = library.last_kinds_watched.episode;
-  return legacy && String(legacy.sourceId) === String(sourceId) && String(legacy.seriesId) === String(seriesId) ? legacy : null;
+  if (!legacy || String(legacy.sourceId) !== String(sourceId) || String(legacy.seriesId) !== String(seriesId)) return null;
+  // Migrate the pre-series-map single episode lazily on first access. This
+  // preserves existing badges before the next playback write arrives.
+  await updateAccountLibrary(ownerId, next => {
+    if (!next.series_last_watched[key]) next.series_last_watched[key] = legacy;
+    return next;
+  });
+  return legacy;
 }
 
 export async function getStreamingContinueWatching(ownerId) {

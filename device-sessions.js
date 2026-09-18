@@ -106,7 +106,14 @@ async function saveUnverifiedAccount(email, changes) {
   const row = await collection.findOne({ _id: unverifiedAccountsId }, { projection: { unverified_accounts: 1 } });
   const entries = Array.isArray(row?.unverified_accounts) ? row.unverified_accounts.slice() : [];
   const index = entries.findIndex(item => item.email === normalizedEmail);
-  const next = { ...(index >= 0 ? entries[index] : { _id: metaRecordId('signup-verification', normalizedEmail), email: normalizedEmail, createdAt: new Date() }), ...changes, email: normalizedEmail };
+  const existing = index >= 0 ? entries[index] : null;
+  const next = {
+    _id: existing?._id || metaRecordId('signup-verification', normalizedEmail),
+    email: normalizedEmail,
+    code: changes.code ?? existing?.code ?? '',
+    createdAt: existing?.createdAt || new Date(),
+    updatedAt: changes.updatedAt || new Date(),
+  };
   if (index >= 0) entries[index] = next; else entries.push(next);
   await collection.updateOne({ _id: unverifiedAccountsId }, { $set: { unverified_accounts: entries, updatedAt: new Date() }, $setOnInsert: { createdAt: new Date() } }, { upsert: true });
   return next;
@@ -505,10 +512,10 @@ export async function requestDeviceSignupVerification(code, email, password, fir
   }
   const signupCode = String(randomInt(100000, 1000000));
   context.session.signupPasswordHash = validPassword(password) ? hashPassword(password) : '';
-  await saveUnverifiedAccount(normalizedEmail, { code: signupCode, resendAvailableAt: Date.now() + 60 * 1000, updatedAt: new Date() });
+  await saveUnverifiedAccount(normalizedEmail, { code: signupCode, updatedAt: new Date() });
   try { await sendSignupVerificationEmail(normalizedEmail, signupCode); }
   catch (error) {
-    await saveUnverifiedAccount(normalizedEmail, { resendAvailableAt: Date.now() });
+    await saveUnverifiedAccount(normalizedEmail, { updatedAt: new Date() });
     console.error('[signup verification] email send failed:', error.message);
     return { error: 'Verification email could not be sent. Please try again.' };
   }
@@ -521,16 +528,11 @@ export async function resendDeviceSignupVerification(code, email) {
   const { normalizedEmail } = context;
   const pending = await findUnverifiedAccount(normalizedEmail);
   if (!pending || pending.email !== normalizedEmail) return { error: 'Verification session not found. Request a new code.' };
-  const resendAvailableAt = Number(pending.resendAvailableAt || 0);
-  if (resendAvailableAt > Date.now()) {
-    const secondsRemaining = Math.ceil((resendAvailableAt - Date.now()) / 1000);
-    return { error: `Send code again is available in ${secondsRemaining} seconds` };
-  }
   const signupCode = String(randomInt(100000, 1000000));
-  await saveUnverifiedAccount(normalizedEmail, { code: signupCode, resendAvailableAt: Date.now() + 60 * 1000, updatedAt: new Date() });
+  await saveUnverifiedAccount(normalizedEmail, { code: signupCode, updatedAt: new Date() });
   try { await sendSignupVerificationEmail(normalizedEmail, signupCode, true); }
   catch (error) {
-    await saveUnverifiedAccount(normalizedEmail, { resendAvailableAt: Date.now() });
+    await saveUnverifiedAccount(normalizedEmail, { updatedAt: new Date() });
     console.error('[signup verification] email send failed:', error.message);
     return { error: 'Verification email could not be sent. Please try again.' };
   }

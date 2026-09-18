@@ -179,7 +179,7 @@ export async function createAccountProfile(accountId, input = {}) {
     avatar: avatars.has(input.avatar) ? input.avatar : [...avatars][rows.length % avatars.size],
     avatarImage, ...(pin ? { pinHash: hashProfilePin(pin) } : {}),
     isDefault: false, position: rows.length,
-    library: { categories: [], assignments: [], favorites: [], savedSelections: {}, series_last_watched: {}, last_kinds_watched: { episode: null, movie: null, live: null } },
+    library: { favorites: [], savedSelections: { series: [], movies: [], live: [] }, series_last_watched: {}, last_kinds_watched: { episode: null, movie: null, live: null } },
     createdAt: new Date(), updatedAt: new Date(),
   };
   const result = await record.collection.updateOne(

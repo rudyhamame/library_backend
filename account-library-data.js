@@ -22,10 +22,12 @@ export async function allAccountDocuments() {
 
 export function normalizedAccountLibrary(library) {
   return {
-    categories: Array.isArray(library?.categories) ? library.categories : [],
-    assignments: Array.isArray(library?.assignments) ? library.assignments : [],
     favorites: Array.isArray(library?.favorites) ? library.favorites : [],
-    savedSelections: library?.savedSelections && typeof library.savedSelections === 'object' ? library.savedSelections : {},
+    savedSelections: {
+      series: Array.isArray(library?.savedSelections?.series) ? library.savedSelections.series : [],
+      movies: Array.isArray(library?.savedSelections?.movies) ? library.savedSelections.movies : [],
+      live: Array.isArray(library?.savedSelections?.live) ? library.savedSelections.live : [],
+    },
     series_last_watched: library?.series_last_watched && typeof library.series_last_watched === 'object' && !Array.isArray(library.series_last_watched)
       ? library.series_last_watched : {},
     last_kinds_watched: {

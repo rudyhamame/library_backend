@@ -1879,6 +1879,10 @@ app.get('/api/xtream/series/:sourceId/:id', async (req, res) => {
   } catch (error) { res.status(502).json({ error: error.message }); }
 });
 
+// Profile libraries contain saved items, favorites, and watch state only.
+// User-created library categories/assignments were removed from the schema.
+app.use('/api/library/categories', (req, res) => res.sendStatus(404));
+
 app.use('/api/library', (req, res, next) => {
   if (!requestOwner(req)) return res.status(401).json({ error: 'Sign in to manage Library categories' });
   next();

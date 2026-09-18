@@ -1065,7 +1065,7 @@ app.post('/api/roku/device-session/on-device-auth', async (req, res) => {
       return res.status(result.error.includes('expired') ? 404 : result.error.includes('Incorrect') ? 401 : 400).json(result);
     }
     console.log(`[roku on-device-auth] phase=${authPhase} outcome=${result.token ? 'token' : result.verificationValid ? 'verification-valid' : result.verificationResent ? 'resent' : result.verificationRequired ? 'verification-required' : result.verificationNotRequired ? 'verification-not-required' : 'ok'}`);
-    if (result.verificationRequired || result.verificationNotRequired || result.verificationValid || result.verificationResent) return res.json(result);
+    if (!result.token && (result.verificationRequired || result.verificationNotRequired || result.verificationValid || result.verificationResent)) return res.json(result);
     const rokuSession = await getRokuDeviceSessionStatus(code);
     if (!rokuSession || rokuSession.status !== 'approved' || !rokuSession.token) {
       return res.status(500).json({ error: 'Roku authorization could not be completed' });

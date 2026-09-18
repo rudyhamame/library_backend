@@ -102,18 +102,14 @@ async function signupVerificationStore(realm = 'roku') {
 }
 
 async function isEmailVerified(email, realm) {
-  return Boolean(await (await verifiedEmails(realm)).findOne({ email, type: 'verified-account', status: 'VERIFIED' }, { projection: { _id: 1 } }));
+  // Verification is consumed by account creation. Do not persist a separate
+  // verified-email marker in meta; the account document is the durable proof.
+  void email; void realm;
+  return false;
 }
 
 async function markEmailVerified(email, realm) {
-  await (await verifiedEmails(realm)).updateOne(
-    { email, type: 'verified-account' },
-    {
-      $set: { email, type: 'verified-account', status: 'VERIFIED', verifiedAt: new Date(), updatedAt: new Date() },
-      $setOnInsert: { _id: metaRecordId('verified-account', email), createdAt: new Date() },
-    },
-    { upsert: true },
-  );
+  void email; void realm;
 }
 
 export async function initializeAccountDatabases() {
@@ -430,8 +426,40 @@ export async function verifyDeviceSignupCode(code, email, verificationCode) {
   if (pending.email !== normalizedEmail || pending.code !== String(verificationCode || '').trim()) {
     return { error: 'Incorrect verification code', verificationInvalid: true };
   }
-  await markEmailVerified(normalizedEmail, 'roku');
-  return { verificationValid: true };
+  if (!pending.passwordHash) return { error: 'Signup session has expired. Please start again.' };
+  const accountCollection = await accounts('roku');
+  const existing = await accountCollection.findOne({ email: normalizedEmail }, { projection: { _id: 1 } });
+  if (existing) return { error: 'An account with this email already exists. Sign in instead.' };
+  let created;
+  try {
+    created = await accountCollection.insertOne(identityAccountDocument({
+      email: normalizedEmail, passwordHash: pending.passwordHash,
+      firstName: pending.firstName || '', lastName: pending.lastName || '',
+    }));
+  } catch (error) {
+    if (error?.code === 11000) return { error: 'An account with this email already exists. Sign in instead.' };
+    throw error;
+  }
+  await (await signupVerificationStore('roku')).deleteOne({ email: normalizedEmail, type: 'signup-verification' });
+  return { verificationValid: true, token: await approveSignupSession(code, created.insertedId) };
+}
+
+async function approveSignupSession(code, accountId) {
+  const session = getDeviceSession(code);
+  if (!session) throw Object.assign(new Error('Pairing code expired or invalid'), { status: 404 });
+  const deviceCollection = await profiles();
+  const deviceOwnerId = ownerIdFor(session.deviceId);
+  await consolidateAccountLibrary(accountId);
+  session.accountId = String(accountId);
+  session.profileId = null;
+  session.ownerId = accountOwnerId(accountId);
+  await deviceCollection.updateOne(
+    { deviceId: session.deviceId },
+    { $setOnInsert: { ownerId: deviceOwnerId, deviceId: session.deviceId, createdAt: new Date() }, $set: { accountId, profileId: null, linkedAt: new Date(), updatedAt: new Date() } },
+    { upsert: true },
+  );
+  session.approvedAt = Date.now();
+  return issueToken(session, 'roku');
 }
 
 async function getSignupSession(code, email) {

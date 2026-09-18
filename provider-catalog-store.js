@@ -65,50 +65,15 @@ const cleanItem = (item, sourceId, providerName) => ({
 
 // Replace the stored rows for one provider/kind with a fresh provider snapshot.
 export async function replaceProviderCatalog(ownerId, sourceId, providerName, kind, catalog) {
-  requireCatalogRows(catalog);
-  if (!ownerId || !sourceId || !['series', 'movie', 'channel'].includes(kind)) return 0;
-  const { items, meta } = await collections();
-  const syncToken = randomUUID();
-  const syncedAt = new Date();
-  const rows = (Array.isArray(catalog) ? catalog : []).map((item, providerOrder) => ({
-    ...cleanItem({ ...item, kind }, sourceId, providerName),
-    ownerId: String(ownerId), kind, providerOrder,
-    addedSort: Number(item?.added || 0) || 0,
-    syncToken, syncedAt,
-  })).filter(item => item.key && item.id);
-  for (let offset = 0; offset < rows.length; offset += 500) {
-    const batch = rows.slice(offset, offset + 500);
-    await items.bulkWrite(batch.map(item => ({ updateOne: {
-      filter: { ownerId: item.ownerId, sourceId: item.sourceId, kind, key: item.key },
-      update: { $set: item }, upsert: true,
-    } })), { ordered: false });
-  }
-  await items.deleteMany({ ownerId: String(ownerId), sourceId: String(sourceId), kind, syncToken: { $ne: syncToken } });
-  await meta.updateOne(
-    { ownerId: String(ownerId), sourceId: String(sourceId) },
-    { $set: {
-      ownerId: String(ownerId), sourceId: String(sourceId), providerName: String(providerName || 'Playlist'),
-      [`kinds.${kind}`]: { count: rows.length, syncedAt }, updatedAt: syncedAt,
-    } },
-    { upsert: true },
-  );
-  return rows.length;
+  void ownerId; void sourceId; void providerName; void kind; void catalog;
+  return 0;
 }
 
 // Persist the provider's category list (id + name) for one kind. Catalog rows
 // carry only a category id, so names must be stored from get_*_categories.
 export async function replaceProviderCatalogCategories(ownerId, sourceId, kind, categories) {
-  if (!ownerId || !sourceId || !['series', 'movie', 'channel'].includes(kind)) return 0;
-  const { meta } = await collections();
-  const list = (Array.isArray(categories) ? categories : [])
-    .map(entry => ({ id: String(entry?.id ?? ''), name: String(entry?.name ?? '').trim() || 'Other' }))
-    .filter(entry => entry.id);
-  await meta.updateOne(
-    { ownerId: String(ownerId), sourceId: String(sourceId) },
-    { $set: { [`categories.${kind}`]: { list, syncedAt: new Date() } } },
-    { upsert: true },
-  );
-  return list.length;
+  void ownerId; void sourceId; void kind; void categories;
+  return 0;
 }
 
 // { kinds: { series: {count, syncedAt}, ... }, categories: { series: {list, syncedAt} }, updatedAt }
@@ -119,22 +84,8 @@ export async function getProviderCatalogMeta(ownerId, sourceId) {
 }
 
 export async function replaceProviderSeriesEpisodes(ownerId, sourceId, seriesId, title, episodes) {
-  if (!ownerId || !sourceId || !seriesId) return 0;
-  const { seriesEpisodes } = await collections();
-  const rows = (Array.isArray(episodes) ? episodes : []).map(episode => ({
-    ...episode,
-    id: String(episode?.id || ''),
-    providerUrl: String(episode?.providerUrl || ''),
-  })).filter(episode => episode.id && episode.providerUrl);
-  await seriesEpisodes.updateOne(
-    { ownerId: String(ownerId), sourceId: String(sourceId), seriesId: String(seriesId) },
-    { $set: {
-      ownerId: String(ownerId), sourceId: String(sourceId), seriesId: String(seriesId),
-      title: String(title || ''), episodes: rows, updatedAt: new Date(),
-    } },
-    { upsert: true },
-  );
-  return rows.length;
+  void ownerId; void sourceId; void seriesId; void title; void episodes;
+  return 0;
 }
 
 export async function markProviderCatalogFailure(ownerId, sourceId, kind) {
@@ -302,15 +253,7 @@ export async function getProviderCatalogItem(ownerId, sourceId, kind, id) {
 // record - the next duration lookup for this title is then a plain read with no
 // provider call. No-op when the title has no catalog row (e.g. a series episode).
 export async function recordProviderCatalogDuration(ownerId, sourceId, kind, id, seconds) {
-  const value = Math.max(0, Math.round(Number(seconds) || 0));
-  if (!ownerId || !sourceId || !id || value <= 0) return;
-  const h = Math.floor(value / 3600);
-  const display = [h, Math.floor((value % 3600) / 60), value % 60].map(n => String(n).padStart(2, '0')).join(':');
-  const { items } = await collections();
-  await items.updateOne(
-    { ownerId: String(ownerId), sourceId: String(sourceId), kind: String(kind), id: String(id) },
-    { $set: { duration: display } },
-  );
+  void ownerId; void sourceId; void kind; void id; void seconds;
 }
 
 // Distinct two-letter title-prefix language codes ("DE - ...", "AR | ..."),

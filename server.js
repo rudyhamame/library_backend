@@ -19,7 +19,6 @@ import { HlsStrategy, PlaybackStrategy, choosePlaybackStrategy, determineHlsStra
 import { clearStreamingHistory, deleteStreamingSession, getSeriesLastWatched, getStreamingContinueWatching, getStreamingHistory, getStreamingResume, saveStreamingHistory } from './streaming-history-store.js';
 import { getFavorites, toggleFavorite } from './favorites-store.js';
 import { accountOwnerId, profileOwnerId } from './account-library-owner.js';
-import { syncCatalogItems } from './catalog-store.js';
 import { authorizeDeviceSession, autoLoginDeviceSession, castHandoffLink, changeAccountPassword, claimAutomaticPairing, confirmPasswordReset, createDeviceSession, deleteAccount, getAccountBasicInfo, getDeviceSession, getDeviceWeatherLocations, getLinkedDevices, getPairingInfo, getRokuDeviceSessionStatus, getRokuSourcePreferenceByOwner, initializeAccountDatabases, isProfileOnline, isRokuSessionLinked, listAllAccountsBasic, listAllLinkedDevices, loginAccount, loginDeviceSession, recordDeviceHeartbeat, registerAccount, registerBrowserDevice, requestDeviceSignupVerification, requestPasswordReset, resendDeviceSignupVerification, resolveAccountByEmail, resolveDeviceToken, saveDeviceWeatherLocations, selectAccountProfile, setupDeviceSession, unlinkAccountDevice, verifyDeviceSignupCode } from './device-sessions.js';
 import { createAccountProfile, deleteAccountProfile, getAccountProfile, getAccountProfiles, getProfileByCode, getProfilePartnerCode, getProfilePartnerEmail, setProfilePartnerEmail, setProfileRokuSourcePreference, updateAccountProfile } from './account-profile-store.js';
 import { createLibraryCategory, deleteLibraryCategory, getManagedLibrary, renameLibraryCategory, replaceLibraryCategoryItems } from './library-category-store.js';
@@ -219,46 +218,14 @@ const CATALOG_SNAPSHOT_TTL_MS = Math.max(5 * 60_000, Number.parseInt(process.env
 const catalogSnapshotJobs = new Map();
 
 function refreshCatalogSnapshot(ownerId, source, kind) {
-  const key = `${ownerId}:${source._id}:${kind}`;
-  if (catalogSnapshotJobs.has(key)) return catalogSnapshotJobs.get(key);
-  const job = (async () => {
-    const [catalog, categories] = await Promise.all([
-      withCatalogMemorySlot(() => getSourceCatalog(source, kind), 'interactive'),
-      getSourceCategories(source, kind).catch(error => {
-        console.warn(`[Catalog] category fetch failed source=${source._id} kind=${kind}: ${error.message} - items will save without category names`);
-        return null;
-      }),
-    ]);
-    const storedCatalog = await Promise.all(catalog.map(async item => ({
-      ...item,
-      // Mongo is the searchable index. Playable rows retain the provider URL
-      // that Roku will use after finding/saving an item. A series row is a
-      // show, not media; its episode URLs are added when details are expanded.
-      providerUrl: kind === 'series' ? '' : await sourceProviderUrl(source, kind, item.id, item.extension),
-    })));
-    await syncCatalogItems({ accountId: ownerId, providerId: String(source._id), providerName: source.name, kind, items: storedCatalog });
-    await replaceProviderCatalog(ownerId, String(source._id), source.name, kind, storedCatalog);
-    if (Array.isArray(categories)) {
-      await replaceProviderCatalogCategories(ownerId, String(source._id), kind,
-        categories.map(entry => ({ id: String(entry.id), name: cleanCategoryName(entry.name) })));
-    }
-  })()
-    .catch(async error => {
-      await markProviderCatalogFailure(ownerId, String(source._id), kind).catch(() => {});
-      console.warn(`[Catalog] snapshot refresh failed source=${source._id} kind=${kind}: ${error.message}`);
-    })
-    .finally(() => catalogSnapshotJobs.delete(key));
-  catalogSnapshotJobs.set(key, job);
-  return job;
+  void ownerId; void source; void kind;
+  return Promise.resolve();
 }
 
 // Block only on a first-ever fetch. A stale snapshot is served immediately
 // while a single background refresh runs; a provider block never clears it.
 async function ensureCatalogSnapshot(ownerId, source, kind) {
-  const meta = await getProviderCatalogMeta(ownerId, String(source._id)).catch(() => null);
-  const syncedAt = meta?.kinds?.[kind]?.syncedAt ? new Date(meta.kinds[kind].syncedAt).getTime() : 0;
-  if (!syncedAt) { await refreshCatalogSnapshot(ownerId, source, kind); return; }
-  if (Date.now() - syncedAt > CATALOG_SNAPSHOT_TTL_MS) void refreshCatalogSnapshot(ownerId, source, kind);
+  void ownerId; void source; void kind;
 }
 
 // Web app: serve strictly what MongoDB already holds.

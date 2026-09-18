@@ -45,6 +45,7 @@ async function profiles() {
 }
 
 function normalizeAccountRealm(realm) { return realm === 'general' ? 'general' : 'roku'; }
+function metaRecordId(type, email) { return `${type}:${normalizeEmail(email)}`; }
 
 async function accounts(realm = 'roku') {
   const normalizedRealm = normalizeAccountRealm(realm);
@@ -110,7 +111,10 @@ async function isEmailVerified(email, realm) {
 async function markEmailVerified(email, realm) {
   await (await verifiedEmails(realm)).updateOne(
     { email, type: 'verified-account' },
-    { $set: { email, type: 'verified-account', status: 'VERIFIED', verifiedAt: new Date(), updatedAt: new Date() } },
+    {
+      $set: { email, type: 'verified-account', status: 'VERIFIED', verifiedAt: new Date(), updatedAt: new Date() },
+      $setOnInsert: { _id: metaRecordId('verified-account', email), createdAt: new Date() },
+    },
     { upsert: true },
   );
 }
@@ -423,8 +427,12 @@ export async function verifyDeviceSignupCode(code, email, verificationCode) {
   if (session.purpose === 'android-remote') return { error: 'Sign in through the RH Android app, then scan again' };
   const normalizedEmail = normalizeEmail(email);
   if (!validEmail(normalizedEmail)) return { error: 'Enter a valid email address' };
-  const pending = await (await signupVerificationStore('roku')).findOne({ email: normalizedEmail });
+  const pending = await (await signupVerificationStore('roku')).findOne({ email: normalizedEmail, type: 'signup-verification' });
   if (!pending) return { error: 'Verification code not found' };
+  if (pending.expiresAt && new Date(pending.expiresAt).getTime() <= Date.now()) {
+    await (await signupVerificationStore('roku')).deleteOne({ email: normalizedEmail, type: 'signup-verification' });
+    return { error: 'Verification code expired', verificationExpired: true };
+  }
   if (pending.email !== normalizedEmail || pending.code !== String(verificationCode || '').trim()) {
     return { error: 'Incorrect verification code', verificationInvalid: true };
   }
@@ -452,9 +460,25 @@ export async function requestDeviceSignupVerification(code, email, password, fir
   const store = await signupVerificationStore('roku');
   const pending = await store.findOne({ email: normalizedEmail, type: 'signup-verification' });
   if (pending && pending.email === normalizedEmail) {
-    return { verificationRequired: true, verificationPending: true };
+    if (pending.expiresAt && new Date(pending.expiresAt).getTime() <= Date.now()) {
+      await store.deleteOne({ email: normalizedEmail, type: 'signup-verification' });
+    } else {
+      // Keep the current signup attempt authoritative if the viewer backed
+      // out and started again with the same email.
+      await store.updateOne(
+        { email: normalizedEmail, type: 'signup-verification' },
+        { $set: {
+          passwordHash: validPassword(password) ? hashPassword(password) : pending.passwordHash || '',
+          firstName: String(firstName || '').trim().slice(0, 60),
+          lastName: String(lastName || '').trim().slice(0, 60),
+          updatedAt: new Date(),
+        } },
+      );
+      return { verificationRequired: true, verificationPending: true };
+    }
   }
   const signupCode = String(randomInt(100000, 1000000));
+  const expiresAt = new Date(Date.now() + 15 * 60 * 1000);
   await store.updateOne(
     { email: normalizedEmail, type: 'signup-verification' },
     { $set: {
@@ -465,8 +489,9 @@ export async function requestDeviceSignupVerification(code, email, password, fir
       firstName: String(firstName || '').trim().slice(0, 60),
       lastName: String(lastName || '').trim().slice(0, 60),
       resendAvailableAt: Date.now() + 60 * 1000,
+      expiresAt,
       updatedAt: new Date(),
-    }, $setOnInsert: { createdAt: new Date() } },
+    }, $setOnInsert: { _id: metaRecordId('signup-verification', normalizedEmail), createdAt: new Date() } },
     { upsert: true },
   );
   try { await sendSignupVerificationEmail(normalizedEmail, signupCode); }
@@ -485,6 +510,10 @@ export async function resendDeviceSignupVerification(code, email) {
   const store = await signupVerificationStore('roku');
   const pending = await store.findOne({ email: normalizedEmail, type: 'signup-verification' });
   if (!pending || pending.email !== normalizedEmail) return { error: 'Verification session expired or invalid' };
+  if (pending.expiresAt && new Date(pending.expiresAt).getTime() <= Date.now()) {
+    await store.deleteOne({ email: normalizedEmail, type: 'signup-verification' });
+    return requestDeviceSignupVerification(code, normalizedEmail, '', pending.firstName || '', pending.lastName || '');
+  }
   const resendAvailableAt = Number(pending.resendAvailableAt || 0);
   if (resendAvailableAt > Date.now()) {
     const secondsRemaining = Math.ceil((resendAvailableAt - Date.now()) / 1000);
@@ -493,11 +522,11 @@ export async function resendDeviceSignupVerification(code, email) {
   const signupCode = String(randomInt(100000, 1000000));
   await store.updateOne(
     { email: normalizedEmail, type: 'signup-verification' },
-    { $set: { code: signupCode, resendAvailableAt: Date.now() + 60 * 1000, updatedAt: new Date() } },
+    { $set: { code: signupCode, resendAvailableAt: Date.now() + 60 * 1000, expiresAt: new Date(Date.now() + 15 * 60 * 1000), updatedAt: new Date() } },
   );
   try { await sendSignupVerificationEmail(normalizedEmail, signupCode, true); }
   catch (error) {
-    await store.updateOne({ email: normalizedEmail }, { $set: { resendAvailableAt: Date.now() } });
+    await store.updateOne({ email: normalizedEmail, type: 'signup-verification' }, { $set: { resendAvailableAt: Date.now() } });
     console.error('[signup verification] email send failed:', error.message);
     return { error: 'Verification email could not be sent. Please try again.' };
   }
@@ -528,6 +557,9 @@ async function consumePairing(code, email, password, setup, firstName = '', last
       if (!(await isEmailVerified(normalizedEmail, 'roku'))) return { error: 'Verification code expired or invalid' };
       await (await signupVerificationStore('roku')).deleteOne({ email: normalizedEmail, type: 'signup-verification' });
     } else if (!pending) {
+      await (await signupVerificationStore('roku')).deleteOne({ email: normalizedEmail, type: 'signup-verification' });
+      return { error: 'Verification code expired or invalid' };
+    } else if (pending.expiresAt && new Date(pending.expiresAt).getTime() <= Date.now()) {
       await (await signupVerificationStore('roku')).deleteOne({ email: normalizedEmail, type: 'signup-verification' });
       return { error: 'Verification code expired or invalid' };
     } else {

@@ -201,11 +201,18 @@ function identityAccountDocument({ email, passwordHash, createdAt = new Date(), 
   return {
     email, passwordHash, createdAt, updatedAt,
     providers: [], profiles: [], devices: [],
-    realm: 'roku', devices: [],
+    realm: 'roku',
   };
 }
 
 function accountPasswordHash(account) { return account?.passwordHash || ''; }
+
+async function linkAccountDevice(accountCollection, accountId, session) {
+  const now = new Date();
+  const device = { deviceId: String(session.deviceId), kind: 'roku', profileId: session.profileId || null, linkedAt: now, updatedAt: now };
+  const replaced = await accountCollection.updateOne({ _id: accountId, 'devices.deviceId': device.deviceId }, { $set: { 'devices.$': device, updatedAt: now } });
+  if (!replaced.matchedCount) await accountCollection.updateOne({ _id: accountId }, { $push: { devices: device }, $set: { updatedAt: now } });
+}
 
 const resetCodes = new Map();
 const resetCodeTtlMs = 15 * 60 * 1000;
@@ -468,6 +475,7 @@ async function approveSignupSession(code, accountId) {
     { $setOnInsert: { ownerId: deviceOwnerId, deviceId: session.deviceId, createdAt: new Date() }, $set: { accountId, profileId: null, linkedAt: new Date(), updatedAt: new Date() } },
     { upsert: true },
   );
+  await linkAccountDevice(accountCollection, account._id, session);
   session.approvedAt = Date.now();
   return issueToken(session, 'roku');
 }

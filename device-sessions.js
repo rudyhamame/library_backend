@@ -8,6 +8,7 @@ import { moveFavoriteOwners } from './favorites-store.js';
 import { moveStreamingHistoryOwners } from './streaming-history-store.js';
 import { deleteAccountProfilesAndData, ensureDefaultProfile, getAccountProfile, getProfileRokuSourcePreferenceByOwner, verifyProfilePin } from './account-profile-store.js';
 import { sendAccountDeletionEmail, sendPasswordResetEmail, sendSignupVerificationEmail } from './email.js';
+import { linkedDeviceStore } from './account-device-store.js';
 
 const sessions = new Map();
 const pairingTtlMs = 15 * 60 * 1000;
@@ -16,7 +17,6 @@ const tokenTtlMs = 365 * 24 * 60 * 60 * 1000;
 const mongoUri = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017';
 const databaseName = process.env.MONGODB_DB || 'rh_roku';
 const generalDatabaseName = process.env.MONGODB_GENERAL_DB || 'rh_general';
-const collectionName = process.env.MONGODB_DEVICE_COLLECTION || 'device_profiles';
 const accountCollectionName = process.env.MONGODB_ACCOUNT_COLLECTION || 'accounts';
 const verifiedEmailCollectionName = process.env.MONGODB_VERIFIED_EMAIL_COLLECTION || 'verified_emails';
 const signupVerificationCollectionName = process.env.MONGODB_SIGNUP_VERIFICATION_COLLECTION || 'signup_verifications';
@@ -32,15 +32,7 @@ const runningWindowMs = 30_000;
 const streamingWindowMs = 30_000;
 
 async function profiles() {
-  if (!profilesPromise) {
-    profilesPromise = new MongoClient(mongoUri, { serverSelectionTimeoutMS: 5000 }).connect()
-      .then(async client => {
-        const collection = client.db(databaseName).collection(collectionName);
-        await collection.createIndex({ ownerId: 1 }, { unique: true });
-        return collection;
-      })
-      .catch(error => { profilesPromise = undefined; throw error; });
-  }
+  if (!profilesPromise) profilesPromise = linkedDeviceStore().catch(error => { profilesPromise = undefined; throw error; });
   return profilesPromise;
 }
 
@@ -75,7 +67,10 @@ async function verifiedEmails(realm = 'roku') {
         const dbName = normalizedRealm === 'general' ? generalDatabaseName : databaseName;
         const collection = client.db(dbName).collection(normalizedRealm === 'roku' ? 'meta' : verifiedEmailCollectionName);
         const options = { unique: true };
-        if (normalizedRealm === 'roku') options.name = 'meta_type_email';
+        if (normalizedRealm === 'roku') {
+          options.name = 'meta_auth_email';
+          options.partialFilterExpression = { type: { $in: ['verified-account', 'signup-verification'] } };
+        }
         await collection.createIndex(normalizedRealm === 'roku' ? { type: 1, email: 1 } : { email: 1 }, options);
         return collection;
       })
@@ -94,7 +89,10 @@ async function signupVerificationStore(realm = 'roku') {
         const dbName = normalizedRealm === 'general' ? generalDatabaseName : databaseName;
         const collection = client.db(dbName).collection(normalizedRealm === 'roku' ? 'meta' : signupVerificationCollectionName);
         const options = { unique: true };
-        if (normalizedRealm === 'roku') options.name = 'meta_type_email';
+        if (normalizedRealm === 'roku') {
+          options.name = 'meta_auth_email';
+          options.partialFilterExpression = { type: { $in: ['verified-account', 'signup-verification'] } };
+        }
         await collection.createIndex(normalizedRealm === 'roku' ? { type: 1, email: 1 } : { email: 1 }, options);
         return collection;
       })
@@ -188,7 +186,7 @@ function identityAccountDocument({ email, passwordHash, firstName = '', lastName
     account: { email, firstName, lastName },
     credentials: { passwordHash },
     preferences: {}, selectedProviderId: null, providers: [], profiles: [],
-    metadata: { realm: 'roku' },
+    metadata: { realm: 'roku', devices: [] },
   };
 }
 
@@ -589,7 +587,7 @@ async function consumePairing(code, email, password, setup, firstName = '', last
   }
   session.accountId = String(account._id);
   const canonicalOwner = await consolidateAccountLibrary(account._id);
-  let selectedProfile = null;
+  let selectedProfile = await ensureDefaultProfile(String(account._id), account.firstName || firstName || 'Main');
   if (profile?.accountId && String(profile.accountId) === String(account._id) && profile.profileId) {
     selectedProfile = await getAccountProfile(account._id, profile.profileId);
   }
@@ -722,13 +720,8 @@ export async function registerBrowserDevice(accountId, profileId, deviceId, labe
   );
 }
 
-function linkedProfileFilter(ownerId, accountId = '', deviceId = '') {
-  if (ObjectId.isValid(accountId)) return { accountId: new ObjectId(accountId) };
-  if (deviceId) return { deviceId: String(deviceId) };
-  return { ownerId: String(ownerId) };
-}
-
 export async function getDeviceWeatherLocations(ownerId, accountId = '', deviceId = '', realm = 'roku') {
+  void deviceId;
   if (!ownerId) return [];
   if (ObjectId.isValid(accountId)) {
     const account = await (await accounts(realm)).findOne(
@@ -737,14 +730,11 @@ export async function getDeviceWeatherLocations(ownerId, accountId = '', deviceI
     );
     if (Array.isArray(account?.weatherLocations)) return account.weatherLocations.slice(0, 1);
   }
-  const profile = await (await profiles()).findOne(
-    linkedProfileFilter(ownerId, accountId, deviceId),
-    { projection: { weatherLocations: 1 } },
-  );
-  return Array.isArray(profile?.weatherLocations) ? profile.weatherLocations.slice(0, 1) : [];
+  return [];
 }
 
 export async function saveDeviceWeatherLocations(ownerId, locations, accountId = '', deviceId = '', realm = 'roku') {
+  void deviceId;
   if (!ownerId) return { error: 'Linked Roku authorization is required' };
   const supplied = Array.isArray(locations) ? locations.slice(0, 1) : [];
   const weatherLocations = supplied.map(location => location ? ({
@@ -757,15 +747,11 @@ export async function saveDeviceWeatherLocations(ownerId, locations, accountId =
   if (weatherLocations.some(location => location && (!location.label || !Number.isFinite(location.latitude) || !Number.isFinite(location.longitude)))) {
     return { error: 'Select valid weather locations' };
   }
-  const result = ObjectId.isValid(accountId)
-    ? await (await accounts(realm)).updateOne(
-      { _id: new ObjectId(accountId) },
-      { $set: { weatherLocations, updatedAt: new Date() } },
-    )
-    : await (await profiles()).updateMany(
-      linkedProfileFilter(ownerId, accountId, deviceId),
-      { $set: { weatherLocations, updatedAt: new Date() } },
-    );
+  if (!ObjectId.isValid(accountId)) return { error: 'Account authentication is required' };
+  const result = await (await accounts(realm)).updateOne(
+    { _id: new ObjectId(accountId) },
+    { $set: { weatherLocations, updatedAt: new Date() } },
+  );
   return result.matchedCount ? { locations: weatherLocations } : { error: 'Linked Roku profile not found' };
 }
 
@@ -847,7 +833,7 @@ export async function unlinkAccountDevice(accountId, deviceId, profileId = '') {
   void profileId;
   const result = await (await profiles()).updateOne(
     { accountId: new ObjectId(accountId), deviceId: String(deviceId) },
-    { $unset: { accountId: '' }, $set: { updatedAt: new Date() } },
+    { $unset: { accountId: '', accountOwnerId: '', profileId: '' }, $set: { updatedAt: new Date() } },
   );
   return result.modifiedCount ? { ok: true } : { error: 'Linked Roku device not found' };
 }

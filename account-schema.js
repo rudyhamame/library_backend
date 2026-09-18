@@ -21,7 +21,7 @@ export const identityValidator = {
       selectedProviderId: { bsonType: ['string', 'null'] },
       providers: { bsonType: 'array' },
       profiles: { bsonType: 'array' },
-      metadata: { bsonType: 'object' },
+      metadata: { bsonType: 'object', properties: { devices: { bsonType: 'array' } } },
       updatedAt: { bsonType: 'date' },
     },
   },
@@ -34,7 +34,7 @@ export const metaValidator = {
     properties: {
       _id: { bsonType: 'string' },
       type: { bsonType: 'string', enum: ['verified-account', 'signup-verification', 'password-reset', 'roku-auth', 'system'] },
-      accountId: { bsonType: ['string', 'null'] },
+      accountId: { bsonType: ['objectId', 'string', 'null'] },
       createdAt: { bsonType: 'date' },
       updatedAt: { bsonType: 'date' },
     },

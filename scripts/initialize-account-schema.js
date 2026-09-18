@@ -16,6 +16,9 @@ try {
   const db = client.db(databaseName);
   await ensureCollection(db, collectionNames.identity, identityValidator);
   await ensureCollection(db, collectionNames.meta, metaValidator);
+  const meta = db.collection(collectionNames.meta);
+  const existingEmailIndex = (await meta.indexes()).find(index => index.name === 'meta_type_email');
+  if (existingEmailIndex) await meta.dropIndex('meta_type_email');
   await ensureCollection(db, collectionNames.catalogItems, catalogItemValidator);
   await ensureCollection(db, collectionNames.catalogSyncs, {
     $jsonSchema: {
@@ -27,6 +30,8 @@ try {
   await Promise.all([
     db.collection(collectionNames.identity).createIndex({ 'account.email': 1 }, { unique: true, name: 'identity_email' }),
     db.collection(collectionNames.meta).createIndex({ type: 1, accountId: 1, updatedAt: -1 }, { name: 'meta_type_account_updated' }),
+    db.collection(collectionNames.meta).createIndex({ type: 1, email: 1 }, { name: 'meta_auth_email', unique: true, partialFilterExpression: { type: { $in: ['verified-account', 'signup-verification'] } } }),
+    db.collection(collectionNames.identity).createIndex({ 'metadata.devices.deviceId': 1 }, { name: 'identity_device_id', unique: true, sparse: true }),
     db.collection(collectionNames.catalogItems).createIndex({ accountId: 1, providerId: 1, kind: 1, itemId: 1 }, { unique: true, name: 'catalog_account_provider_item' }),
     db.collection(collectionNames.catalogItems).createIndex({ accountId: 1, providerId: 1, kind: 1, categoryId: 1, title: 1 }, { name: 'catalog_browse' }),
     db.collection(collectionNames.catalogSyncs).createIndex({ accountId: 1, providerId: 1 }, { unique: true, name: 'catalog_sync_account_provider' }),

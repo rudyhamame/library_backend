@@ -10,7 +10,6 @@ const client = new MongoClient(mongoUri, { serverSelectionTimeoutMS: 10_000 });
 const names = {
   roots: process.env.MONGODB_ACCOUNT_ROOT_COLLECTION || 'account_roots',
   accounts: process.env.MONGODB_ACCOUNT_COLLECTION || 'accounts',
-  profiles: process.env.MONGODB_ACCOUNT_PROFILE_COLLECTION || 'account_profiles',
   providers: process.env.MONGODB_XTREAM_COLLECTION || 'xtream_sources',
   categories: process.env.MONGODB_LIBRARY_CATEGORY_COLLECTION || 'library_categories',
   favorites: process.env.MONGODB_FAVORITES_COLLECTION || 'favorites',
@@ -31,7 +30,7 @@ async function migrateAccount(db, account, roots) {
   const accountId = String(account._id);
   const ownerId = account.ownerId || accountOwnerId(account._id);
   const [profiles, providers, categories, favorites, playback, history, watchOverrides] = await Promise.all([
-    db.collection(names.profiles).find({ accountId: new ObjectId(accountId) }).toArray(),
+    Promise.resolve(Array.isArray(account.profiles) ? account.profiles : []),
     ownerRows(db.collection(names.providers), ownerId),
     db.collection(names.categories).findOne({ ownerId }),
     ownerRows(db.collection(names.favorites), ownerId),

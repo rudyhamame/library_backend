@@ -27,6 +27,11 @@ export function normalizedAccountLibrary(library) {
     favorites: Array.isArray(library?.favorites) ? library.favorites : [],
     seriesWatchOverrides: Array.isArray(library?.seriesWatchOverrides) ? library.seriesWatchOverrides : [],
     savedSelections: library?.savedSelections && typeof library.savedSelections === 'object' ? library.savedSelections : {},
+    last_kinds_watched: {
+      episode: library?.last_kinds_watched?.episode || library?.lastKindsWatched?.episode || null,
+      movie: library?.last_kinds_watched?.movie || library?.lastKindsWatched?.movie || null,
+      live: library?.last_kinds_watched?.live || library?.lastKindsWatched?.live || null,
+    },
   };
 }
 

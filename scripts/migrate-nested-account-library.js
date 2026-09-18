@@ -9,6 +9,7 @@ const names = {
   categories: process.env.MONGODB_LIBRARY_CATEGORY_COLLECTION || 'library_categories',
   favorites: process.env.MONGODB_FAVORITES_COLLECTION || 'favorites',
   overrides: process.env.MONGODB_SERIES_WATCH_OVERRIDE_COLLECTION || 'series_watch_overrides',
+  history: process.env.MONGODB_STREAMING_HISTORY_COLLECTION || 'streaming_history',
 };
 
 try {
@@ -78,6 +79,18 @@ try {
     });
     migrated++;
   }
+  for (const row of rows.history) {
+    try { await accountForLibraryOwner(row.ownerId); }
+    catch { unmapped.push({ kind: 'history', ownerId: row.ownerId }); continue; }
+    const key = ['channel', 'live'].includes(String(row.kind || '').toLowerCase()) ? 'live' : (['series', 'episode'].includes(String(row.kind || '').toLowerCase()) ? 'episode' : 'movie');
+    await updateAccountLibrary(row.ownerId, library => {
+      const { _id, ownerId, ...item } = row;
+      const current = library.last_kinds_watched[key];
+      if (!current || new Date(item.updatedAt || 0) >= new Date(current.updatedAt || 0)) library.last_kinds_watched[key] = item;
+      return library;
+    });
+    migrated++;
+  }
   const sourceCollection = db.collection(process.env.MONGODB_XTREAM_COLLECTION || 'xtream_sources');
   const sourceRows = await sourceCollection.find({}).toArray();
   let sourcesMigrated = 0;
@@ -111,6 +124,8 @@ try {
     if (resolved) sourcesMigrated++;
   }
   if (!unmapped.some(row => row.kind === 'xtream_sources')) await sourceCollection.drop().catch(error => { if (error.codeName !== 'NamespaceNotFound') throw error; });
+  const historyCollection = db.collection(names.history);
+  if (!unmapped.some(row => row.kind === 'history')) await historyCollection.drop().catch(error => { if (error.codeName !== 'NamespaceNotFound') throw error; });
   console.log(JSON.stringify({ migrated, sourcesMigrated, counts: Object.fromEntries(Object.entries(rows).map(([kind, data]) => [kind, data.length])), unmapped }));
   if (unmapped.length) process.exitCode = 1;
 } finally {

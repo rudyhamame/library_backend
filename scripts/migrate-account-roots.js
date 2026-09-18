@@ -11,7 +11,6 @@ const names = {
   roots: process.env.MONGODB_ACCOUNT_ROOT_COLLECTION || 'account_roots',
   accounts: process.env.MONGODB_ACCOUNT_COLLECTION || 'accounts',
   playback: process.env.MONGODB_PLAYBACK_COLLECTION || 'playback_progress',
-  history: process.env.MONGODB_STREAMING_HISTORY_COLLECTION || 'streaming_history',
   catalog: process.env.MONGODB_PROVIDER_CATALOG_COLLECTION || 'provider_catalog_items',
   catalogSync: process.env.MONGODB_PROVIDER_CATALOG_SYNC_COLLECTION || 'provider_catalog_syncs',
   media: process.env.MONGODB_PROVIDER_MEDIA_METADATA_COLLECTION || 'provider_media_metadata',
@@ -31,7 +30,7 @@ async function migrateAccount(db, account, roots) {
     Promise.resolve({ categories: (account.profiles || []).flatMap(profile => profile.library?.categories || []), assignments: (account.profiles || []).flatMap(profile => profile.library?.assignments || []) }),
     Promise.resolve((account.profiles || []).flatMap(profile => profile.library?.favorites || [])),
     ownerRows(db.collection(names.playback), ownerId),
-    ownerRows(db.collection(names.history), ownerId),
+    Promise.resolve((account.profiles || []).flatMap(profile => Object.values(profile.library?.last_kinds_watched || {}).filter(Boolean).map(item => ({ ...item, ownerId: profile.ownerId })))),
     Promise.resolve((account.profiles || []).flatMap(profile => profile.library?.seriesWatchOverrides || [])),
   ]);
   const providerIds = providers.map(provider => provider._id);

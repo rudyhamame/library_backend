@@ -5,7 +5,6 @@ import { accountOwnerId, canonicalSessionOwner } from './account-library-owner.j
 import { moveLibraryCategories } from './library-category-store.js';
 import { movePlaybackOwners } from './playback-store.js';
 import { moveFavoriteOwners } from './favorites-store.js';
-import { moveStreamingHistoryOwners } from './streaming-history-store.js';
 import { deleteAccountProfilesAndData, getAccountProfile, getProfileRokuSourcePreferenceByOwner, verifyProfilePin } from './account-profile-store.js';
 import { sendAccountDeletionEmail, sendPasswordResetEmail, sendSignupVerificationEmail } from './email.js';
 import { linkedDeviceStore } from './account-device-store.js';
@@ -158,7 +157,6 @@ async function consolidateAccountLibrary(accountId, realm = 'roku') {
   await deduplicateXtreamSources(canonicalOwnerId);
   await moveLibraryCategories(priorOwnerIds, canonicalOwnerId);
   await movePlaybackOwners(priorOwnerIds, canonicalOwnerId);
-  await moveStreamingHistoryOwners(priorOwnerIds, canonicalOwnerId);
   await moveFavoriteOwners(priorOwnerIds, canonicalOwnerId);
   return canonicalOwnerId;
 }

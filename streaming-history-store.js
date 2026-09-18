@@ -1,25 +1,5 @@
-import { MongoClient } from 'mongodb';
+import { getAccountLibrary, updateAccountLibrary } from './account-library-data.js';
 import { getSeriesWatchOverridesByOwner } from './series-watch-overrides.js';
-
-const mongoUri = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017';
-const databaseName = process.env.MONGODB_DB || 'rh_roku';
-const collectionName = process.env.MONGODB_STREAMING_HISTORY_COLLECTION || 'streaming_history';
-let collectionPromise;
-
-async function streamingHistoryCollection() {
-  if (!collectionPromise) {
-    collectionPromise = new MongoClient(mongoUri, { serverSelectionTimeoutMS: 5000 }).connect()
-      .then(async (client) => {
-        const collection = client.db(databaseName).collection(collectionName);
-        // Only the single most recent item per kind (movie/series/channel) is
-        // ever kept per owner - one upsert target per kind, not per session.
-        await collection.createIndex({ ownerId: 1, kind: 1 }, { unique: true });
-        return collection;
-      })
-      .catch((error) => { collectionPromise = undefined; throw error; });
-  }
-  return collectionPromise;
-}
 
 const milliseconds = value => Math.max(0, Math.round(Number(value) || 0));
 const formatLastMoment = value => {
@@ -29,154 +9,90 @@ const formatLastMoment = value => {
   const seconds = totalSeconds % 60;
   return [hours, minutes, seconds].map(part => String(part).padStart(2, '0')).join(':');
 };
-const streamingKind = (value) => {
+const historyKey = value => {
   const kind = String(value || '').toLowerCase();
-  if (kind === 'channel' || kind === 'live') return 'channel';
-  if (kind === 'series' || kind === 'episode') return 'series';
+  if (kind === 'channel' || kind === 'live') return 'live';
+  if (kind === 'series' || kind === 'episode') return 'episode';
   return 'movie';
 };
+const emptyLastKindsWatched = () => ({ episode: null, movie: null, live: null });
 
 export async function saveStreamingHistory({ ownerId, sessionId, itemId, title, seriesName, kind, sourceId, seriesId, extension, poster, startedAt, endedAt, startPositionMs, endPositionMs, streamingDurationMs, mediaDurationMs, completed, seasonNumber, episodeNumber }) {
-  if (!ownerId || !sessionId) throw new Error('Account owner and streaming session ID are required');
+  if (!ownerId || !sessionId) throw new Error('Profile owner and streaming session ID are required');
   const now = new Date();
   const startDate = startedAt ? new Date(startedAt) : now;
   const endDate = endedAt ? new Date(endedAt) : null;
+  const key = historyKey(kind);
   const update = {
-    itemId: String(itemId || ''),
-    title: String(title || ''),
-    seriesName: String(seriesName || ''),
-    kind: streamingKind(kind),
-    sourceId: String(sourceId || ''),
-    seriesId: String(seriesId || ''),
-    extension: String(extension || '').replace(/[^a-z0-9]/gi, '').toLowerCase(),
-    poster: String(poster || ''),
-    startPositionMs: milliseconds(startPositionMs),
-    endPositionMs: milliseconds(endPositionMs),
-    streamingDurationMs: milliseconds(streamingDurationMs),
-    mediaDurationMs: milliseconds(mediaDurationMs),
-    lastMoment: formatLastMoment(endPositionMs),
-    updatedAt: now,
+    itemId: String(itemId || ''), title: String(title || ''), seriesName: String(seriesName || ''),
+    kind: key === 'episode' ? 'series' : (key === 'live' ? 'channel' : 'movie'),
+    sourceId: String(sourceId || ''), seriesId: String(seriesId || ''),
+    extension: String(extension || '').replace(/[^a-z0-9]/gi, '').toLowerCase(), poster: String(poster || ''),
+    startPositionMs: milliseconds(startPositionMs), endPositionMs: milliseconds(endPositionMs),
+    streamingDurationMs: milliseconds(streamingDurationMs), mediaDurationMs: milliseconds(mediaDurationMs),
+    lastMoment: formatLastMoment(endPositionMs), updatedAt: now, sessionId: String(sessionId),
+    startedAt: startedAt && !Number.isNaN(startDate.getTime()) ? startDate : now,
   };
-  if (kind === 'series' || kind === 'episode') {
-    if (seasonNumber != null && seasonNumber !== '') update.seasonNumber = Number.parseInt(seasonNumber, 10) || 0;
-    if (episodeNumber != null && episodeNumber !== '') update.episodeNumber = Number.parseInt(episodeNumber, 10) || 0;
-  }
-  const isCompleted = completed === true || String(completed).toLowerCase() === 'true';
-  if (isCompleted) update.completed = true;
-  if (startedAt) update.startedAt = Number.isNaN(startDate.getTime()) ? now : startDate;
   if (endDate && !Number.isNaN(endDate.getTime())) update.endedAt = endDate;
-  update.sessionId = String(sessionId);
-  const insert = { ownerId: String(ownerId), kind: update.kind, createdAt: now };
-  if (!isCompleted) insert.completed = false;
-  if (!startedAt) insert.startedAt = now;
-  await (await streamingHistoryCollection()).updateOne(
-    { ownerId: String(ownerId), kind: update.kind },
-    { $set: update, $setOnInsert: insert },
-    { upsert: true },
-  );
-  return getStreamingSession(ownerId, sessionId);
+  if (key === 'episode' && seasonNumber != null && seasonNumber !== '') update.seasonNumber = Number.parseInt(seasonNumber, 10) || 0;
+  if (key === 'episode' && episodeNumber != null && episodeNumber !== '') update.episodeNumber = Number.parseInt(episodeNumber, 10) || 0;
+  if (completed === true || String(completed).toLowerCase() === 'true') update.completed = true;
+  await updateAccountLibrary(ownerId, library => { library.last_kinds_watched[key] = update; return library; });
+  return update;
 }
 
 export async function getStreamingSession(ownerId, sessionId) {
-  const item = await (await streamingHistoryCollection()).findOne({ ownerId: String(ownerId), sessionId: String(sessionId) });
-  if (!item) return null;
-  const { _id, ownerId: _ownerId, ...publicItem } = item;
-  return publicItem;
+  const library = await getAccountLibrary(ownerId);
+  return Object.values(library.last_kinds_watched).find(item => item?.sessionId === String(sessionId)) || null;
 }
 
-// At most one record per kind (movie/series/channel) is ever stored, so this
-// is just "the last watched item of each kind", not a paged history log.
 export async function getStreamingHistory(ownerId) {
-  // A Roku session updates an existing kind record over time. Sort by the
-  // latest write first so Continue Watching cannot select an older duplicate
-  // just because that record has an earlier/original startedAt value.
-  return (await (await streamingHistoryCollection()).find({ ownerId: String(ownerId) }).sort({ updatedAt: -1, startedAt: -1 }).toArray())
-    .map(({ _id, ownerId: _ownerId, ...item }) => item);
+  const library = await getAccountLibrary(ownerId);
+  return Object.values(library.last_kinds_watched).filter(Boolean).sort((a, b) => new Date(b.updatedAt || 0) - new Date(a.updatedAt || 0));
 }
 
 export async function deleteStreamingSession(ownerId, sessionId) {
   if (!ownerId || !sessionId) return { deleted: 0 };
-  const result = await (await streamingHistoryCollection())
-    .deleteOne({ ownerId: String(ownerId), sessionId: String(sessionId) });
-  return { deleted: result.deletedCount || 0 };
+  let deleted = 0;
+  await updateAccountLibrary(ownerId, library => {
+    for (const key of ['episode', 'movie', 'live']) {
+      if (library.last_kinds_watched[key]?.sessionId === String(sessionId)) { library.last_kinds_watched[key] = null; deleted++; }
+    }
+    return library;
+  });
+  return { deleted };
 }
 
 export async function clearStreamingHistory(ownerId) {
   if (!ownerId) return { deleted: 0 };
-  const result = await (await streamingHistoryCollection())
-    .deleteMany({ ownerId: String(ownerId) });
-  return { deleted: result.deletedCount || 0 };
+  const before = await getAccountLibrary(ownerId);
+  const deleted = Object.values(before.last_kinds_watched).filter(Boolean).length;
+  await updateAccountLibrary(ownerId, library => { library.last_kinds_watched = emptyLastKindsWatched(); return library; });
+  return { deleted };
 }
 
 export async function getStreamingResume(ownerId, { sourceId, itemId, kind }) {
   if (!ownerId || !sourceId || !itemId) return null;
-  const item = await (await streamingHistoryCollection()).findOne(
-    {
-      ownerId: String(ownerId),
-      sourceId: String(sourceId),
-      itemId: String(itemId),
-      kind: streamingKind(kind),
-    },
-    { sort: { startedAt: -1, updatedAt: -1 } },
-  );
-  if (!item) return null;
-  const { _id, ownerId: _ownerId, ...publicItem } = item;
-  return publicItem;
+  const library = await getAccountLibrary(ownerId);
+  const item = library.last_kinds_watched[historyKey(kind)];
+  return item && item.sourceId === String(sourceId) && item.itemId === String(itemId) ? item : null;
 }
 
 export async function getStreamingContinueWatching(ownerId) {
-  const [history, overrides] = await Promise.all([
-    getStreamingHistory(ownerId),
-    getSeriesWatchOverridesByOwner(ownerId).catch(() => []),
-  ]);
+  const [history, overrides] = await Promise.all([getStreamingHistory(ownerId), getSeriesWatchOverridesByOwner(ownerId).catch(() => [])]);
   const overrideBySeries = new Map(overrides.map(entry => [`${entry.sourceId}:${entry.seriesId}`, entry]));
-  // Storage already holds at most one record per kind, so there is nothing
-  // left to dedupe here - just apply the same "is this worth resuming" filter.
-  const filtered = history
-    .filter(item => item.sourceId && item.itemId)
-    .filter((item) => {
-      // Live channels have no completion or run time - the most recent one
-      // watched always belongs in Continue Watching, even when Roku reports
-      // zero position during a short live session.
-      if (item.kind === 'channel') return true;
-      if (milliseconds(item.endPositionMs) <= 5000) return false;
-      if (item.completed === true) return false;
-      const duration = milliseconds(item.mediaDurationMs);
-      return duration <= 0 || milliseconds(item.endPositionMs) < Math.max(duration - 30000, duration * 0.95);
-    });
-  // A manually-marked "last watched" episode ('*' on Roku) overrides whichever
-  // episode of that series would otherwise show here, and collapses multiple
-  // recently-watched episodes of the same series down to that one row.
-  const merged = [];
-  const seenSeries = new Set();
-  for (const item of filtered) {
-    if (item.kind === 'series' && item.seriesId) {
-      const seriesKey = `${item.sourceId}:${item.seriesId}`;
-      if (seenSeries.has(seriesKey)) continue;
-      seenSeries.add(seriesKey);
-      const override = overrideBySeries.get(seriesKey);
-      if (override) {
-        merged.push({
-          ...item,
-          itemId: override.episodeId,
-          title: override.episodeTitle || item.title,
-          seasonNumber: override.seasonNumber || 0,
-          episodeNumber: override.episodeNumber || 0,
-          watchOverride: true,
-        });
-        continue;
-      }
-    }
-    merged.push(item);
-  }
-  return merged;
+  const filtered = history.filter(item => item.sourceId && item.itemId).filter(item => {
+    if (item.kind === 'channel') return true;
+    if (milliseconds(item.endPositionMs) <= 5000 || item.completed === true) return false;
+    const duration = milliseconds(item.mediaDurationMs);
+    return duration <= 0 || milliseconds(item.endPositionMs) < Math.max(duration - 30000, duration * 0.95);
+  });
+  return filtered.map(item => {
+    if (item.kind !== 'series' || !item.seriesId) return item;
+    const override = overrideBySeries.get(`${item.sourceId}:${item.seriesId}`);
+    return override ? { ...item, itemId: override.episodeId, title: override.episodeTitle || item.title, seasonNumber: override.seasonNumber || 0, episodeNumber: override.episodeNumber || 0, watchOverride: true } : item;
+  });
 }
 
-export async function moveStreamingHistoryOwners(fromOwnerIds, toOwnerId) {
-  const owners = [...new Set((Array.isArray(fromOwnerIds) ? fromOwnerIds : [fromOwnerIds]).map(String).filter(Boolean))];
-  if (!toOwnerId || owners.length === 0) return;
-  await (await streamingHistoryCollection()).updateMany(
-    { ownerId: { $in: owners } },
-    { $set: { ownerId: String(toOwnerId), updatedAt: new Date() } },
-  );
-}
+// Kept for old device-link callers; history is now nested under profiles.
+export async function moveStreamingHistoryOwners() {}

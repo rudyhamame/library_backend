@@ -179,7 +179,7 @@ export async function createAccountProfile(accountId, input = {}) {
     avatar: avatars.has(input.avatar) ? input.avatar : [...avatars][rows.length % avatars.size],
     avatarImage, ...(pin ? { pinHash: hashProfilePin(pin) } : {}),
     isDefault: false, position: rows.length,
-    library: { categories: [], assignments: [], favorites: [], seriesWatchOverrides: [], savedSelections: {} },
+    library: { categories: [], assignments: [], favorites: [], seriesWatchOverrides: [], savedSelections: {}, last_kinds_watched: { episode: null, movie: null, live: null } },
     createdAt: new Date(), updatedAt: new Date(),
   };
   const result = await record.collection.updateOne(
@@ -218,7 +218,6 @@ export async function deleteAccountProfile(accountId, profileId) {
   const ownerId = String(profile.ownerId || '');
   const names = [
     process.env.MONGODB_PLAYBACK_COLLECTION || 'playback_progress',
-    process.env.MONGODB_STREAMING_HISTORY_COLLECTION || 'streaming_history',
     process.env.MONGODB_AI_RECOMMENDATIONS_COLLECTION || 'ai_recommendations',
     process.env.MONGODB_ANDROID_STARTUP_COLLECTION || 'android_startup_snapshots',
   ];
@@ -240,7 +239,6 @@ export async function deleteAccountProfilesAndData(accountId) {
   const ownerIds = [...new Set([accountOwnerId(accountId), ...rows.map(row => String(row.ownerId || '')).filter(Boolean)])];
   const names = [
     process.env.MONGODB_PLAYBACK_COLLECTION || 'playback_progress',
-    process.env.MONGODB_STREAMING_HISTORY_COLLECTION || 'streaming_history',
     process.env.MONGODB_AI_RECOMMENDATIONS_COLLECTION || 'ai_recommendations',
     process.env.MONGODB_ANDROID_STARTUP_COLLECTION || 'android_startup_snapshots',
     process.env.MONGODB_PROVIDER_CATALOG_COLLECTION || 'provider_catalog_items',

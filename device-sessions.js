@@ -447,22 +447,11 @@ export async function verifyDeviceSignupCode(code, email, verificationCode) {
   if (pending.email !== normalizedEmail || pending.code !== String(verificationCode || '').trim()) {
     return { error: 'Incorrect verification code', verificationInvalid: true };
   }
-  if (!session.signupPasswordHash) return { error: 'Signup details are missing. Please enter the password again.' };
-  const accountCollection = await accounts('roku');
-  const existing = await accountCollection.findOne({ email: normalizedEmail }, { projection: { _id: 1 } });
-  if (existing) return { error: 'An account with this email already exists. Sign in instead.' };
-  let created;
-  try {
-    created = await accountCollection.insertOne(identityAccountDocument({
-      email: normalizedEmail, passwordHash: session.signupPasswordHash,
-      firstName: '', lastName: '',
-    }));
-  } catch (error) {
-    if (error?.code === 11000) return { error: 'An account with this email already exists. Sign in instead.' };
-    throw error;
-  }
-  await deleteUnverifiedAccount(normalizedEmail);
-  return { verificationValid: true, token: await approveSignupSession(code, created.insertedId) };
+  // Roku collects the password after this verification screen. Keep the
+  // verified code in the unverified_accounts array until setupDeviceSession
+  // creates the account with the password the viewer enters next.
+  session.signupVerified = true;
+  return { verificationValid: true };
 }
 
 async function approveSignupSession(code, accountId) {

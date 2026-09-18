@@ -20,7 +20,6 @@ const mongoUri = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017';
 const databaseName = process.env.MONGODB_DB || 'rh_roku';
 const collectionName = process.env.MONGODB_PROVIDER_CATALOG_COLLECTION || 'provider_catalog_items';
 const metaCollectionName = process.env.MONGODB_PROVIDER_CATALOG_SYNC_COLLECTION || 'provider_catalog_syncs';
-const seriesEpisodeCollectionName = process.env.MONGODB_PROVIDER_SERIES_EPISODE_COLLECTION || 'provider_series_episodes';
 let collectionsPromise;
 
 async function collections() {
@@ -30,15 +29,7 @@ async function collections() {
         const database = client.db(databaseName);
         const items = database.collection(collectionName);
         const meta = database.collection(metaCollectionName);
-        const seriesEpisodes = database.collection(seriesEpisodeCollectionName);
-        await Promise.all([
-          items.createIndex({ ownerId: 1, sourceId: 1, kind: 1, key: 1 }, { unique: true }),
-          items.createIndex({ ownerId: 1, sourceId: 1, kind: 1, addedSort: -1, providerOrder: -1 }),
-          items.createIndex({ ownerId: 1, sourceId: 1, kind: 1, categoryId: 1, providerOrder: 1 }),
-          meta.createIndex({ ownerId: 1, sourceId: 1 }, { unique: true }),
-          seriesEpisodes.createIndex({ ownerId: 1, sourceId: 1, seriesId: 1 }, { unique: true }),
-        ]);
-        return { items, meta, seriesEpisodes };
+        return { items, meta };
       })
       .catch(error => { collectionsPromise = undefined; throw error; });
   }
@@ -89,10 +80,7 @@ export async function replaceProviderSeriesEpisodes(ownerId, sourceId, seriesId,
 }
 
 export async function markProviderCatalogFailure(ownerId, sourceId, kind) {
-  if (!ownerId || !sourceId || !['series', 'movie', 'channel'].includes(kind)) return;
-  const { meta } = await collections();
-  await meta.updateOne({ ownerId: String(ownerId), sourceId: String(sourceId) },
-    { $set: { [`kinds.${kind}.lastErrorAt`]: new Date() } }, { upsert: true });
+  void ownerId; void sourceId; void kind;
 }
 
 // The full stored row list for one provider/kind. The catalog endpoint keeps
@@ -397,8 +385,5 @@ export async function queryProviderCatalogItems(ownerId, sourceId, kind, { q = '
 }
 
 export async function deleteProviderCatalog(ownerId, sourceId) {
-  if (!ownerId || !sourceId) return;
-  const { items, meta } = await collections();
-  const filter = { ownerId: String(ownerId), sourceId: String(sourceId) };
-  await Promise.all([items.deleteMany(filter), meta.deleteOne(filter)]);
+  void ownerId; void sourceId;
 }

@@ -241,8 +241,6 @@ export async function deleteAccountProfilesAndData(accountId) {
     process.env.MONGODB_PLAYBACK_COLLECTION || 'playback_progress',
     process.env.MONGODB_AI_RECOMMENDATIONS_COLLECTION || 'ai_recommendations',
     process.env.MONGODB_ANDROID_STARTUP_COLLECTION || 'android_startup_snapshots',
-    process.env.MONGODB_PROVIDER_CATALOG_COLLECTION || 'provider_catalog_items',
-    process.env.MONGODB_PROVIDER_CATALOG_SYNC_COLLECTION || 'provider_catalog_syncs',
   ];
   await Promise.all(names.map(name => record.database.collection(name).deleteMany({ ownerId: { $in: ownerIds } })));
   return { ownerIds };

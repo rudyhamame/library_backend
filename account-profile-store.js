@@ -95,25 +95,6 @@ async function backfillMissingCodes(record) {
   return updated;
 }
 
-async function ensureDefaultProfileRecord(accountId, preferredName = 'Main') {
-  const record = await accountRecord(accountId);
-  const existing = profilesOf(record.account).find(row => row.isDefault === true);
-  if (existing) return existing;
-  const name = normalizeProfileName(preferredName) || 'Main';
-  const profile = {
-    id: randomUUID(), ownerId: accountOwnerId(accountId), name,
-    code: nextProfileCode(profilesOf(record.account), name),
-    avatar: 'lime', isDefault: true, position: 0,
-    createdAt: new Date(), updatedAt: new Date(),
-  };
-  const result = await record.collection.updateOne(
-    { _id: record.id, 'profiles.isDefault': { $ne: true } },
-    { $push: { profiles: { $each: [profile], $position: 0 } }, $set: { updatedAt: new Date() } },
-  );
-  if (result.modifiedCount) return profile;
-  return profilesOf(await record.collection.findOne({ _id: record.id })).find(row => row.isDefault === true);
-}
-
 export async function getAccountProfiles(accountId) {
   const rows = await backfillMissingCodes(await accountRecord(accountId));
   return [...rows].sort((a, b) => (a.position || 0) - (b.position || 0)).map(publicProfile);
@@ -152,7 +133,7 @@ async function updateProfileFields(accountId, profileId, fields, unset = {}) {
 }
 
 export async function setProfileRokuSourcePreference(accountId, profileId, sourceId) {
-  const profile = profileId ? await getAccountProfile(accountId, profileId) : await ensureDefaultProfileRecord(accountId);
+  const profile = profileId ? await getAccountProfile(accountId, profileId) : null;
   if (!profile) throw Object.assign(new Error('Profile not found'), { status: 404 });
   const value = String(sourceId || '').trim();
   await updateProfileFields(accountId, profile.id, { rokuSourceId: value, updatedAt: new Date() });
@@ -160,7 +141,7 @@ export async function setProfileRokuSourcePreference(accountId, profileId, sourc
 }
 
 async function partnerField(accountId, profileId, field) {
-  const profile = profileId ? await getAccountProfile(accountId, profileId) : await ensureDefaultProfileRecord(accountId);
+  const profile = profileId ? await getAccountProfile(accountId, profileId) : null;
   if (profile?.[field] !== undefined) return String(profile[field] || '');
   if (profile?.isDefault) return String((await accountRecord(accountId)).account[field] || '');
   return '';
@@ -174,7 +155,7 @@ export async function setProfilePartnerEmail(accountId, profileId, email, profil
   const codeValue = String(profileCode || '').trim().toUpperCase();
   if (value && !codeValue) throw new Error("Enter your partner's profile code");
   if (codeValue && !/^[A-Z]\d+$/.test(codeValue)) throw new Error('Profile code should look like a letter and a number, e.g. R1');
-  const profile = profileId ? await getAccountProfile(accountId, profileId) : await ensureDefaultProfileRecord(accountId);
+  const profile = profileId ? await getAccountProfile(accountId, profileId) : null;
   if (!profile) throw Object.assign(new Error('Profile not found'), { status: 404 });
   await updateProfileFields(accountId, profile.id, { partnerEmail: value, partnerProfileCode: value ? codeValue : '', updatedAt: new Date() });
   return value;
@@ -197,7 +178,9 @@ export async function createAccountProfile(accountId, input = {}) {
     code: nextProfileCode(rows, name),
     avatar: avatars.has(input.avatar) ? input.avatar : [...avatars][rows.length % avatars.size],
     avatarImage, ...(pin ? { pinHash: hashProfilePin(pin) } : {}),
-    isDefault: false, position: rows.length, createdAt: new Date(), updatedAt: new Date(),
+    isDefault: false, position: rows.length,
+    library: { categories: [], assignments: [], favorites: [], seriesWatchOverrides: [], savedSelections: {} },
+    createdAt: new Date(), updatedAt: new Date(),
   };
   const result = await record.collection.updateOne(
     { _id: record.id, [`profiles.${maxProfiles - 1}`]: { $exists: false }, 'profiles.name': { $ne: name } },
@@ -234,13 +217,10 @@ export async function deleteAccountProfile(accountId, profileId) {
   const record = await accountRecord(accountId);
   const ownerId = String(profile.ownerId || '');
   const names = [
-    process.env.MONGODB_LIBRARY_CATEGORY_COLLECTION || 'library_categories',
     process.env.MONGODB_PLAYBACK_COLLECTION || 'playback_progress',
     process.env.MONGODB_STREAMING_HISTORY_COLLECTION || 'streaming_history',
-    process.env.MONGODB_FAVORITES_COLLECTION || 'favorites',
     process.env.MONGODB_AI_RECOMMENDATIONS_COLLECTION || 'ai_recommendations',
     process.env.MONGODB_ANDROID_STARTUP_COLLECTION || 'android_startup_snapshots',
-    process.env.MONGODB_SERIES_WATCH_OVERRIDES_COLLECTION || 'series_watch_overrides',
   ];
   await Promise.all(names.map(name => record.database.collection(name).deleteMany({ ownerId })));
   await record.database.collection(process.env.MONGODB_XTREAM_COLLECTION || 'xtream_sources').updateMany(
@@ -263,10 +243,8 @@ export async function deleteAccountProfilesAndData(accountId) {
   const ownerIds = [...new Set([accountOwnerId(accountId), ...rows.map(row => String(row.ownerId || '')).filter(Boolean)])];
   const names = [
     process.env.MONGODB_XTREAM_COLLECTION || 'xtream_sources',
-    process.env.MONGODB_LIBRARY_CATEGORY_COLLECTION || 'library_categories',
     process.env.MONGODB_PLAYBACK_COLLECTION || 'playback_progress',
     process.env.MONGODB_STREAMING_HISTORY_COLLECTION || 'streaming_history',
-    process.env.MONGODB_FAVORITES_COLLECTION || 'favorites',
     process.env.MONGODB_AI_RECOMMENDATIONS_COLLECTION || 'ai_recommendations',
     process.env.MONGODB_ANDROID_STARTUP_COLLECTION || 'android_startup_snapshots',
     process.env.MONGODB_PROVIDER_CATALOG_COLLECTION || 'provider_catalog_items',
@@ -276,7 +254,4 @@ export async function deleteAccountProfilesAndData(accountId) {
   return { ownerIds };
 }
 
-export async function ensureDefaultProfile(accountId, preferredName = 'Main') {
-  return ensureDefaultProfileRecord(accountId, preferredName);
-}
 export { maxProfiles as MAX_ACCOUNT_PROFILES };

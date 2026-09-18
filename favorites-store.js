@@ -1,86 +1,48 @@
-import { MongoClient } from 'mongodb';
+import { getAccountLibrary, updateAccountLibrary } from './account-library-data.js';
 
-const mongoUri = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017';
-const databaseName = process.env.MONGODB_DB || 'rh_roku';
-const collectionName = process.env.MONGODB_FAVORITES_COLLECTION || 'favorites';
-let collectionPromise;
-
-async function favoritesCollection() {
-  if (!collectionPromise) {
-    collectionPromise = new MongoClient(mongoUri, { serverSelectionTimeoutMS: 5000 })
-      .connect()
-      .then(async client => {
-        const collection = client.db(databaseName).collection(collectionName);
-        // Favorites belong to one profile *and* one provider. Provider catalogs
-        // commonly reuse numeric item IDs, so ownerId + itemId incorrectly
-        // treats two different providers' items as the same favorite.
-        let indexes = [];
-        try { indexes = await collection.indexes(); }
-        catch (error) {
-          if (error?.codeName !== 'NamespaceNotFound') throw error;
-        }
-        const legacyIndex = indexes.find(index =>
-          index.unique === true
-          && JSON.stringify(index.key) === JSON.stringify({ ownerId: 1, itemId: 1 }));
-        if (legacyIndex) await collection.dropIndex(legacyIndex.name);
-        await collection.createIndex(
-          { ownerId: 1, profileId: 1, sourceId: 1, kind: 1, itemId: 1 },
-          { unique: true, name: 'profile_provider_favorite' },
-        );
-        return collection;
-      })
-      .catch(error => { collectionPromise = undefined; throw error; });
-  }
-  return collectionPromise;
+function matches(row, key) {
+  return row.profileId === key.profileId && row.sourceId === key.sourceId
+    && row.kind === key.kind && row.itemId === key.itemId;
 }
 
 export async function getFavorites(ownerId, profileId) {
   if (!ownerId || !profileId) return [];
-  return (await (await favoritesCollection()).find({ ownerId: String(ownerId), profileId: String(profileId) }).sort({ updatedAt: -1 }).toArray())
-    .map(({ _id, ownerId: _ownerId, profileId: _profileId, itemId, ...item }) => ({ id: itemId, ...item }));
+  const library = await getAccountLibrary(ownerId, profileId);
+  return library.favorites.filter(row => !row.profileId || row.profileId === String(profileId))
+    .sort((a, b) => new Date(b.updatedAt || 0) - new Date(a.updatedAt || 0))
+    .map(({ ownerId: _ownerId, profileId: _profileId, itemId, ...item }) => ({ id: itemId, ...item }));
 }
 
 export async function toggleFavorite({ ownerId, profileId, id, title, kind, sourceId = '', logo = '', category = '', extension = '', favorite = undefined }) {
   if (!ownerId || !profileId || !id) throw new Error('Account, profile, and item ID are required');
   if (!sourceId || !kind) throw new Error('Provider and item kind are required');
-  const collection = await favoritesCollection();
-  const key = {
-    ownerId: String(ownerId),
-    profileId: String(profileId),
-    sourceId: String(sourceId),
-    kind: String(kind),
-    itemId: String(id),
-  };
-  const existing = await collection.findOne(key);
-  const desiredFavorite = typeof favorite === 'boolean' ? favorite : !existing;
-  if (!desiredFavorite) {
-    if (existing) await collection.deleteOne(key);
-    return { id, favorite: false };
-  }
-  if (existing) {
-    await collection.updateOne(key, { $set: {
-      title: String(title || existing.title || ''),
-      logo: String(logo || existing.logo || ''),
-      category: String(category || existing.category || ''),
-      extension: String(extension || existing.extension || ''),
+  const key = { profileId: String(profileId), sourceId: String(sourceId), kind: String(kind), itemId: String(id) };
+  let response;
+  await updateAccountLibrary(ownerId, library => {
+    const index = library.favorites.findIndex(row => matches(row, key));
+    const existing = index >= 0 ? library.favorites[index] : null;
+    const desiredFavorite = typeof favorite === 'boolean' ? favorite : !existing;
+    if (!desiredFavorite) {
+      if (index >= 0) library.favorites.splice(index, 1);
+      response = { id, favorite: false };
+      return library;
+    }
+    const item = {
+      ...key,
+      title: String(title || existing?.title || ''),
+      logo: String(logo || existing?.logo || ''),
+      category: String(category || existing?.category || ''),
+      extension: String(extension || existing?.extension || ''),
       updatedAt: new Date(),
-    } });
-    return { id, title: String(title || existing.title || ''), kind: key.kind, sourceId: key.sourceId, favorite: true };
-  }
-  const item = {
-    ...key,
-    title: String(title || ''),
-    logo: String(logo || ''),
-    category: String(category || ''),
-    extension: String(extension || ''),
-    updatedAt: new Date(),
-  };
-  await collection.insertOne(item);
-  return { id, title: item.title, kind: item.kind, sourceId: item.sourceId, favorite: true };
+    };
+    if (index >= 0) library.favorites[index] = item;
+    else library.favorites.push(item);
+    response = { id, title: item.title, kind: key.kind, sourceId: key.sourceId, favorite: true };
+    return library;
+  }, profileId);
+  return response;
 }
 
-export async function moveFavoriteOwners(fromOwnerIds, toOwnerId) {
-  const owners = [...new Set((Array.isArray(fromOwnerIds) ? fromOwnerIds : [fromOwnerIds]).map(String).filter(Boolean))];
-  if (!toOwnerId || owners.length === 0) return;
-  await (await favoritesCollection()).updateMany({ ownerId: { $in: owners } }, { $set: { ownerId: String(toOwnerId) } });
-}
+// Legacy device-owner favorites are migrated before the old collection is
+// removed. New favorites are already inside the account and need no re-home.
+export async function moveFavoriteOwners() {}

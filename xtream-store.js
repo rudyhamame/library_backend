@@ -1,5 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { MongoClient } from 'mongodb';
+import { accountForLibraryOwner, updateAccountLibrary } from './account-library-data.js';
+import { accountOwnerId } from './account-library-owner.js';
 
 const mongoUri = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017';
 const databaseName = process.env.MONGODB_DB || 'rh_roku';
@@ -22,10 +24,23 @@ async function sourceCollection() {
 const selectionFields = ['enabledKeys', 'enabledItems', 'archivedKeys', 'archivedItems'];
 
 export function selectionFor(source, ownerId, accountOwner) {
-  const selection = ownerId && accountOwner && String(ownerId) !== String(accountOwner)
-    ? source?.selections?.[String(ownerId)]
-    : source;
+  void accountOwner;
+  const selection = source?.selections?.[String(ownerId)];
   return Object.fromEntries(selectionFields.map(field => [field, Array.isArray(selection?.[field]) ? selection[field] : []]));
+}
+
+async function withProfileSelections(sources, accountOwner) {
+  if (!accountOwner || !sources.length) return sources;
+  const { account } = await accountForLibraryOwner(accountOwner);
+  return sources.map(source => {
+    const selections = {};
+    for (const profile of account.profiles || []) {
+      const owner = profile.isDefault ? accountOwnerId(account._id) : String(profile.ownerId);
+      const selected = profile.library?.savedSelections?.[String(source._id)];
+      if (selected) selections[owner] = selected;
+    }
+    return { ...source, selections };
+  });
 }
 
 export function flattenSelection(sources, ownerId, accountOwner) {
@@ -56,15 +71,17 @@ export function publicXtreamSource(source, ownerId, accountOwner) {
 export async function getXtreamSources(ownerId) {
   const filter = ownerId ? { ownerId } : {};
   const sources = await (await sourceCollection()).find(filter).sort({ name: 1, updatedAt: -1 }).toArray();
-  return sources.map(publicXtreamSource);
+  return (await withProfileSelections(sources, ownerId)).map(source => publicXtreamSource(source, ownerId, ownerId));
 }
 
 export async function getXtreamSource(id, ownerId) {
-  return (await sourceCollection()).findOne({ _id: id, ...(ownerId ? { ownerId } : {}) });
+  const source = await (await sourceCollection()).findOne({ _id: id, ...(ownerId ? { ownerId } : {}) });
+  return source ? (await withProfileSelections([source], ownerId))[0] : null;
 }
 
 export async function getAllXtreamSources(ownerId) {
-  return (await sourceCollection()).find(ownerId ? { ownerId } : {}).sort({ name: 1, updatedAt: -1 }).toArray();
+  const sources = await (await sourceCollection()).find(ownerId ? { ownerId } : {}).sort({ name: 1, updatedAt: -1 }).toArray();
+  return withProfileSelections(sources, ownerId);
 }
 
 export async function createXtreamSource({ name, type = 'xtream', baseUrl, username = '', password = '', ownerId, connectionStatus = 'online', connectionMessage = '' }) {
@@ -89,15 +106,13 @@ export async function updateXtreamSource(id, changes, ownerId) {
 export async function updateXtreamSelection(id, selection, accountOwner, profileOwner = accountOwner) {
   if (profileOwner && String(profileOwner) !== String(accountOwner) && !/^[a-f0-9]{64}$/i.test(String(profileOwner))) return null;
   const fields = Object.fromEntries(selectionFields.map(field => [field, Array.isArray(selection?.[field]) ? selection[field] : []]));
-  const ownerPath = String(profileOwner || accountOwner) === String(accountOwner)
-    ? fields
-    : Object.fromEntries(selectionFields.map(field => [`selections.${String(profileOwner)}.${field}`, fields[field]]));
-  const result = await (await sourceCollection()).findOneAndUpdate(
-    { _id: id, ...(accountOwner ? { ownerId: accountOwner } : {}) },
-    { $set: { ...ownerPath, updatedAt: new Date() } },
-    { returnDocument: 'after' },
-  );
-  return publicXtreamSource(result?.value || result, profileOwner, accountOwner);
+  const source = await (await sourceCollection()).findOne({ _id: id, ownerId: accountOwner });
+  if (!source) return null;
+  await updateAccountLibrary(profileOwner, library => {
+    library.savedSelections[String(id)] = fields;
+    return library;
+  });
+  return publicXtreamSource({ ...source, selections: { [String(profileOwner)]: fields } }, profileOwner, accountOwner);
 }
 
 export async function deleteXtreamSource(id, ownerId) {

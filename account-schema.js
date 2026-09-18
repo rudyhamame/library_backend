@@ -21,6 +21,7 @@ export const identityValidator = {
       selectedProviderId: { bsonType: ['string', 'null'] },
       providers: { bsonType: 'array' },
       profiles: { bsonType: 'array' },
+      library: { bsonType: 'object' },
       metadata: { bsonType: 'object', properties: { devices: { bsonType: 'array' } } },
       updatedAt: { bsonType: 'date' },
     },

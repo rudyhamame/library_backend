@@ -74,6 +74,10 @@ export function buildAccountRoot({
         profileCode: text(profile.partnerProfileCode),
       },
       favorites: groupByKind(profileFavorites),
+      savedSelections: profile.library?.savedSelections || {},
+      categories: profile.library?.categories || [],
+      assignments: profile.library?.assignments || [],
+      seriesWatchOverrides: profile.library?.seriesWatchOverrides || [],
       updatedAt: profile.updatedAt || null,
     };
   });

@@ -9,7 +9,6 @@ try {
   const db = client.db(process.env.MONGODB_DB || 'rh_roku');
   const accounts = db.collection(process.env.MONGODB_ACCOUNT_COLLECTION || 'accounts');
   const sources = db.collection(process.env.MONGODB_XTREAM_COLLECTION || 'xtream_sources');
-  const categories = db.collection(process.env.MONGODB_LIBRARY_CATEGORY_COLLECTION || 'library_categories');
 
   const email = String(process.env.ACCOUNT_EMAIL || '').trim().toLowerCase();
   let account;
@@ -35,7 +34,7 @@ try {
     { ownerId: canonicalOwnerId },
     { $set: { enabledKeys: [], enabledItems: [], archivedKeys: [], archivedItems: [], updatedAt: new Date() } },
   );
-  await categories.deleteMany({ ownerId: { $in: [canonicalOwnerId, ...priorOwnerIds] } });
+  await accounts.updateOne({ _id: account._id }, { $set: { 'profiles.$[].library.categories': [], 'profiles.$[].library.assignments': [], updatedAt: new Date() } });
 
   const remaining = await sources.countDocuments({
     ownerId: canonicalOwnerId,

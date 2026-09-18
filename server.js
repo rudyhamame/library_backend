@@ -22,7 +22,7 @@ import { getSeriesWatchOverride, toggleSeriesWatchOverride } from './series-watc
 import { accountOwnerId, profileOwnerId } from './account-library-owner.js';
 import { syncCatalogItems } from './catalog-store.js';
 import { authorizeDeviceSession, autoLoginDeviceSession, castHandoffLink, changeAccountPassword, claimAutomaticPairing, confirmPasswordReset, createDeviceSession, deleteAccount, getAccountBasicInfo, getDeviceWeatherLocations, getLinkedDevices, getPairingInfo, getRokuDeviceSessionStatus, getRokuSourcePreferenceByOwner, initializeAccountDatabases, isProfileOnline, isRokuSessionLinked, listAllAccountsBasic, listAllLinkedDevices, loginAccount, loginDeviceSession, recordDeviceHeartbeat, registerAccount, registerBrowserDevice, requestDeviceSignupVerification, requestPasswordReset, resendDeviceSignupVerification, resolveAccountByEmail, resolveDeviceToken, saveDeviceWeatherLocations, selectAccountProfile, setupDeviceSession, unlinkAccountDevice, verifyDeviceSignupCode } from './device-sessions.js';
-import { createAccountProfile, deleteAccountProfile, ensureDefaultProfile, getAccountProfile, getAccountProfiles, getProfileByCode, getProfilePartnerCode, getProfilePartnerEmail, setProfilePartnerEmail, setProfileRokuSourcePreference, updateAccountProfile } from './account-profile-store.js';
+import { createAccountProfile, deleteAccountProfile, getAccountProfile, getAccountProfiles, getProfileByCode, getProfilePartnerCode, getProfilePartnerEmail, setProfilePartnerEmail, setProfileRokuSourcePreference, updateAccountProfile } from './account-profile-store.js';
 import { createLibraryCategory, deleteLibraryCategory, getManagedLibrary, renameLibraryCategory, replaceLibraryCategoryItems } from './library-category-store.js';
 import { enforceLibraryOnly } from './library-route-policy.js';
 import { checkPlaylistSources } from './playlist-health.js';
@@ -516,6 +516,7 @@ async function enforceHlsFileBound(job) {
 function requestOwner(req) {
   const token = String(req.get('x-device-token') || req.query.deviceToken || '');
   const session = resolveDeviceToken(token);
+  if (session?.accountId && !session.profileId) return null;
   return session?.ownerId || null;
 }
 
@@ -554,6 +555,7 @@ function requestAccountRealm(req) {
 
 function requestAccountOwner(req) {
   const accountId = requestAccount(req);
+  if (accountId && !requestProfile(req)) return null;
   return accountId && /^[a-f0-9]{24}$/i.test(accountId) ? accountOwnerId(accountId) : requestOwner(req);
 }
 
@@ -568,6 +570,7 @@ function requestProfile(req) {
 // as requestOwner, so their existing history is unaffected.
 function requestProfileOwner(req) {
   const session = resolveDeviceToken(String(req.get('x-device-token') || req.query.deviceToken || ''));
+  if (session?.accountId && !session.profileId) return null;
   if (session?.accountId && /^[a-f0-9]{24}$/i.test(String(session.accountId)) && session?.profileId) {
     return profileOwnerId(String(session.accountId), String(session.profileId));
   }
@@ -1455,7 +1458,7 @@ app.get('/api/account/partner', async (req, res) => {
     if (!accountId) return res.status(401).json({ error: 'Authentication required' });
     const profileId = requestProfile(req);
     res.set('Cache-Control', 'no-store');
-    const myProfile = profileId ? await getAccountProfile(accountId, profileId) : await ensureDefaultProfile(accountId);
+    const myProfile = profileId ? await getAccountProfile(accountId, profileId) : null;
     const myProfileCode = myProfile?.code || '';
     const partnerEmail = await getProfilePartnerEmail(accountId, profileId);
     const partnerProfileCode = await getProfilePartnerCode(accountId, profileId);

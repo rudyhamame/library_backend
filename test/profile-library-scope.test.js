@@ -10,11 +10,17 @@ const kidsOwner = profileOwnerId(accountId, 'kids');
 const source = {
   _id: 'provider-one',
   ownerId: accountOwner,
-  enabledKeys: ['movie:main'],
-  enabledItems: [{ key: 'movie:main' }],
+  enabledKeys: [],
+  enabledItems: [],
   archivedKeys: [],
   archivedItems: [],
   selections: {
+    [accountOwner]: {
+      enabledKeys: ['movie:main'],
+      enabledItems: [{ key: 'movie:main' }],
+      archivedKeys: [],
+      archivedItems: [],
+    },
     [kidsOwner]: {
       enabledKeys: ['movie:kids'],
       enabledItems: [{ key: 'movie:kids' }],
@@ -75,7 +81,8 @@ test('Roku Welcome content is selected by profile and constrained to its provide
   assert.match(sessions, /getProfileRokuSourcePreferenceByOwner\(ownerId\)/);
   assert.match(scene, /continue-watching\?providerScope=roku/);
   assert.match(server, /sourceId = pickRokuSourceId\(await getRokuSourcePreferenceByOwner\(ownerId\), sources\)/);
-  assert.match(favorites, /\{ ownerId: 1, profileId: 1, sourceId: 1, kind: 1, itemId: 1 \}/);
+  assert.match(favorites, /updateAccountLibrary\(ownerId, library =>/);
+  assert.match(favorites, /library\.favorites\.findIndex\(row => matches\(row, key\)\)/);
   assert.match(favorites, /if \(!sourceId \|\| !kind\) throw new Error/);
   assert.match(favorites, /const desiredFavorite = typeof favorite === 'boolean' \? favorite : !existing/);
   assert.match(scene, /favorite: desiredFavorite/);

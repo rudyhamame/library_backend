@@ -11,11 +11,8 @@ const names = {
   roots: process.env.MONGODB_ACCOUNT_ROOT_COLLECTION || 'account_roots',
   accounts: process.env.MONGODB_ACCOUNT_COLLECTION || 'accounts',
   providers: process.env.MONGODB_XTREAM_COLLECTION || 'xtream_sources',
-  categories: process.env.MONGODB_LIBRARY_CATEGORY_COLLECTION || 'library_categories',
-  favorites: process.env.MONGODB_FAVORITES_COLLECTION || 'favorites',
   playback: process.env.MONGODB_PLAYBACK_COLLECTION || 'playback_progress',
   history: process.env.MONGODB_STREAMING_HISTORY_COLLECTION || 'streaming_history',
-  overrides: process.env.MONGODB_SERIES_WATCH_OVERRIDE_COLLECTION || 'series_watch_overrides',
   catalog: process.env.MONGODB_PROVIDER_CATALOG_COLLECTION || 'provider_catalog_items',
   catalogSync: process.env.MONGODB_PROVIDER_CATALOG_SYNC_COLLECTION || 'provider_catalog_syncs',
   media: process.env.MONGODB_PROVIDER_MEDIA_METADATA_COLLECTION || 'provider_media_metadata',
@@ -32,11 +29,11 @@ async function migrateAccount(db, account, roots) {
   const [profiles, providers, categories, favorites, playback, history, watchOverrides] = await Promise.all([
     Promise.resolve(Array.isArray(account.profiles) ? account.profiles : []),
     ownerRows(db.collection(names.providers), ownerId),
-    db.collection(names.categories).findOne({ ownerId }),
-    ownerRows(db.collection(names.favorites), ownerId),
+    Promise.resolve({ categories: (account.profiles || []).flatMap(profile => profile.library?.categories || []), assignments: (account.profiles || []).flatMap(profile => profile.library?.assignments || []) }),
+    Promise.resolve((account.profiles || []).flatMap(profile => profile.library?.favorites || [])),
     ownerRows(db.collection(names.playback), ownerId),
     ownerRows(db.collection(names.history), ownerId),
-    ownerRows(db.collection(names.overrides), ownerId),
+    Promise.resolve((account.profiles || []).flatMap(profile => profile.library?.seriesWatchOverrides || [])),
   ]);
   const providerIds = providers.map(provider => provider._id);
   const [catalogRefs, syncRows, mediaRefs, episodeRefs] = await Promise.all([

@@ -1,25 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { MongoClient } from 'mongodb';
 import { cleanLibraryCategoryName, libraryItemKey, reconcileLibraryCategories, validLibraryKinds } from './library-category-core.js';
-
-const mongoUri = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017';
-const databaseName = process.env.MONGODB_DB || 'rh_roku';
-const collectionName = process.env.MONGODB_LIBRARY_CATEGORY_COLLECTION || 'library_categories';
-let collectionPromise;
-
-async function categoryCollection() {
-  if (!collectionPromise) {
-    collectionPromise = new MongoClient(mongoUri, { serverSelectionTimeoutMS: 5000 })
-      .connect()
-      .then(async client => {
-        const collection = client.db(databaseName).collection(collectionName);
-        await collection.createIndex({ ownerId: 1 }, { unique: true });
-        return collection;
-      })
-      .catch(error => { collectionPromise = undefined; throw error; });
-  }
-  return collectionPromise;
-}
+import { updateAccountLibrary } from './account-library-data.js';
 
 function publicLibrary(document, suppliedItems, kind = '') {
   const assignments = new Map(document.assignments.map(entry => [entry.itemKey, entry.categoryId]));
@@ -41,41 +22,37 @@ function publicLibrary(document, suppliedItems, kind = '') {
   return { categories, items };
 }
 
+function scopedDocument(library, ownerId) {
+  return {
+    categories: library.categories.filter(row => row.profileOwnerId === String(ownerId)),
+    assignments: library.assignments.filter(row => row.profileOwnerId === String(ownerId)),
+  };
+}
+
+function mergeScoped(library, ownerId, document) {
+  const profileOwnerId = String(ownerId);
+  library.categories = [
+    ...library.categories.filter(row => row.profileOwnerId !== profileOwnerId),
+    ...document.categories.map(row => ({ ...row, profileOwnerId })),
+  ];
+  library.assignments = [
+    ...library.assignments.filter(row => row.profileOwnerId !== profileOwnerId),
+    ...document.assignments.map(row => ({ ...row, profileOwnerId })),
+  ];
+  return library;
+}
+
 async function synchronizedDocument(ownerId, suppliedItems) {
-  const collection = await categoryCollection();
-  const current = await collection.findOne({ ownerId }) || { ownerId, categories: [], assignments: [] };
-  const next = reconcileLibraryCategories(current, suppliedItems);
-  next.ownerId = ownerId;
-  await collection.replaceOne({ ownerId }, next, { upsert: true });
-  return next;
+  const result = await updateAccountLibrary(ownerId, library => {
+    const next = reconcileLibraryCategories(scopedDocument(library, ownerId), suppliedItems);
+    return mergeScoped(library, ownerId, next);
+  });
+  return scopedDocument(result.library, ownerId);
 }
 
 export async function moveLibraryCategories(fromOwnerIds, toOwnerId) {
-  const sourceOwners = [...new Set((Array.isArray(fromOwnerIds) ? fromOwnerIds : [fromOwnerIds])
-    .map(String).filter(ownerId => ownerId && ownerId !== toOwnerId))];
-  if (!toOwnerId || sourceOwners.length === 0) return;
-  const collection = await categoryCollection();
-  const documents = await collection.find({ ownerId: { $in: [toOwnerId, ...sourceOwners] } }).toArray();
-  if (documents.length === 0) return;
-  const canonical = documents.find(document => document.ownerId === toOwnerId)
-    || { ownerId: toOwnerId, categories: [], assignments: [] };
-  const categories = new Map();
-  const assignments = new Map();
-  for (const document of documents) {
-    for (const category of document.categories || []) categories.set(category.id, category);
-    for (const assignment of document.assignments || []) {
-      const prior = assignments.get(assignment.itemKey);
-      if (!prior || (!prior.categoryId && assignment.categoryId)) assignments.set(assignment.itemKey, assignment);
-    }
-  }
-  await collection.replaceOne({ ownerId: toOwnerId }, {
-    ...canonical,
-    ownerId: toOwnerId,
-    categories: [...categories.values()],
-    assignments: [...assignments.values()],
-    updatedAt: new Date(),
-  }, { upsert: true });
-  await collection.deleteMany({ ownerId: { $in: sourceOwners } });
+  void fromOwnerIds;
+  void toOwnerId;
 }
 
 export async function getManagedLibrary(ownerId, suppliedItems, kind = '') {
@@ -90,7 +67,7 @@ export async function createLibraryCategory(ownerId, suppliedItems, { kind, name
   const document = await synchronizedDocument(ownerId, suppliedItems);
   document.categories.push({ id: randomUUID(), kind, name: categoryName, sourceKeys: [], deleted: false, createdAt: new Date(), updatedAt: new Date() });
   document.updatedAt = new Date();
-  await (await categoryCollection()).replaceOne({ ownerId }, document, { upsert: true });
+  await updateAccountLibrary(ownerId, library => mergeScoped(library, ownerId, document));
   return publicLibrary(document, suppliedItems);
 }
 
@@ -103,7 +80,7 @@ export async function renameLibraryCategory(ownerId, suppliedItems, categoryId, 
   category.name = categoryName;
   category.updatedAt = new Date();
   document.updatedAt = new Date();
-  await (await categoryCollection()).replaceOne({ ownerId }, document, { upsert: true });
+  await updateAccountLibrary(ownerId, library => mergeScoped(library, ownerId, document));
   return publicLibrary(document, suppliedItems);
 }
 
@@ -120,7 +97,7 @@ export async function replaceLibraryCategoryItems(ownerId, suppliedItems, catego
   });
   category.updatedAt = new Date();
   document.updatedAt = new Date();
-  await (await categoryCollection()).replaceOne({ ownerId }, document, { upsert: true });
+  await updateAccountLibrary(ownerId, library => mergeScoped(library, ownerId, document));
   return publicLibrary(document, suppliedItems);
 }
 
@@ -132,6 +109,6 @@ export async function deleteLibraryCategory(ownerId, suppliedItems, categoryId) 
   category.updatedAt = new Date();
   document.assignments = document.assignments.map(entry => entry.categoryId === categoryId ? { ...entry, categoryId: null } : entry);
   document.updatedAt = new Date();
-  await (await categoryCollection()).replaceOne({ ownerId }, document, { upsert: true });
+  await updateAccountLibrary(ownerId, library => mergeScoped(library, ownerId, document));
   return publicLibrary(document, suppliedItems);
 }

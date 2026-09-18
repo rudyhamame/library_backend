@@ -200,7 +200,7 @@ function validEmail(email) { return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) && 
 function identityAccountDocument({ email, passwordHash, createdAt = new Date(), updatedAt = new Date() }) {
   return {
     email, passwordHash, createdAt, updatedAt,
-    preferences: {}, selectedProviderId: null, providers: [], profiles: [],
+    providers: [], profiles: [], devices: [],
     realm: 'roku', devices: [],
   };
 }
@@ -309,7 +309,7 @@ export async function setRokuSourcePreference(accountId, sourceId) {
   if (!accountId || !ObjectId.isValid(accountId)) throw new Error('Account authentication is required');
   const value = String(sourceId || '').trim();
   const account = await (await accounts()).findOne({ _id: new ObjectId(accountId) }, { projection: { rokuSourceId: 1, ownerId: 1 } });
-  await (await accounts()).updateOne({ _id: new ObjectId(accountId) }, { $set: { rokuSourceId: value, selectedProviderId: value || null, 'preferences.selectedProviderId': value, updatedAt: new Date() } });
+  await (await accounts()).updateOne({ _id: new ObjectId(accountId) }, { $set: { rokuSourceId: value, updatedAt: new Date() }, $unset: { selectedProviderId: '', preferences: '' } });
   // Same staleness fix as setProfileRokuSourcePreference, for accounts still
   // on the pre-profile source preference (see getRokuSourcePreferenceByOwner).
   if (account?.ownerId && value !== String(account.rokuSourceId || '')) {

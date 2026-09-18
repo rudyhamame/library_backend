@@ -10,13 +10,11 @@ export const collectionNames = {
 export const identityValidator = {
   $jsonSchema: {
     bsonType: 'object',
-    required: ['_id', 'email', 'passwordHash', 'preferences', 'providers', 'profiles', 'devices'],
+    required: ['_id', 'email', 'passwordHash', 'providers', 'profiles', 'devices'],
     properties: {
       _id: { bsonType: ['objectId', 'string'] },
       email: { bsonType: 'string' },
       passwordHash: { bsonType: 'string' },
-      preferences: { bsonType: 'object' },
-      selectedProviderId: { bsonType: ['string', 'null'] },
       providers: { bsonType: 'array' },
       profiles: { bsonType: 'array' },
       library: { bsonType: 'object' },

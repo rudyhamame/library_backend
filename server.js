@@ -3746,7 +3746,6 @@ app.post('/api/xtream/sources/:id/archive/:key/restore', async (req, res) => {
 });
 
 app.get('/api/xtream/play/:sourceId/:kind/:id', async (req, res) => {
-  if (['movie', 'series'].includes(req.params.kind)) return res.status(410).json({ error: 'Movie and series playback is HLS-only. Use /api/xtream/hls.' });
   const controller = new AbortController();
   const connectionTimer = setTimeout(() => controller.abort(new Error('Provider connection timed out')), 15_000);
   connectionTimer.unref?.();

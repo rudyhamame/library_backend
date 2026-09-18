@@ -29,7 +29,7 @@ import { backdropVideoFile, ensureBackdropRoot, getRecommendationBackdrop, listB
 import { getAndroidStartupSnapshot, saveAndroidStartupSnapshot } from './android-startup-store.js';
 import { providerPlaybackUrlIsUsable, resolveProviderMediaId, resolveProviderTitle } from './provider-playback-fields.js';
 import { acquireProviderStreamLease } from './provider-stream-leases.js';
-import { deleteProviderCatalog, getProviderCatalogCategories, getProviderCatalogItem, getProviderCatalogItems, getProviderCatalogItemsByIds, getProviderCatalogItemsForCategory, getProviderCatalogLanguagePrefixes, getProviderCatalogMeta, getProviderCatalogRails, getProviderMediaMetadataByIds, hydrateContinueWatchingArtwork, listProviderCatalogMeta, queryProviderCatalogItems, recordProviderCatalogDuration, replaceProviderCatalog, replaceProviderCatalogCategories, replaceProviderSeriesEpisodes } from './provider-catalog-store.js';
+import { deleteProviderCatalog, getProviderCatalogCategories, getProviderCatalogItem, getProviderCatalogItems, getProviderCatalogItemsByIds, getProviderCatalogItemsForCategory, getProviderCatalogLanguagePrefixes, getProviderCatalogMeta, getProviderCatalogRails, hydrateContinueWatchingArtwork, listProviderCatalogMeta, queryProviderCatalogItems, recordProviderCatalogDuration, replaceProviderCatalog, replaceProviderCatalogCategories, replaceProviderSeriesEpisodes } from './provider-catalog-store.js';
 
 const app = express();
 app.use(enforceLibraryOnly);
@@ -451,15 +451,12 @@ async function resolveMediaDuration(source, kind, id, extension, seriesId = '') 
 
 async function hydrateSeriesDurations(source, details) {
   const episodes = Array.isArray(details?.episodes) ? details.episodes : [];
-  const storedMedia = await getProviderMediaMetadataByIds(source.ownerId, String(source._id), 'series', episodes.map(episode => episode.id)).catch(() => []);
-  const storedById = new Map(storedMedia.map(item => [String(item.id), item]));
   const hydrated = episodes.map(episode => {
-    const stored = storedById.get(String(episode.id));
     const knownSeconds = durationSeconds(episode.duration);
-    if (knownSeconds > 0) return { ...episode, duration: displayDuration(knownSeconds), videoCodec: stored?.videoCodec || '', audioCodec: stored?.audioCodec || '' };
+    if (knownSeconds > 0) return { ...episode, duration: displayDuration(knownSeconds) };
     const cached = mediaDurationCache.get(`${source._id}:series:${episode.id}`);
-    if (cached?.expiresAt > Date.now() && cached.seconds > 0) return { ...episode, duration: cached.duration, videoCodec: stored?.videoCodec || '', audioCodec: stored?.audioCodec || '' };
-    return { ...episode, duration: stored?.duration || '', videoCodec: stored?.videoCodec || '', audioCodec: stored?.audioCodec || '' };
+    if (cached?.expiresAt > Date.now() && cached.seconds > 0) return { ...episode, duration: cached.duration };
+    return { ...episode, duration: '' };
   });
   return { ...details, episodes: hydrated };
 }

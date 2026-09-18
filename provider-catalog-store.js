@@ -20,7 +20,6 @@ const mongoUri = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017';
 const databaseName = process.env.MONGODB_DB || 'rh_roku';
 const collectionName = process.env.MONGODB_PROVIDER_CATALOG_COLLECTION || 'provider_catalog_items';
 const metaCollectionName = process.env.MONGODB_PROVIDER_CATALOG_SYNC_COLLECTION || 'provider_catalog_syncs';
-const mediaCollectionName = process.env.MONGODB_PROVIDER_MEDIA_METADATA_COLLECTION || 'provider_media_metadata';
 const seriesEpisodeCollectionName = process.env.MONGODB_PROVIDER_SERIES_EPISODE_COLLECTION || 'provider_series_episodes';
 let collectionsPromise;
 
@@ -31,17 +30,15 @@ async function collections() {
         const database = client.db(databaseName);
         const items = database.collection(collectionName);
         const meta = database.collection(metaCollectionName);
-        const media = database.collection(mediaCollectionName);
         const seriesEpisodes = database.collection(seriesEpisodeCollectionName);
         await Promise.all([
           items.createIndex({ ownerId: 1, sourceId: 1, kind: 1, key: 1 }, { unique: true }),
           items.createIndex({ ownerId: 1, sourceId: 1, kind: 1, addedSort: -1, providerOrder: -1 }),
           items.createIndex({ ownerId: 1, sourceId: 1, kind: 1, categoryId: 1, providerOrder: 1 }),
           meta.createIndex({ ownerId: 1, sourceId: 1 }, { unique: true }),
-          media.createIndex({ ownerId: 1, sourceId: 1, kind: 1, id: 1 }, { unique: true }),
           seriesEpisodes.createIndex({ ownerId: 1, sourceId: 1, seriesId: 1 }, { unique: true }),
         ]);
-        return { items, meta, media, seriesEpisodes };
+        return { items, meta, seriesEpisodes };
       })
       .catch(error => { collectionsPromise = undefined; throw error; });
   }
@@ -313,52 +310,6 @@ export async function recordProviderCatalogDuration(ownerId, sourceId, kind, id,
   await items.updateOne(
     { ownerId: String(ownerId), sourceId: String(sourceId), kind: String(kind), id: String(id) },
     { $set: { duration: display } },
-  );
-}
-
-// Persist codecs learned from a real media probe. Bulk Xtream catalog rows do
-// not contain stream codec metadata, so the operations catalog fills these
-// fields lazily and keeps the result across page loads/catalog refreshes.
-export async function recordProviderCatalogCodecs(ownerId, sourceId, kind, id, videoCodec, audioCodec) {
-  if (!ownerId || !sourceId || !id || !['movie', 'channel'].includes(String(kind))) return;
-  const video = String(videoCodec || '').trim().toLowerCase();
-  const audio = String(audioCodec || '').trim().toLowerCase();
-  if (!video && !audio) return;
-  const { items } = await collections();
-  await items.updateOne(
-    { ownerId: String(ownerId), sourceId: String(sourceId), kind: String(kind), id: String(id) },
-    { $set: { videoCodec: video, audioCodec: audio, codecsProbedAt: new Date() } },
-  );
-}
-
-export async function getProviderMediaMetadata(ownerId, sourceId, kind, id) {
-  if (!ownerId || !sourceId || !kind || !id) return null;
-  const { media } = await collections();
-  return media.findOne(
-    { ownerId: String(ownerId), sourceId: String(sourceId), kind: String(kind), id: String(id) },
-    { projection: { _id: 0, ownerId: 0 } },
-  );
-}
-
-export async function getProviderMediaMetadataByIds(ownerId, sourceId, kind, ids) {
-  const wanted = [...new Set((Array.isArray(ids) ? ids : []).map(String).filter(Boolean))];
-  if (!ownerId || !sourceId || !kind || !wanted.length) return [];
-  const { media } = await collections();
-  return media.find({ ownerId: String(ownerId), sourceId: String(sourceId), kind: String(kind), id: { $in: wanted } })
-    .project({ _id: 0, ownerId: 0 }).toArray();
-}
-
-export async function recordProviderMediaMetadata(ownerId, sourceId, kind, id, values = {}) {
-  if (!ownerId || !sourceId || !kind || !id) return;
-  const videoCodec = String(values.videoCodec || '').trim().toLowerCase();
-  const audioCodec = String(values.audioCodec || '').trim().toLowerCase();
-  const duration = String(values.duration || '').trim();
-  if (!videoCodec && !audioCodec && !duration) return;
-  const { media } = await collections();
-  await media.updateOne(
-    { ownerId: String(ownerId), sourceId: String(sourceId), kind: String(kind), id: String(id) },
-    { $set: { videoCodec, audioCodec, duration, probedAt: new Date() } },
-    { upsert: true },
   );
 }
 

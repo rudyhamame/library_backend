@@ -3,7 +3,7 @@ import { MongoClient } from 'mongodb';
 import { cleanLibraryCategoryName, libraryItemKey, reconcileLibraryCategories, validLibraryKinds } from './library-category-core.js';
 
 const mongoUri = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017';
-const databaseName = process.env.MONGODB_DB || 'rh_stream';
+const databaseName = process.env.MONGODB_DB || 'rh_roku';
 const collectionName = process.env.MONGODB_LIBRARY_CATEGORY_COLLECTION || 'library_categories';
 let collectionPromise;
 

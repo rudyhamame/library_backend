@@ -3,7 +3,7 @@ import { MongoClient, ObjectId } from 'mongodb';
 import { accountOwnerId, profileOwnerId } from './account-library-owner.js';
 
 const mongoUri = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017';
-const databaseName = process.env.MONGODB_DB || 'rh_stream';
+const databaseName = process.env.MONGODB_DB || 'rh_roku';
 const collectionName = process.env.MONGODB_ACCOUNT_PROFILE_COLLECTION || 'account_profiles';
 const maxProfiles = Math.max(2, Math.min(8, Number.parseInt(process.env.MAX_ACCOUNT_PROFILES || '5', 10) || 5));
 const avatars = new Set(['lime', 'teal', 'amber', 'violet', 'rose', 'blue']);
@@ -29,7 +29,8 @@ async function profileCollection() {
 }
 
 export function normalizeProfileName(value) {
-  return String(value || '').normalize('NFKC').replace(/\s+/g, ' ').trim().slice(0, 30);
+  const name = String(value || '').normalize('NFKC').replace(/\s+/g, ' ').trim();
+  return name ? (name.charAt(0).toUpperCase() + name.slice(1)).slice(0, 30) : '';
 }
 
 function validProfilePin(value) { return /^\d{4}$/.test(String(value || '')); }
@@ -135,14 +136,12 @@ async function ensureDefaultProfileRecord(accountId, preferredName = 'Main') {
 }
 
 export async function getAccountProfiles(accountId) {
-  await ensureDefaultProfile(accountId);
   await backfillMissingCodes(accountId);
   const rows = await (await profileCollection()).find({ accountId: new ObjectId(String(accountId)) }).sort({ position: 1, createdAt: 1 }).toArray();
   return rows.map(publicProfile);
 }
 
 export async function getAccountProfile(accountId, profileId) {
-  await ensureDefaultProfile(accountId);
   await backfillMissingCodes(accountId);
   return (await profileCollection()).findOne({ accountId: new ObjectId(String(accountId)), id: String(profileId || '') });
 }
@@ -151,7 +150,6 @@ export async function getAccountProfile(accountId, profileId) {
 // only to pin down which of the partner's profiles is being linked - never
 // to look someone up across accounts.
 export async function getProfileByCode(accountId, code) {
-  await ensureDefaultProfile(accountId);
   await backfillMissingCodes(accountId);
   const normalized = String(code || '').trim().toUpperCase();
   if (!normalized) return null;
@@ -230,7 +228,6 @@ export async function setProfilePartnerEmail(accountId, profileId, email, profil
 }
 
 export async function createAccountProfile(accountId, input = {}) {
-  await ensureDefaultProfile(accountId);
   const collection = await profileCollection();
   const normalizedAccountId = new ObjectId(String(accountId));
   const count = await collection.countDocuments({ accountId: normalizedAccountId });

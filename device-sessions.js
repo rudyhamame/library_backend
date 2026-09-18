@@ -1,4 +1,4 @@
-import { createHash, createHmac, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomBytes, randomInt, scryptSync, timingSafeEqual } from 'node:crypto';
 import { MongoClient, ObjectId } from 'mongodb';
 import { deduplicateXtreamSources, moveXtreamSources } from './xtream-store.js';
 import { accountOwnerId, canonicalSessionOwner } from './account-library-owner.js';
@@ -7,21 +7,25 @@ import { movePlaybackOwners } from './playback-store.js';
 import { moveFavoriteOwners } from './favorites-store.js';
 import { moveStreamingHistoryOwners } from './streaming-history-store.js';
 import { deleteAccountProfilesAndData, ensureDefaultProfile, getAccountProfile, getProfileRokuSourcePreferenceByOwner, verifyProfilePin } from './account-profile-store.js';
-import { sendPasswordResetEmail } from './email.js';
+import { sendAccountDeletionEmail, sendPasswordResetEmail, sendSignupVerificationEmail } from './email.js';
 
 const sessions = new Map();
 const pairingTtlMs = 15 * 60 * 1000;
 const maxPairingSessions = Math.max(50, Number.parseInt(process.env.MAX_PAIRING_SESSIONS || '500', 10) || 500);
 const tokenTtlMs = 365 * 24 * 60 * 60 * 1000;
 const mongoUri = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017';
-const databaseName = process.env.MONGODB_DB || 'rh_stream';
+const databaseName = process.env.MONGODB_DB || 'rh_roku';
 const generalDatabaseName = process.env.MONGODB_GENERAL_DB || 'rh_general';
 const collectionName = process.env.MONGODB_DEVICE_COLLECTION || 'device_profiles';
 const accountCollectionName = process.env.MONGODB_ACCOUNT_COLLECTION || 'accounts';
+const verifiedEmailCollectionName = process.env.MONGODB_VERIFIED_EMAIL_COLLECTION || 'verified_emails';
+const signupVerificationCollectionName = process.env.MONGODB_SIGNUP_VERIFICATION_COLLECTION || 'signup_verifications';
 const signingSecret = process.env.DEVICE_AUTH_SECRET || 'local-development-secret-change-before-production';
 const frontendUrl = process.env.FRONTEND_URL || 'http://127.0.0.1:8787';
 let profilesPromise;
 const accountsPromises = new Map();
+const verifiedEmailPromises = new Map();
+const signupVerificationPromises = new Map();
 const heartbeatCache = new Map();
 const heartbeatIntervalMs = 10_000;
 const runningWindowMs = 30_000;
@@ -59,8 +63,54 @@ async function accounts(realm = 'roku') {
   return promise;
 }
 
+async function verifiedEmails(realm = 'roku') {
+  const normalizedRealm = normalizeAccountRealm(realm);
+  let promise = verifiedEmailPromises.get(normalizedRealm);
+  if (!promise) {
+    promise = new MongoClient(mongoUri, { serverSelectionTimeoutMS: 5000 }).connect()
+      .then(async client => {
+        const dbName = normalizedRealm === 'general' ? generalDatabaseName : databaseName;
+        const collection = client.db(dbName).collection(verifiedEmailCollectionName);
+        await collection.createIndex({ email: 1 }, { unique: true });
+        return collection;
+      })
+      .catch(error => { verifiedEmailPromises.delete(normalizedRealm); throw error; });
+    verifiedEmailPromises.set(normalizedRealm, promise);
+  }
+  return promise;
+}
+
+async function signupVerificationStore(realm = 'roku') {
+  const normalizedRealm = normalizeAccountRealm(realm);
+  let promise = signupVerificationPromises.get(normalizedRealm);
+  if (!promise) {
+    promise = new MongoClient(mongoUri, { serverSelectionTimeoutMS: 5000 }).connect()
+      .then(async client => {
+        const dbName = normalizedRealm === 'general' ? generalDatabaseName : databaseName;
+        const collection = client.db(dbName).collection(signupVerificationCollectionName);
+        await collection.createIndex({ email: 1 }, { unique: true });
+        return collection;
+      })
+      .catch(error => { signupVerificationPromises.delete(normalizedRealm); throw error; });
+    signupVerificationPromises.set(normalizedRealm, promise);
+  }
+  return promise;
+}
+
+async function isEmailVerified(email, realm) {
+  return Boolean(await (await verifiedEmails(realm)).findOne({ email, status: 'VERIFIED' }, { projection: { _id: 1 } }));
+}
+
+async function markEmailVerified(email, realm) {
+  await (await verifiedEmails(realm)).updateOne(
+    { email },
+    { $set: { email, status: 'VERIFIED', verifiedAt: new Date(), updatedAt: new Date() } },
+    { upsert: true },
+  );
+}
+
 export async function initializeAccountDatabases() {
-  await Promise.all([accounts('roku'), accounts('general')]);
+  await Promise.all([accounts('roku'), accounts('general'), verifiedEmails('roku'), verifiedEmails('general'), signupVerificationStore('roku'), signupVerificationStore('general')]);
   return { roku: databaseName, general: generalDatabaseName };
 }
 
@@ -124,6 +174,8 @@ function validEmail(email) { return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) && 
 
 const resetCodes = new Map();
 const resetCodeTtlMs = 15 * 60 * 1000;
+const signupVerifications = new Map();
+const accountSignupVerifications = new Map();
 function purgeResetCodes() {
   const now = Date.now();
   for (const [code, entry] of resetCodes) if (entry.expiresAt < now) resetCodes.delete(code);
@@ -348,30 +400,133 @@ export async function autoLoginDeviceSession(code) {
   return { token: issueToken(session, 'browser'), deviceId: session.deviceId };
 }
 
-async function consumePairing(code, email, password, setup, firstName = '', lastName = '') {
+export async function verifyDeviceSignupCode(code, email, verificationCode) {
   const session = getDeviceSession(code);
   if (!session) return { error: 'Pairing code expired or invalid' };
   if (session.purpose === 'android-remote') return { error: 'Sign in through the RH Android app, then scan again' };
   const normalizedEmail = normalizeEmail(email);
   if (!validEmail(normalizedEmail)) return { error: 'Enter a valid email address' };
-  if (!validPassword(password)) return { error: 'Password must contain at least 8 characters' };
+  const pending = await (await signupVerificationStore('roku')).findOne({ email: normalizedEmail });
+  if (!pending) return { error: 'Verification code not found' };
+  if (pending.email !== normalizedEmail || pending.code !== String(verificationCode || '').trim()) {
+    return { error: 'Incorrect verification code', verificationInvalid: true };
+  }
+  await markEmailVerified(normalizedEmail, 'roku');
+  return { verificationValid: true };
+}
+
+async function getSignupSession(code, email) {
+  const session = getDeviceSession(code);
+  if (!session) return { error: 'Pairing code expired or invalid' };
+  if (session.purpose === 'android-remote') return { error: 'Sign in through the RH Android app, then scan again' };
+  const normalizedEmail = normalizeEmail(email);
+  if (!validEmail(normalizedEmail)) return { error: 'Enter a valid email address' };
+  if (await (await accounts('roku')).findOne({ email: normalizedEmail }, { projection: { _id: 1 } })) {
+    return { error: 'An account with this email already exists. Sign in instead.' };
+  }
+  return { session, normalizedEmail };
+}
+
+export async function requestDeviceSignupVerification(code, email, password, firstName = '', lastName = '') {
+  const context = await getSignupSession(code, email);
+  if (context.error) return context;
+  const { normalizedEmail } = context;
+  if (await isEmailVerified(normalizedEmail, 'roku')) return { verificationNotRequired: true };
+  const store = await signupVerificationStore('roku');
+  const pending = await store.findOne({ email: normalizedEmail });
+  if (pending && pending.email === normalizedEmail) {
+    return { verificationRequired: true, verificationPending: true };
+  }
+  const signupCode = String(randomInt(100000, 1000000));
+  await store.updateOne(
+    { email: normalizedEmail },
+    { $set: {
+      email: normalizedEmail,
+      code: signupCode,
+      passwordHash: validPassword(password) ? hashPassword(password) : '',
+      firstName: String(firstName || '').trim().slice(0, 60),
+      lastName: String(lastName || '').trim().slice(0, 60),
+      resendAvailableAt: Date.now() + 60 * 1000,
+      updatedAt: new Date(),
+    }, $setOnInsert: { createdAt: new Date() } },
+    { upsert: true },
+  );
+  try { await sendSignupVerificationEmail(normalizedEmail, signupCode); }
+  catch (error) {
+    await store.updateOne({ email: normalizedEmail }, { $set: { resendAvailableAt: Date.now() } });
+    console.error('[signup verification] email send failed:', error.message);
+    return { error: 'Verification email could not be sent. Please try again.' };
+  }
+  return { verificationRequired: true, verificationSent: true };
+}
+
+export async function resendDeviceSignupVerification(code, email) {
+  const context = await getSignupSession(code, email);
+  if (context.error) return context;
+  const { normalizedEmail } = context;
+  const store = await signupVerificationStore('roku');
+  const pending = await store.findOne({ email: normalizedEmail });
+  if (!pending || pending.email !== normalizedEmail) return { error: 'Verification session expired or invalid' };
+  const resendAvailableAt = Number(pending.resendAvailableAt || 0);
+  if (resendAvailableAt > Date.now()) {
+    const secondsRemaining = Math.ceil((resendAvailableAt - Date.now()) / 1000);
+    return { error: `Send code again is available in ${secondsRemaining} seconds` };
+  }
+  const signupCode = String(randomInt(100000, 1000000));
+  await store.updateOne(
+    { email: normalizedEmail },
+    { $set: { code: signupCode, resendAvailableAt: Date.now() + 60 * 1000, updatedAt: new Date() } },
+  );
+  try { await sendSignupVerificationEmail(normalizedEmail, signupCode, true); }
+  catch (error) {
+    await store.updateOne({ email: normalizedEmail }, { $set: { resendAvailableAt: Date.now() } });
+    console.error('[signup verification] email send failed:', error.message);
+    return { error: 'Verification email could not be sent. Please try again.' };
+  }
+  return { verificationResent: true };
+}
+
+async function consumePairing(code, email, password, setup, firstName = '', lastName = '', verificationCode = '', verificationBypassed = false) {
+  const session = getDeviceSession(code);
+  if (!session) return { error: 'Pairing code expired or invalid' };
+  if (session.purpose === 'android-remote') return { error: 'Sign in through the RH Android app, then scan again' };
+  const normalizedEmail = normalizeEmail(email);
+  if (!validEmail(normalizedEmail)) return { error: 'Enter a valid email address' };
+  if (!validPassword(password) && !(setup && !verificationCode)) return { error: 'Password must contain at least 8 characters' };
   const deviceCollection = await profiles();
   const accountCollection = await accounts('roku');
   const deviceOwnerId = ownerIdFor(session.deviceId);
   const profile = await deviceCollection.findOne({ deviceId: session.deviceId });
   let account;
+  let createdAccount = false;
   if (setup) {
     if (profile?.accountId) return { error: 'This Roku is already activated. Sign in instead.' };
     if (await accountCollection.findOne({ email: normalizedEmail }, { projection: { _id: 1 } })) return { error: 'An account with this email already exists. Sign in instead.' };
+    if (!verificationCode && !verificationBypassed) {
+      return requestDeviceSignupVerification(code, normalizedEmail, password, firstName, lastName);
+    }
+    const pending = await (await signupVerificationStore('roku')).findOne({ email: normalizedEmail });
+    if (verificationBypassed) {
+      if (!(await isEmailVerified(normalizedEmail, 'roku'))) return { error: 'Verification code expired or invalid' };
+      await (await signupVerificationStore('roku')).deleteOne({ email: normalizedEmail });
+    } else if (!pending) {
+      await (await signupVerificationStore('roku')).deleteOne({ email: normalizedEmail });
+      return { error: 'Verification code expired or invalid' };
+    } else {
+      if (pending.email !== normalizedEmail || pending.code !== String(verificationCode).trim()) return { error: 'Incorrect verification code' };
+      await markEmailVerified(normalizedEmail, 'roku');
+      if (!pending.passwordHash && !validPassword(password)) return { error: 'Password must contain at least 8 characters' };
+      await (await signupVerificationStore('roku')).deleteOne({ email: normalizedEmail });
+    }
     let created;
     try {
-      created = await accountCollection.insertOne({ email: normalizedEmail, passwordHash: hashPassword(password), firstName: String(firstName || '').trim().slice(0, 60), lastName: String(lastName || '').trim().slice(0, 60), createdAt: new Date(), updatedAt: new Date() });
+      created = await accountCollection.insertOne({ email: normalizedEmail, passwordHash: pending?.passwordHash || hashPassword(password), firstName: pending?.firstName || String(firstName || '').trim().slice(0, 60), lastName: pending?.lastName || String(lastName || '').trim().slice(0, 60), createdAt: new Date(), updatedAt: new Date() });
     } catch (error) {
       if (error?.code === 11000) return { error: 'An account with this email already exists. Sign in instead.' };
       throw error;
     }
     account = { _id: created.insertedId };
-    await ensureDefaultProfile(String(account._id), firstName || 'Main');
+    createdAccount = true;
   } else {
     account = await accountCollection.findOne({ email: normalizedEmail });
     // A profile created by the earlier device-password implementation can be
@@ -388,29 +543,50 @@ async function consumePairing(code, email, password, setup, firstName = '', last
   if (profile?.accountId && String(profile.accountId) === String(account._id) && profile.profileId) {
     selectedProfile = await getAccountProfile(account._id, profile.profileId);
   }
-  if (!selectedProfile) selectedProfile = await ensureDefaultProfile(account._id);
-  session.profileId = selectedProfile.id;
-  session.ownerId = selectedProfile.isDefault ? canonicalOwner : selectedProfile.ownerId;
+  session.profileId = selectedProfile?.id || null;
+  session.ownerId = selectedProfile?.isDefault ? canonicalOwner : selectedProfile?.ownerId || canonicalOwner;
   await deviceCollection.updateOne(
     { deviceId: session.deviceId },
-    { $setOnInsert: { ownerId: deviceOwnerId, deviceId: session.deviceId, createdAt: new Date() }, $set: { accountId: account._id, profileId: selectedProfile.id, linkedAt: new Date(), updatedAt: new Date() } },
+    { $setOnInsert: { ownerId: deviceOwnerId, deviceId: session.deviceId, createdAt: new Date() }, $set: { accountId: account._id, profileId: session.profileId, linkedAt: new Date(), updatedAt: new Date() } },
     { upsert: true },
   );
   session.approvedAt = Date.now();
   return { token: issueToken(session, 'browser'), deviceId: session.deviceId };
 }
 
-export function setupDeviceSession(code, email, password, firstName, lastName) { return consumePairing(code, email, password, true, firstName, lastName); }
+export function setupDeviceSession(code, email, password, firstName, lastName, verificationCode, verificationBypassed = false) { return consumePairing(code, email, password, true, firstName, lastName, verificationCode, verificationBypassed); }
 export function loginDeviceSession(code, email, password) { return consumePairing(code, email, password, false); }
 
-export async function registerAccount(email, password, firstName = '', lastName = '', realm = 'general') {
+export async function registerAccount(email, password, firstName = '', lastName = '', realm = 'general', verificationId = '', verificationCode = '') {
   const normalizedEmail = normalizeEmail(email);
   if (!validEmail(normalizedEmail)) return { error: 'Enter a valid email address' };
   if (!validPassword(password)) return { error: 'Password must contain at least 8 characters' };
   const collection = await accounts(realm);
   if (await collection.findOne({ email: normalizedEmail }, { projection: { _id: 1 } })) return { error: 'An account with this email already exists. Sign in instead.' };
+  let passwordHash = hashPassword(password);
+  if (!verificationId) {
+    if (await isEmailVerified(normalizedEmail, realm)) {
+      const created = await collection.insertOne({ email: normalizedEmail, passwordHash, firstName: String(firstName || '').trim().slice(0, 60), lastName: String(lastName || '').trim().slice(0, 60), createdAt: new Date(), updatedAt: new Date() });
+      await ensureDefaultProfile(String(created.insertedId), firstName || 'Main');
+      return { ok: true };
+    }
+    const id = randomBytes(18).toString('base64url');
+    const code = String(randomInt(100000, 1000000));
+    accountSignupVerifications.set(id, { email: normalizedEmail, passwordHash, firstName: String(firstName || '').trim().slice(0, 60), lastName: String(lastName || '').trim().slice(0, 60), realm: normalizeAccountRealm(realm), code });
+    try { await sendSignupVerificationEmail(normalizedEmail, code); }
+    catch (error) { console.error('[signup verification] email send failed:', error.message); }
+    return { verificationRequired: true, verificationId: id };
+  }
+  const pending = accountSignupVerifications.get(String(verificationId));
+  if (!pending || pending.email !== normalizedEmail || pending.realm !== normalizeAccountRealm(realm) || pending.code !== String(verificationCode).trim()) {
+    accountSignupVerifications.delete(String(verificationId));
+    return { error: 'Verification code expired or invalid' };
+  }
+  accountSignupVerifications.delete(String(verificationId));
+  passwordHash = pending.passwordHash;
+  await markEmailVerified(normalizedEmail, realm);
   try {
-    const created = await collection.insertOne({ email: normalizedEmail, passwordHash: hashPassword(password), firstName: String(firstName || '').trim().slice(0, 60), lastName: String(lastName || '').trim().slice(0, 60), createdAt: new Date(), updatedAt: new Date() });
+    const created = await collection.insertOne({ email: normalizedEmail, passwordHash, firstName: pending.firstName, lastName: pending.lastName, createdAt: new Date(), updatedAt: new Date() });
     await ensureDefaultProfile(String(created.insertedId), firstName || 'Main');
   } catch (error) {
     if (error?.code === 11000) return { error: 'An account with this email already exists. Sign in instead.' };
@@ -704,6 +880,8 @@ export async function deleteAccount(accountId, currentPassword, realm = 'roku') 
   await deleteAccountProfilesAndData(accountId);
   await collection.deleteOne({ _id: normalizedAccountId });
   for (const [code, session] of sessions) if (String(session.accountId || '') === String(accountId)) sessions.delete(code);
+  try { await sendAccountDeletionEmail(account.email); }
+  catch (error) { console.error('[account deletion] goodbye email failed:', error.message); }
   return { ok: true };
 }
 

@@ -9,7 +9,7 @@ test('General RH and Roku RH authenticate against separate account databases', a
   assert.match(sessions, /normalizedRealm === 'general' \? generalDatabaseName : databaseName/);
   assert.match(sessions, /realm: normalizeAccountRealm\(session\.realm\)/);
   assert.match(server, /req\.body\?\.realm === 'roku' \? 'roku' : 'general'/);
-  assert.match(server, /registerAccount\([^\n]*'general'\)/);
+  assert.match(server, /registerAccount\([^\n]*'general'(?:,|\))/);
 });
 
 test('Android General User has no Roku pairing or casting surface', async () => {

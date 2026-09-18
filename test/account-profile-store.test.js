@@ -4,6 +4,7 @@ import { MAX_ACCOUNT_PROFILES, hashProfilePin, normalizeProfileName, verifyProfi
 
 test('profile names are normalized and bounded', () => {
   assert.equal(normalizeProfileName('  Family   Room  '), 'Family Room');
+  assert.equal(normalizeProfileName('rudy'), 'Rudy');
   assert.equal(normalizeProfileName('x'.repeat(50)).length, 30);
   assert.equal(normalizeProfileName('   '), '');
 });

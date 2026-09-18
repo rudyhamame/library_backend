@@ -20,7 +20,8 @@ import { clearStreamingHistory, deleteStreamingSession, getStreamingContinueWatc
 import { getFavorites, toggleFavorite } from './favorites-store.js';
 import { getSeriesWatchOverride, toggleSeriesWatchOverride } from './series-watch-overrides.js';
 import { accountOwnerId, profileOwnerId } from './account-library-owner.js';
-import { authorizeDeviceSession, autoLoginDeviceSession, castHandoffLink, changeAccountPassword, claimAutomaticPairing, confirmPasswordReset, createDeviceSession, deleteAccount, getAccountBasicInfo, getDeviceWeatherLocations, getLinkedDevices, getPairingInfo, getRokuDeviceSessionStatus, getRokuSourcePreferenceByOwner, initializeAccountDatabases, isProfileOnline, isRokuSessionLinked, listAllAccountsBasic, listAllLinkedDevices, loginAccount, loginDeviceSession, recordDeviceHeartbeat, registerAccount, registerBrowserDevice, requestPasswordReset, resolveAccountByEmail, resolveDeviceToken, saveDeviceWeatherLocations, selectAccountProfile, setupDeviceSession, unlinkAccountDevice } from './device-sessions.js';
+import { syncCatalogItems } from './catalog-store.js';
+import { authorizeDeviceSession, autoLoginDeviceSession, castHandoffLink, changeAccountPassword, claimAutomaticPairing, confirmPasswordReset, createDeviceSession, deleteAccount, getAccountBasicInfo, getDeviceWeatherLocations, getLinkedDevices, getPairingInfo, getRokuDeviceSessionStatus, getRokuSourcePreferenceByOwner, initializeAccountDatabases, isProfileOnline, isRokuSessionLinked, listAllAccountsBasic, listAllLinkedDevices, loginAccount, loginDeviceSession, recordDeviceHeartbeat, registerAccount, registerBrowserDevice, requestDeviceSignupVerification, requestPasswordReset, resendDeviceSignupVerification, resolveAccountByEmail, resolveDeviceToken, saveDeviceWeatherLocations, selectAccountProfile, setupDeviceSession, unlinkAccountDevice, verifyDeviceSignupCode } from './device-sessions.js';
 import { createAccountProfile, deleteAccountProfile, ensureDefaultProfile, getAccountProfile, getAccountProfiles, getProfileByCode, getProfilePartnerCode, getProfilePartnerEmail, setProfilePartnerEmail, setProfileRokuSourcePreference, updateAccountProfile } from './account-profile-store.js';
 import { createLibraryCategory, deleteLibraryCategory, getManagedLibrary, renameLibraryCategory, replaceLibraryCategoryItems } from './library-category-store.js';
 import { enforceLibraryOnly } from './library-route-policy.js';
@@ -72,6 +73,7 @@ const normalizeSearchText = (value) => String(value || '')
 const rokuInitialSeriesLimit = Math.min(4, Math.max(1, Number.parseInt(process.env.ROKU_INITIAL_SERIES_LIMIT || '4', 10)));
 const rokuMoviePageLimit = 10;
 const rokuCatalogPageLimit = 10;
+const welcomeRailLimit = 10;
 const xtreamItemsInFlight = new Map();
 // Self-hosted on a real machine now (not a 256 MB cloud box), so a few catalog
 // downloads can run at once instead of strictly one.
@@ -214,7 +216,7 @@ async function getIndexedXtreamSeriesEpisodes(source, seriesId) {
 // how much the clients browse, and the last good snapshot keeps serving when
 // the provider blocks or errors. There is no timer - refreshes are triggered
 // only by a real client request for a missing or stale kind.
-const CATALOG_SNAPSHOT_TTL_MS = Math.max(5 * 60_000, Number.parseInt(process.env.CATALOG_SNAPSHOT_TTL_MS || '2700000', 10) || 45 * 60_000);
+const CATALOG_SNAPSHOT_TTL_MS = Math.max(5 * 60_000, Number.parseInt(process.env.CATALOG_SNAPSHOT_TTL_MS || '3600000', 10) || 60 * 60_000);
 const catalogSnapshotJobs = new Map();
 
 function refreshCatalogSnapshot(ownerId, source, kind) {
@@ -235,6 +237,7 @@ function refreshCatalogSnapshot(ownerId, source, kind) {
       // show, not media; its episode URLs are added when details are expanded.
       providerUrl: kind === 'series' ? '' : await sourceProviderUrl(source, kind, item.id, item.extension),
     })));
+    await syncCatalogItems({ accountId: ownerId, providerId: String(source._id), providerName: source.name, kind, items: storedCatalog });
     await replaceProviderCatalog(ownerId, String(source._id), source.name, kind, storedCatalog);
     if (Array.isArray(categories)) {
       await replaceProviderCatalogCategories(ownerId, String(source._id), kind,
@@ -1001,7 +1004,7 @@ app.post('/api/device-session/auto-login', async (req, res) => {
 });
 app.post('/api/device-session/setup', async (req, res) => {
   try {
-    const result = await setupDeviceSession(req.body?.code, req.body?.email, req.body?.password, req.body?.firstName, req.body?.lastName);
+    const result = await setupDeviceSession(rokuBodyField(req.body, 'code'), rokuBodyField(req.body, 'email'), rokuBodyField(req.body, 'password'), rokuBodyField(req.body, 'firstName'), rokuBodyField(req.body, 'lastName'), rokuBodyField(req.body, 'verificationCode'));
     if (result.error) return res.status(result.error.includes('expired') ? 404 : 400).json(result);
     res.json(result);
   } catch (error) { res.status(500).json({ error: error.message }); }
@@ -1018,14 +1021,48 @@ app.post('/api/device-session/login', async (req, res) => {
 // endpoint keeps the existing short-lived, device-bound session model, but
 // returns only the Roku token after credentials have been validated. It never
 // returns the browser token produced by the shared account helper.
+// BrightScript's FormatJson lowercases unquoted associative-array keys, so a
+// Roku client's { verificationResend: true } arrives here as
+// { verificationresend: true }. Read Roku request bodies through this so
+// camelCase field names still match regardless of which casing sent them.
+function rokuBodyField(body, name) {
+  return body?.[name] ?? body?.[name.toLowerCase()];
+}
+
 app.post('/api/roku/device-session/on-device-auth', async (req, res) => {
   try {
-    const code = String(req.body?.code || '').trim();
-    const mode = req.body?.mode === 'signup' ? 'signup' : 'signin';
-    const result = mode === 'signup'
-      ? await setupDeviceSession(code, req.body?.email, req.body?.password, req.body?.firstName, req.body?.lastName)
-      : await loginDeviceSession(code, req.body?.email, req.body?.password);
-    if (result.error) return res.status(result.error.includes('expired') ? 404 : result.error.includes('Incorrect') ? 401 : 400).json(result);
+    const body = req.body;
+    const code = String(rokuBodyField(body, 'code') || '').trim();
+    const mode = rokuBodyField(body, 'mode') === 'signup' ? 'signup' : 'signin';
+    const email = rokuBodyField(body, 'email');
+    const password = rokuBodyField(body, 'password');
+    const firstName = rokuBodyField(body, 'firstName');
+    const lastName = rokuBodyField(body, 'lastName');
+    const verificationCode = rokuBodyField(body, 'verificationCode');
+    const authPhase = mode === 'signup' && rokuBodyField(body, 'verificationResend')
+      ? 'resend'
+      : mode === 'signup' && rokuBodyField(body, 'verificationOnly')
+        ? 'verify'
+        : mode === 'signup' && rokuBodyField(body, 'verificationRequest')
+          ? 'request'
+          : mode === 'signup'
+            ? 'finalize'
+            : 'signin';
+    const result = mode === 'signup' && rokuBodyField(body, 'verificationResend')
+      ? await resendDeviceSignupVerification(code, email)
+      : mode === 'signup' && rokuBodyField(body, 'verificationOnly')
+        ? await verifyDeviceSignupCode(code, email, verificationCode)
+        : mode === 'signup' && rokuBodyField(body, 'verificationRequest')
+          ? await requestDeviceSignupVerification(code, email, password, firstName, lastName)
+      : mode === 'signup'
+        ? await setupDeviceSession(code, email, password, firstName, lastName, verificationCode, rokuBodyField(body, 'verificationBypassed'))
+      : await loginDeviceSession(code, email, password);
+    if (result.error) {
+      console.log(`[roku on-device-auth] phase=${authPhase} outcome=error message=${result.error}`);
+      return res.status(result.error.includes('expired') ? 404 : result.error.includes('Incorrect') ? 401 : 400).json(result);
+    }
+    console.log(`[roku on-device-auth] phase=${authPhase} outcome=${result.token ? 'token' : result.verificationValid ? 'verification-valid' : result.verificationResent ? 'resent' : result.verificationRequired ? 'verification-required' : result.verificationNotRequired ? 'verification-not-required' : 'ok'}`);
+    if (result.verificationRequired || result.verificationNotRequired || result.verificationValid || result.verificationResent) return res.json(result);
     const rokuSession = await getRokuDeviceSessionStatus(code);
     if (!rokuSession || rokuSession.status !== 'approved' || !rokuSession.token) {
       return res.status(500).json({ error: 'Roku authorization could not be completed' });
@@ -1261,8 +1298,9 @@ app.post('/api/account/login', async (req, res) => {
 });
 app.post('/api/account/signup', async (req, res) => {
   try {
-    const result = await registerAccount(req.body?.email, req.body?.password, req.body?.firstName, req.body?.lastName, 'general');
+    const result = await registerAccount(req.body?.email, req.body?.password, req.body?.firstName, req.body?.lastName, 'general', req.body?.verificationId, req.body?.verificationCode);
     if (result.error) return res.status(400).json(result);
+    if (result.verificationRequired) return res.json(result);
     // Sign-up is also authentication. Return the same browser session payload
     // as sign-in so a newly created account can continue without a second
     // credential round-trip.
@@ -1996,7 +2034,7 @@ app.get('/api/roku/bootstrap', async (req, res) => {
     let catalogMeta = null;
     if (selectedSource) {
       for (const kind of ['series', 'movie', 'channel']) void ensureCatalogSnapshot(accountOwner, selectedSource, kind);
-      const r = await getProviderCatalogRails(accountOwner, selectedSourceId, 12).catch(() => null);
+      const r = await getProviderCatalogRails(accountOwner, selectedSourceId, welcomeRailLimit).catch(() => null);
       if (r) rails = { series: r.series || [], movie: r.movie || [], channel: r.channel || [] };
       catalogMeta = await getProviderCatalogMeta(accountOwner, selectedSourceId).catch(() => null);
     }
@@ -2005,7 +2043,7 @@ app.get('/api/roku/bootstrap', async (req, res) => {
         ? selectedXtreamItem(selectedSource, { ...item, sourceId: selectedSourceId })
         : { ...item, sourceId: selectedSourceId }))
       .filter(Boolean)
-      .slice(0, 10);
+      .slice(0, welcomeRailLimit);
     // Favorites store only id/title/kind - re-hydrate each one against the
     // catalog snapshot for its real logo/category, and fall back to the
     // selected source when the saved favorite has no sourceId (that snapshot

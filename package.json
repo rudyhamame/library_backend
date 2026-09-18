@@ -6,6 +6,8 @@
     "dev": "node server.js",
     "start": "node server.js",
     "start:production": "node server.js",
+    "initialize:account-schema": "node scripts/initialize-account-schema.js",
+    "migrate:account-roots": "node scripts/migrate-account-roots.js",
     "test": "node --test test/*.test.js",
     "test:media-leak": "node scripts/media-leak-test.js"
   },

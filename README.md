@@ -36,4 +36,6 @@ This service runs on the local machine only, managed by the systemd units in
 `../deploy/` and reachable by clients on the LAN. Set
 `MONGODB_URI`, `DEVICE_AUTH_SECRET`, `PUBLIC_BASE_URL`, and `FRONTEND_URL` in
 `.env` (see `.env.example`); use the same secret values as the Roku backend.
-Never commit `.env` or provider credentials.
+Never commit `.env` or provider credentials. Transactional account emails use
+Brevo; set `BREVO_API_KEY`, `EMAIL_FROM_ADDRESS`, and optionally
+`EMAIL_FROM_NAME` in the library backend runtime environment.

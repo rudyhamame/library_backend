@@ -6,7 +6,7 @@ if (!mongoUri) throw new Error('MONGODB_URI is required');
 
 const client = await new MongoClient(mongoUri, { serverSelectionTimeoutMS: 8_000 }).connect();
 try {
-  const db = client.db(process.env.MONGODB_DB || 'rh_stream');
+  const db = client.db(process.env.MONGODB_DB || 'rh_roku');
   const accounts = db.collection(process.env.MONGODB_ACCOUNT_COLLECTION || 'accounts');
   const profiles = db.collection(process.env.MONGODB_DEVICE_COLLECTION || 'device_profiles');
   const sources = db.collection(process.env.MONGODB_XTREAM_COLLECTION || 'xtream_sources');

@@ -17,7 +17,7 @@ if (!mongoUri) throw new Error('MONGODB_URI is required');
 
 const client = await new MongoClient(mongoUri, { serverSelectionTimeoutMS: 8_000 }).connect();
 try {
-  const db = client.db(process.env.MONGODB_DB || 'rh_stream');
+  const db = client.db(process.env.MONGODB_DB || 'rh_roku');
   const collection = db.collection(process.env.MONGODB_STREAMING_HISTORY_COLLECTION || 'streaming_history');
 
   const all = await collection.find({}).sort({ updatedAt: -1, startedAt: -1 }).toArray();

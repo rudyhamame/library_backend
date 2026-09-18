@@ -6,7 +6,6 @@ import { accountOwnerId } from '../account-library-owner.js';
 const client = await new MongoClient(process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017', { serverSelectionTimeoutMS: 10_000 }).connect();
 const db = client.db(process.env.MONGODB_DB || 'rh_roku');
 const names = {
-  categories: process.env.MONGODB_LIBRARY_CATEGORY_COLLECTION || 'library_categories',
   favorites: process.env.MONGODB_FAVORITES_COLLECTION || 'favorites',
   history: process.env.MONGODB_STREAMING_HISTORY_COLLECTION || 'streaming_history',
 };
@@ -37,21 +36,6 @@ try {
       }, favorite.profileId);
       await collection.updateOne({ _id: account._id }, { $unset: { library: '' } });
     }
-  }
-  for (const row of rows.categories) {
-    try { await accountForLibraryOwner(row.ownerId); }
-    catch {
-      if ((row.categories || []).length || (row.assignments || []).length) unmapped.push({ kind: 'categories', ownerId: row.ownerId });
-      continue;
-    }
-    await updateAccountLibrary(row.ownerId, library => {
-      const categories = new Map([...library.categories, ...(row.categories || []).map(item => ({ ...item, profileOwnerId: String(row.ownerId) }))].map(item => [`${item.profileOwnerId}:${item.id}`, item]));
-      const assignments = new Map([...library.assignments, ...(row.assignments || []).map(item => ({ ...item, profileOwnerId: String(row.ownerId) }))].map(item => [`${item.profileOwnerId}:${item.itemKey}`, item]));
-      library.categories = [...categories.values()];
-      library.assignments = [...assignments.values()];
-      return library;
-    });
-    migrated++;
   }
   for (const row of rows.favorites) {
     try { await accountForLibraryOwner(row.ownerId); }

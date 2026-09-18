@@ -21,7 +21,6 @@ import { getFavorites, toggleFavorite } from './favorites-store.js';
 import { accountOwnerId, profileOwnerId } from './account-library-owner.js';
 import { authorizeDeviceSession, autoLoginDeviceSession, castHandoffLink, changeAccountPassword, claimAutomaticPairing, confirmPasswordReset, createDeviceSession, deleteAccount, getAccountBasicInfo, getDeviceSession, getDeviceWeatherLocations, getLinkedDevices, getPairingInfo, getRokuDeviceSessionStatus, getRokuSourcePreferenceByOwner, initializeAccountDatabases, isProfileOnline, isRokuSessionLinked, listAllAccountsBasic, listAllLinkedDevices, loginAccount, loginDeviceSession, recordDeviceHeartbeat, registerAccount, registerBrowserDevice, requestDeviceSignupVerification, requestPasswordReset, resendDeviceSignupVerification, resolveAccountByEmail, resolveDeviceToken, saveDeviceWeatherLocations, selectAccountProfile, setupDeviceSession, unlinkAccountDevice, verifyDeviceSignupCode } from './device-sessions.js';
 import { createAccountProfile, deleteAccountProfile, getAccountProfile, getAccountProfiles, getProfileByCode, getProfilePartnerCode, getProfilePartnerEmail, setProfilePartnerEmail, setProfileRokuSourcePreference, updateAccountProfile } from './account-profile-store.js';
-import { createLibraryCategory, deleteLibraryCategory, getManagedLibrary, renameLibraryCategory, replaceLibraryCategoryItems } from './library-category-store.js';
 import { enforceLibraryOnly } from './library-route-policy.js';
 import { checkPlaylistSources } from './playlist-health.js';
 import { backdropVideoFile, ensureBackdropRoot, getRecommendationBackdrop, listBackdrops } from './recommendation-backdrop.js';
@@ -1881,25 +1880,6 @@ app.get('/api/xtream/series/:sourceId/:id', async (req, res) => {
 
 // Profile libraries contain saved items, favorites, and watch state only.
 // User-created library categories/assignments were removed from the schema.
-app.use('/api/library/categories', (req, res) => res.sendStatus(404));
-
-app.use('/api/library', (req, res, next) => {
-  if (!requestOwner(req)) return res.status(401).json({ error: 'Sign in to manage Library categories' });
-  next();
-});
-
-async function managedLibraryForRequest(req, kind = '') {
-  const ownerId = requestOwner(req);
-  return getManagedLibrary(ownerId, await getLibrarySelectedItems(ownerId), kind);
-}
-
-app.get('/api/library/categories', async (req, res) => {
-  try {
-    res.set('Cache-Control', 'no-store');
-    res.json(await managedLibraryForRequest(req, String(req.query.kind || '')));
-  } catch (error) { res.status(500).json({ error: error.message }); }
-});
-
 app.get(['/api/library/revision', '/api/roku/library/revision'], async (req, res) => {
   try {
     const ownerId = requestOwner(req);
@@ -1907,48 +1887,6 @@ app.get(['/api/library/revision', '/api/roku/library/revision'], async (req, res
     const since = Number.parseInt(String(req.query.since || '0'), 10) || 0;
     res.set('Cache-Control', 'no-store');
     res.json({ revision: await waitForLibraryRevision(ownerId, since) });
-  } catch (error) { res.status(500).json({ error: error.message }); }
-});
-
-app.post('/api/library/categories', async (req, res) => {
-  try {
-    const ownerId = requestOwner(req);
-    const result = await createLibraryCategory(ownerId, await getLibrarySelectedItems(ownerId), {
-      kind: String(req.body?.kind || ''), name: req.body?.name,
-    });
-    bumpLibraryRevision(ownerId);
-    res.status(201).json(result);
-  } catch (error) { res.status(400).json({ error: error.message }); }
-});
-
-app.patch('/api/library/categories/:id', async (req, res) => {
-  try {
-    const ownerId = requestOwner(req);
-    const result = await renameLibraryCategory(ownerId, await getLibrarySelectedItems(ownerId), req.params.id, req.body?.name);
-    if (!result) return res.sendStatus(404);
-    bumpLibraryRevision(ownerId);
-    res.json(result);
-  } catch (error) { res.status(400).json({ error: error.message }); }
-});
-
-app.put('/api/library/categories/:id/items', async (req, res) => {
-  try {
-    if (!Array.isArray(req.body?.itemKeys)) return res.status(400).json({ error: 'itemKeys must be an array' });
-    const ownerId = requestOwner(req);
-    const result = await replaceLibraryCategoryItems(ownerId, await getLibrarySelectedItems(ownerId), req.params.id, req.body.itemKeys);
-    if (!result) return res.sendStatus(404);
-    bumpLibraryRevision(ownerId);
-    res.json(result);
-  } catch (error) { res.status(400).json({ error: error.message }); }
-});
-
-app.delete('/api/library/categories/:id', async (req, res) => {
-  try {
-    const ownerId = requestOwner(req);
-    const result = await deleteLibraryCategory(ownerId, await getLibrarySelectedItems(ownerId), req.params.id);
-    if (!result) return res.sendStatus(404);
-    bumpLibraryRevision(ownerId);
-    res.json(result);
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 

@@ -24,7 +24,6 @@ export function buildAccountRoot({
   account,
   profiles = [],
   providers = [],
-  categories = null,
   favorites = [],
   playback = [],
   history = [],
@@ -74,8 +73,6 @@ export function buildAccountRoot({
       },
       favorites: groupByKind(profileFavorites),
       savedSelections: profile.library?.savedSelections || {},
-      categories: profile.library?.categories || [],
-      assignments: profile.library?.assignments || [],
       updatedAt: profile.updatedAt || null,
     };
   });
@@ -102,7 +99,6 @@ export function buildAccountRoot({
       return [providerId, selection.enabledItems];
     })),
     favorites: groupByKind(accountFavorites),
-    categories: categories ? withoutMongoId(categories) : { categories: [], assignments: [] },
     playback: accountPlayback,
     lastWatched,
     catalogRefs: catalogRefs.map(withoutMongoId),

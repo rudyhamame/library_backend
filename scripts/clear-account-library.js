@@ -12,16 +12,16 @@ try {
   const email = String(process.env.ACCOUNT_EMAIL || '').trim().toLowerCase();
   let account;
   if (email) {
-    account = await accounts.findOne({ email }, { projection: { _id: 1, metadata: 1 } });
+    account = await accounts.findOne({ email }, { projection: { _id: 1, devices: 1 } });
   } else {
-    const candidates = await accounts.find({}, { projection: { _id: 1, metadata: 1 } }).limit(2).toArray();
+    const candidates = await accounts.find({}, { projection: { _id: 1, devices: 1 } }).limit(2).toArray();
     if (candidates.length !== 1) throw new Error('Set ACCOUNT_EMAIL unless the database contains exactly one account');
     [account] = candidates;
   }
   if (!account) throw new Error('Account not found');
 
   const canonicalOwnerId = createHash('sha256').update(`account:${account._id}`).digest('hex');
-  const linkedProfiles = Array.isArray(account.metadata?.devices) ? account.metadata.devices : [];
+  const linkedProfiles = Array.isArray(account.devices) ? account.devices : [];
   const priorOwnerIds = [...new Set(linkedProfiles.map(profile => profile.ownerId).filter(Boolean))];
   await accounts.updateOne({ _id: account._id }, { $set: {
     'profiles.$[].library.categories': [], 'profiles.$[].library.assignments': [],

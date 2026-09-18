@@ -3,8 +3,6 @@ export const databaseName = process.env.MONGODB_DB || 'rh_roku';
 export const collectionNames = {
   identity: 'identity',
   meta: 'meta',
-  catalogItems: 'catalog_items',
-  catalogSyncs: 'catalog_syncs',
 };
 
 export const identityValidator = {

@@ -1,5 +1,5 @@
 import { MongoClient } from 'mongodb';
-import { catalogItemValidator, collectionNames, databaseName, identityValidator, metaValidator } from '../account-schema.js';
+import { collectionNames, databaseName, identityValidator, metaValidator } from '../account-schema.js';
 
 const mongoUri = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017';
 const client = new MongoClient(mongoUri, { serverSelectionTimeoutMS: 10_000 });
@@ -19,22 +19,11 @@ try {
   const meta = db.collection(collectionNames.meta);
   const existingEmailIndex = (await meta.indexes()).find(index => index.name === 'meta_type_email');
   if (existingEmailIndex) await meta.dropIndex('meta_type_email');
-  await ensureCollection(db, collectionNames.catalogItems, catalogItemValidator);
-  await ensureCollection(db, collectionNames.catalogSyncs, {
-    $jsonSchema: {
-      bsonType: 'object',
-      required: ['_id', 'accountId', 'providerId', 'updatedAt'],
-      properties: { _id: { bsonType: 'string' }, accountId: { bsonType: 'string' }, providerId: { bsonType: 'string' }, updatedAt: { bsonType: 'date' } },
-    },
-  });
   await Promise.all([
     db.collection(collectionNames.identity).createIndex({ 'account.email': 1 }, { unique: true, name: 'identity_email' }),
     db.collection(collectionNames.meta).createIndex({ type: 1, accountId: 1, updatedAt: -1 }, { name: 'meta_type_account_updated' }),
     db.collection(collectionNames.meta).createIndex({ type: 1, email: 1 }, { name: 'meta_auth_email', unique: true, partialFilterExpression: { type: { $in: ['verified-account', 'signup-verification'] } } }),
     db.collection(collectionNames.identity).createIndex({ 'devices.deviceId': 1 }, { name: 'identity_device_id', unique: true, sparse: true }),
-    db.collection(collectionNames.catalogItems).createIndex({ accountId: 1, providerId: 1, kind: 1, itemId: 1 }, { unique: true, name: 'catalog_account_provider_item' }),
-    db.collection(collectionNames.catalogItems).createIndex({ accountId: 1, providerId: 1, kind: 1, categoryId: 1, title: 1 }, { name: 'catalog_browse' }),
-    db.collection(collectionNames.catalogSyncs).createIndex({ accountId: 1, providerId: 1 }, { unique: true, name: 'catalog_sync_account_provider' }),
   ]);
   const collections = (await db.listCollections({}, { nameOnly: true }).toArray()).map(collection => collection.name).sort();
   console.log(JSON.stringify({ ok: true, database: databaseName, collections }, null, 2));

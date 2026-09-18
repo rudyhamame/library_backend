@@ -13,7 +13,6 @@ const names = {
   playback: process.env.MONGODB_PLAYBACK_COLLECTION || 'playback_progress',
   catalog: process.env.MONGODB_PROVIDER_CATALOG_COLLECTION || 'provider_catalog_items',
   catalogSync: process.env.MONGODB_PROVIDER_CATALOG_SYNC_COLLECTION || 'provider_catalog_syncs',
-  media: process.env.MONGODB_PROVIDER_MEDIA_METADATA_COLLECTION || 'provider_media_metadata',
   episodes: process.env.MONGODB_PROVIDER_SERIES_EPISODE_COLLECTION || 'provider_series_episodes',
 };
 
@@ -33,7 +32,7 @@ async function migrateAccount(db, account, roots) {
     Promise.resolve((account.profiles || []).flatMap(profile => Object.values(profile.library?.last_kinds_watched || {}).filter(Boolean).map(item => ({ ...item, ownerId: profile.ownerId })))),
   ]);
   const providerIds = providers.map(provider => provider._id);
-  const [catalogRefs, syncRows, mediaRefs, episodeRefs] = await Promise.all([
+  const [catalogRefs, syncRows, episodeRefs] = await Promise.all([
     db.collection(names.catalog).aggregate([
       { $match: { ownerId, sourceId: { $in: providerIds.map(String) } } },
       { $group: { _id: { sourceId: '$sourceId', kind: '$kind' }, count: { $sum: 1 }, updatedAt: { $max: '$syncedAt' } } },
@@ -42,11 +41,6 @@ async function migrateAccount(db, account, roots) {
     db.collection(names.catalogSync).aggregate([
       { $match: { ownerId } },
       { $project: { _id: 0, sourceId: 1, kinds: 1, updatedAt: 1, collection: { $literal: names.catalogSync } } },
-    ]).toArray(),
-    db.collection(names.media).aggregate([
-      { $match: { ownerId } },
-      { $group: { _id: { sourceId: '$sourceId', kind: '$kind' }, count: { $sum: 1 }, updatedAt: { $max: '$probedAt' } } },
-      { $project: { _id: 0, sourceId: '$_id.sourceId', kind: '$_id.kind', count: 1, updatedAt: 1, collection: { $literal: names.media } } },
     ]).toArray(),
     db.collection(names.episodes).aggregate([
       { $match: { ownerId } },
@@ -57,7 +51,7 @@ async function migrateAccount(db, account, roots) {
   const root = buildAccountRoot({
     account: { ...account, ownerId, realm: 'roku' }, profiles, providers, categories,
     favorites, playback, history,
-    catalogRefs: [...catalogRefs, ...syncRows, ...mediaRefs, ...episodeRefs],
+    catalogRefs: [...catalogRefs, ...syncRows, ...episodeRefs],
   });
   await roots.replaceOne({ _id: ownerId }, root, { upsert: true });
   return { accountId, ownerId, providers: providers.length, profiles: profiles.length, playback: playback.length, history: history.length };

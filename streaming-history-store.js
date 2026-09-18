@@ -15,7 +15,7 @@ const historyKey = value => {
   return 'movie';
 };
 export const seriesHistoryKey = (sourceId, seriesId) => `${String(sourceId || '')}:${String(seriesId || '')}`;
-const emptyLastKindsWatched = () => [];
+const emptyLastKindsWatched = () => ({ episode: null, movie: null, live: null });
 const watchedSeriesKey = item => `${String(item?.providerURL?.sourceId || '')}:${String(item?.providerURL?.seriesId || '')}`;
 const watchedPositionMs = value => {
   const parts = String(value || '').split(':').map(part => Number(part) || 0);
@@ -38,9 +38,13 @@ const seriesRecordHistory = record => record ? ({
   endPositionMs: watchedPositionMs(record.lastWatched),
   lastMoment: record.lastWatched || '00:00:00',
 }) : null;
-const kindRecord = update => ({ providerURL: update, lastWatched: update.lastMoment });
+const kindRecord = update => ({
+  ...update,
+  providerURL: { sourceId: update.sourceId, itemId: update.itemId, seriesId: update.seriesId },
+  lastWatched: update.lastMoment,
+});
 const kindRecordHistory = record => record?.providerURL ? ({
-  ...record.providerURL,
+  ...record,
   endPositionMs: watchedPositionMs(record.lastWatched),
   lastMoment: record.lastWatched || '00:00:00',
 }) : null;
@@ -66,10 +70,8 @@ export async function saveStreamingHistory({ ownerId, sessionId, itemId, title, 
   if (key === 'episode' && episodeNumber != null && episodeNumber !== '') update.episodeNumber = Number.parseInt(episodeNumber, 10) || 0;
   if (completed === true || String(completed).toLowerCase() === 'true') update.completed = true;
   await updateAccountLibrary(ownerId, library => {
-    const kindIndex = library.last_kinds_watched.findIndex(item => String(item?.providerURL?.kind || '') === key);
     const record = kindRecord(update);
-    if (kindIndex >= 0) library.last_kinds_watched[kindIndex] = record;
-    else library.last_kinds_watched.push(record);
+    library.last_kinds_watched[key] = record;
     if (key === 'episode' && update.sourceId && update.seriesId) {
       const record = seriesWatchedRecord(update);
       const index = library.series_last_watched.findIndex(item => watchedSeriesKey(item) === seriesHistoryKey(update.sourceId, update.seriesId));
@@ -84,22 +86,25 @@ export async function saveStreamingHistory({ ownerId, sessionId, itemId, title, 
 export async function getStreamingSession(ownerId, sessionId) {
   const library = await getAccountLibrary(ownerId);
   return [
-    ...library.last_kinds_watched.map(kindRecordHistory),
+    ...Object.values(library.last_kinds_watched).map(kindRecordHistory),
   ].find(item => item?.sessionId === String(sessionId)) || null;
 }
 
 export async function getStreamingHistory(ownerId) {
   const library = await getAccountLibrary(ownerId);
-  return library.last_kinds_watched.map(kindRecordHistory).filter(Boolean).sort((a, b) => new Date(b.updatedAt || 0) - new Date(a.updatedAt || 0));
+  return Object.values(library.last_kinds_watched).map(kindRecordHistory).filter(Boolean).sort((a, b) => new Date(b.updatedAt || 0) - new Date(a.updatedAt || 0));
 }
 
 export async function deleteStreamingSession(ownerId, sessionId) {
   if (!ownerId || !sessionId) return { deleted: 0 };
   let deleted = 0;
   await updateAccountLibrary(ownerId, library => {
-    const beforeKinds = library.last_kinds_watched.length;
-    library.last_kinds_watched = library.last_kinds_watched.filter(item => item?.providerURL?.sessionId !== String(sessionId));
-    deleted += beforeKinds - library.last_kinds_watched.length;
+    for (const key of ['episode', 'movie', 'live']) {
+      if (library.last_kinds_watched[key]?.sessionId === String(sessionId)) {
+        library.last_kinds_watched[key] = null;
+        deleted++;
+      }
+    }
     const before = library.series_last_watched.length;
     library.series_last_watched = library.series_last_watched.filter(item => item?.providerURL?.sessionId !== String(sessionId));
     deleted += before - library.series_last_watched.length;
@@ -111,7 +116,7 @@ export async function deleteStreamingSession(ownerId, sessionId) {
 export async function clearStreamingHistory(ownerId) {
   if (!ownerId) return { deleted: 0 };
   const before = await getAccountLibrary(ownerId);
-  const deleted = before.last_kinds_watched.length + before.series_last_watched.length;
+  const deleted = Object.values(before.last_kinds_watched).filter(Boolean).length + before.series_last_watched.length;
   await updateAccountLibrary(ownerId, library => {
     library.last_kinds_watched = emptyLastKindsWatched();
     library.series_last_watched = [];
@@ -127,8 +132,7 @@ export async function getStreamingResume(ownerId, { sourceId, itemId, kind, seri
   const current = key === 'episode' && seriesId
     ? library.series_last_watched.find(item => watchedSeriesKey(item) === seriesHistoryKey(sourceId, seriesId))
     : null;
-  const fallback = library.last_kinds_watched.find(record => String(record?.providerURL?.kind || '') === key);
-  const item = current ? seriesRecordHistory(current) : kindRecordHistory(fallback);
+  const item = current ? seriesRecordHistory(current) : kindRecordHistory(library.last_kinds_watched[key]);
   return item && item.sourceId === String(sourceId) && item.itemId === String(itemId) ? item : null;
 }
 
@@ -137,7 +141,7 @@ export async function getSeriesLastWatched(ownerId, sourceId, seriesId) {
   const library = await getAccountLibrary(ownerId);
   const keyed = library.series_last_watched.find(item => watchedSeriesKey(item) === seriesHistoryKey(sourceId, seriesId));
   if (keyed) return seriesRecordHistory(keyed);
-  const legacy = kindRecordHistory(library.last_kinds_watched.find(record => String(record?.providerURL?.kind || '') === 'episode'));
+  const legacy = kindRecordHistory(library.last_kinds_watched.episode);
   if (!legacy || String(legacy.sourceId) !== String(sourceId) || String(legacy.seriesId) !== String(seriesId)) return null;
   // Preserve an older single-episode record until the next playback write.
   await updateAccountLibrary(ownerId, next => {

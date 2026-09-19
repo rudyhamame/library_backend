@@ -27,7 +27,7 @@ import { backdropVideoFile, ensureBackdropRoot, getRecommendationBackdrop, listB
 import { getAndroidStartupSnapshot, saveAndroidStartupSnapshot } from './android-startup-store.js';
 import { providerPlaybackUrlIsUsable, resolveProviderMediaId, resolveProviderTitle } from './provider-playback-fields.js';
 import { acquireProviderStreamLease } from './provider-stream-leases.js';
-import { deleteProviderCatalog, getProviderCatalogCategories, getProviderCatalogItem, getProviderCatalogItems, getProviderCatalogItemsByIds, getProviderCatalogItemsForCategory, getProviderCatalogLanguagePrefixes, getProviderCatalogMeta, getProviderCatalogRails, listProviderCatalogMeta, queryProviderCatalogItems, recordProviderCatalogDuration, replaceProviderCatalog, replaceProviderCatalogCategories, replaceProviderSeriesEpisodes } from './provider-catalog-store.js';
+import { deleteProviderCatalog, getProviderCatalogCategories, getProviderCatalogItem, getProviderCatalogItems, getProviderCatalogItemsByIds, getProviderCatalogItemsForCategory, getProviderCatalogLanguagePrefixes, getProviderCatalogMeta, getProviderCatalogRails, getProviderSeriesEpisodes, listProviderCatalogMeta, queryProviderCatalogItems, recordProviderCatalogDuration, replaceProviderCatalog, replaceProviderCatalogCategories, replaceProviderSeriesEpisodes } from './provider-catalog-store.js';
 
 const app = express();
 app.use(enforceLibraryOnly);
@@ -201,7 +201,11 @@ const getSourceCategories = (source, kind) => sourceType(source) === 'm3u' ? get
 const sourceProviderUrl = (source, kind, id, extension = '') => sourceType(source) === 'm3u' ? m3uProviderUrl(source, kind, id) : xtreamProviderUrl(source, kind, id, extension);
 
 async function getIndexedXtreamSeriesEpisodes(source, seriesId) {
-  const details = await getXtreamSeriesEpisodes(source, seriesId);
+  // Series pages are read-only catalog views. Episode expansion must come from
+  // the catalog snapshot populated by the background sync, never from a live
+  // get_series_info request while a user is opening a show.
+  const details = await getProviderSeriesEpisodes(source.ownerId, source._id, seriesId);
+  if (!details) return { title: '', episodes: [] };
   const episodes = await Promise.all((details.episodes || []).map(async episode => ({
     ...episode,
     providerUrl: await sourceProviderUrl(source, 'series', episode.id, episode.extension),
@@ -1829,9 +1833,7 @@ app.get('/api/xtream/catalog-snapshot/items', async (req, res) => {
 
 // A "series" catalog row is the show, not a playable stream - only its
 // episodes have a provider URL. The RH servers catalog page drills into one
-// series at a time here (never all of them: a full series-to-episodes
-// expansion is one live provider call per show, too expensive to do for an
-// entire paginated series list).
+// series at a time here, using the persisted episode snapshot only.
 app.get('/api/xtream/catalog-snapshot/episodes', async (req, res) => {
   try {
     const ownerId = requestAccountOwner(req);
@@ -4189,8 +4191,8 @@ async function buildXtreamSeriesPayload({ limit, selected: suppliedSelected, acc
       try {
         const source = await getXtreamSource(seriesItem.sourceId, accountOwner);
         if (!source) { groups[index] = items; continue; }
-        // Opening a Roku series must be bounded by the provider metadata call,
-        // not by one FFprobe process for every episode in the series.
+        // Opening a Roku series must use the persisted episode snapshot, not a
+        // live provider metadata call or one FFprobe process per episode.
         const details = await hydrateSeriesDurations(source, await getIndexedXtreamSeriesEpisodes(source, seriesItem.id));
         for (const episode of details.episodes) {
           const extension = String(episode.extension || '').toLowerCase();

@@ -29,7 +29,8 @@ async function collections() {
         const database = client.db(databaseName);
         const items = database.collection(collectionName);
         const meta = database.collection(metaCollectionName);
-        return { items, meta };
+        const seriesEpisodes = database.collection(`${collectionName}_episodes`);
+        return { items, meta, seriesEpisodes };
       })
       .catch(error => { collectionsPromise = undefined; throw error; });
   }
@@ -75,8 +76,31 @@ export async function getProviderCatalogMeta(ownerId, sourceId) {
 }
 
 export async function replaceProviderSeriesEpisodes(ownerId, sourceId, seriesId, title, episodes) {
-  void ownerId; void sourceId; void seriesId; void title; void episodes;
-  return 0;
+  if (!ownerId || !sourceId || !seriesId) return 0;
+  const { seriesEpisodes } = await collections();
+  const rows = Array.isArray(episodes) ? episodes : [];
+  await seriesEpisodes.replaceOne(
+    { ownerId: String(ownerId), sourceId: String(sourceId), seriesId: String(seriesId) },
+    {
+      ownerId: String(ownerId),
+      sourceId: String(sourceId),
+      seriesId: String(seriesId),
+      title: String(title || ''),
+      episodes: rows,
+      updatedAt: new Date(),
+    },
+    { upsert: true },
+  );
+  return rows.length;
+}
+
+export async function getProviderSeriesEpisodes(ownerId, sourceId, seriesId) {
+  if (!ownerId || !sourceId || !seriesId) return null;
+  const { seriesEpisodes } = await collections();
+  return seriesEpisodes.findOne(
+    { ownerId: String(ownerId), sourceId: String(sourceId), seriesId: String(seriesId) },
+    { projection: { _id: 0, ownerId: 0, sourceId: 0, seriesId: 0 } },
+  );
 }
 
 export async function markProviderCatalogFailure(ownerId, sourceId, kind) {

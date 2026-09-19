@@ -2874,6 +2874,30 @@ app.get('/api/android/catalog', async (req, res) => {
   } catch (error) { res.status(502).json({ error: error.message }); }
 });
 
+// Compact Welcome payload: fetch the active provider's three catalog kinds in
+// parallel, keep only the visible rail items in the response, and never save
+// the provider catalog in MongoDB.
+app.get('/api/catalog/welcome', async (req, res) => {
+  try {
+    const ownerId = requestOwner(req), accountOwner = requestAccountOwner(req);
+    if (!ownerId || !accountOwner) return res.status(401).json({ error: 'Authentication required' });
+    const sourceId = String(req.query.sourceId || '').trim();
+    const kinds = ['series', 'movie', 'channel'];
+    const results = await Promise.all(kinds.map(kind => getRokuLiveCatalog(ownerId, kind, 'all', accountOwner, sourceId)));
+    const payload = {};
+    for (let i = 0; i < kinds.length; i++) {
+      const kind = kinds[i], result = results[i];
+      const items = [...result.items].sort((a, b) => Number(b.added || 0) - Number(a.added || 0));
+      payload[kind] = items.slice(0, 10);
+      payload[`${kind}Count`] = items.length;
+      payload[`${kind}Categories`] = result.categories;
+    }
+    const source = results.find(result => result.source)?.source || null;
+    res.set('Cache-Control', 'private, no-store');
+    res.json({ sourceId: source ? String(source._id) : '', sourceName: source?.name || '', ...payload, origin: 'provider' });
+  } catch (error) { res.status(502).json({ error: error.message }); }
+});
+
 /* AI recommendations removed. Endpoint intentionally returns 404. */
 app.post('/api/recommendations/ai', (req, res) => res.sendStatus(404));
 /*

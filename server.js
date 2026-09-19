@@ -2895,16 +2895,18 @@ app.get('/api/catalog/welcome', async (req, res) => {
       ? (flattenSelection(await getAllXtreamSources(accountOwner), ownerId, accountOwner).find(candidate => String(candidate._id) === sourceId) || null)
       : await getRokuServerProvider(ownerId, accountOwner);
     if (!source) return res.json({ sourceId: '', sourceName: '', series: [], movie: [], channel: [], seriesCount: 0, movieCount: 0, channelCount: 0, origin: 'provider' });
-    // Welcome does not need category lists. Avoid three extra provider calls;
-    // the full catalog response is still provider-backed and only the compact
-    // ten-item rails are retained briefly in process memory.
-    const results = await Promise.all(kinds.map(async kind => (await getSourceCatalog(source, kind))
-      .map(item => selectedXtreamItem(source, item)).filter(item => item.id)));
+    // Category lists are included so Android can seed its local category cache
+    // during Welcome refresh; Playlist then remains cache-only.
+    const results = await Promise.all(kinds.map(async kind => {
+      const [items, categories] = await Promise.all([getSourceCatalog(source, kind), getSourceCategories(source, kind).catch(() => [])]);
+      return { items: items.map(item => selectedXtreamItem(source, item)).filter(item => item.id), categories };
+    }));
     const payload = {};
     for (let i = 0; i < kinds.length; i++) {
-      const kind = kinds[i], items = results[i].sort((a, b) => Number(b.added || 0) - Number(a.added || 0));
+      const kind = kinds[i], items = results[i].items.sort((a, b) => Number(b.added || 0) - Number(a.added || 0));
       payload[kind] = items.slice(0, 10);
       payload[`${kind}Count`] = items.length;
+      payload[`${kind}Categories`] = results[i].categories.map(entry => ({ id: String(entry.id), name: cleanCategoryName(entry.name) }));
     }
     const response = { sourceId: String(source._id), sourceName: source.name || '', ...payload, origin: 'provider' };
     welcomeProviderMemoryCache.set(cacheKey, { expires: Date.now() + welcomeProviderMemoryTtlMs, payload: response });

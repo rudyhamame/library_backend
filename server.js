@@ -761,6 +761,8 @@ async function hydrateHistoryFromProviders(items, sources) {
         extension: providerItem.extension || item.extension || '',
         category: providerItem.category || item.category || '',
         duration: providerItem.duration || item.duration || '',
+        seasonNumber: providerItem.seasonNumber ?? item.seasonNumber ?? '',
+        episodeNumber: providerItem.episodeNumber ?? item.episodeNumber ?? '',
       };
       return { ...merged, providerUrl: await sourceProviderUrl(source, kind, itemId, merged.extension).catch(() => merged.providerUrl || '') };
     } catch (error) {
@@ -2413,16 +2415,16 @@ app.get('/api/streaming-history', async (req, res) => {
     if (!ownerId) return res.status(401).json({ error: 'Authentication required' });
     res.set('Cache-Control', 'no-store');
     let items = await getStreamingHistory(ownerId);
+    const accountOwner = requestAccountOwner(req);
+    const sources = await getAllXtreamSources(accountOwner);
     if (String(req.query.providerScope || '') === 'roku') {
-      const accountOwner = requestAccountOwner(req);
-      const sources = await getAllXtreamSources(accountOwner);
       const selectedSourceId = pickRokuSourceId(await getRokuSourcePreferenceByOwner(requestOwner(req)), sources);
       const selectedSource = sources.find(source => String(source._id) === selectedSourceId);
       items = items.filter(item => String(item.sourceId || '') === selectedSourceId)
         .map(item => ({ ...item, providerName: item.providerName || selectedSource?.name || '' }));
-      items = await attachProviderUrls(items, sources);
-      items = await hydrateHistoryFromProviders(items, sources);
     }
+    items = await attachProviderUrls(items, sources);
+    items = await hydrateHistoryFromProviders(items, sources);
     res.json({ items });
   }
   catch (error) { res.status(500).json({ error: error.message }); }
@@ -2434,17 +2436,17 @@ app.get('/api/streaming-history/continue-watching', async (req, res) => {
     if (!ownerId) return res.status(401).json({ error: 'Authentication required' });
     const accountOwner = requestAccountOwner(req);
     let items = await getStreamingContinueWatching(ownerId);
+    const sources = await getAllXtreamSources(accountOwner);
     // Roku's Welcome page is both profile- and provider-specific. Other
     // clients retain their existing cross-provider history unless they opt in.
     if (String(req.query.providerScope || '') === 'roku') {
-      const sources = await getAllXtreamSources(accountOwner);
       const selectedSourceId = pickRokuSourceId(await getRokuSourcePreferenceByOwner(requestOwner(req)), sources);
       const selectedSource = sources.find(source => String(source._id) === selectedSourceId);
       items = items.filter(item => String(item.sourceId || '') === selectedSourceId)
         .map(item => ({ ...item, providerName: item.providerName || selectedSource?.name || '' }));
-      items = await attachProviderUrls(items, sources);
-      items = await hydrateHistoryFromProviders(items, sources);
     }
+    items = await attachProviderUrls(items, sources);
+    items = await hydrateHistoryFromProviders(items, sources);
     res.set('Cache-Control', 'no-store');
     res.json({ items });
   }

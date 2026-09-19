@@ -2315,8 +2315,12 @@ async function getRokuServerProvider(ownerId, accountOwner = ownerId) {
 // Roku catalog browsing is server-mediated but never persisted. Fetch the
 // selected provider on demand, normalize the response, and keep only the
 // in-memory result for the lifetime of this request.
-async function getRokuLiveCatalog(ownerId, kind, requestedCategory = 'all', accountOwner = ownerId) {
-  const source = await getRokuServerProvider(ownerId, accountOwner);
+async function getRokuLiveCatalog(ownerId, kind, requestedCategory = 'all', accountOwner = ownerId, requestedSourceId = '') {
+  const preferredSource = String(requestedSourceId || '').trim();
+  const source = preferredSource
+    ? (flattenSelection(await getAllXtreamSources(accountOwner), ownerId, accountOwner)
+      .find(candidate => String(candidate._id) === preferredSource) || null)
+    : await getRokuServerProvider(ownerId, accountOwner);
   if (!source) return { source: null, category: '', categories: [], items: [] };
   const [categories, catalog] = await Promise.all([
     getSourceCategories(source, kind).catch(() => []),
@@ -2835,6 +2839,39 @@ app.get('/api/android/bootstrap', async (req, res) => {
     }
   }
   catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+// Android catalog browsing is server-mediated and provider-backed. Nothing
+// from this response is written to MongoDB; the server fetches the selected
+// provider for each request, just like the Roku server catalog routes.
+app.get('/api/android/catalog', async (req, res) => {
+  try {
+    const ownerId = requestOwner(req), accountOwner = requestAccountOwner(req);
+    if (!ownerId || !accountOwner) return res.status(401).json({ error: 'Authentication required' });
+    const kind = ['series', 'movie', 'channel'].includes(String(req.query.kind)) ? String(req.query.kind) : '';
+    if (!kind) return res.status(400).json({ error: 'kind must be series, movie, or channel' });
+    const sourceResult = await getRokuLiveCatalog(ownerId, kind, 'all', accountOwner, req.query.sourceId);
+    const query = normalizeSearchText(req.query.q);
+    const category = String(req.query.category || '').trim();
+    const matches = sourceResult.items.filter(item => {
+      if (category && category !== 'all' && String(item.categoryId || item.category || '') !== category) return false;
+      if (!query) return true;
+      return normalizeSearchText(item.title).includes(query);
+    });
+    const limit = Math.min(100, Math.max(1, Number.parseInt(req.query.limit, 10) || 50));
+    const page = Math.max(1, Number.parseInt(req.query.page, 10) || 1);
+    const start = (page - 1) * limit;
+    const items = matches.slice(start, start + limit);
+    res.set('Cache-Control', 'private, no-store');
+    res.json({
+      sourceId: sourceResult.source ? String(sourceResult.source._id) : '',
+      sourceName: sourceResult.source?.name || '',
+      categories: sourceResult.categories,
+      items,
+      origin: 'provider',
+      pagination: { page, pageSize: limit, pageCount: Math.max(1, Math.ceil(matches.length / limit)), total: matches.length },
+    });
+  } catch (error) { res.status(502).json({ error: error.message }); }
 });
 
 /* AI recommendations removed. Endpoint intentionally returns 404. */
@@ -3500,17 +3537,11 @@ app.get('/api/xtream/categories', async (req, res) => {
     const kind = aliases[String(req.query.kind || '')];
     if (!kind) return res.status(400).json({ error: 'kind must be channel, movie, or series' });
     const sortByName = list => [...list].sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''), undefined, { numeric: true, sensitivity: 'base' }));
-    // Stored snapshot only - this request never calls the provider. If the
-    // snapshot has items but no category names (a prior category fetch failed
-    // and was silently dropped, or hasn't run yet), kick one background retry
-    // so a later request has a chance to succeed - still doesn't block this
-    // response, and refreshCatalogSnapshot's own in-flight map keeps concurrent
-    // requests from piling up retries.
-    const stored = await getProviderCatalogCategories(ownerId, String(source._id), kind).catch(() => []);
-    if (!stored.length && await catalogSnapshotHasKind(ownerId, source._id, kind)) {
-      void refreshCatalogSnapshot(ownerId, source, kind);
-    }
-    res.json({ categories: sortByName(stored), origin: stored.length ? 'storage' : 'unavailable' });
+    // Categories are provider data too: fetch them on demand and never read
+    // or refresh a Mongo catalog snapshot for this request.
+    const live = await getSourceCategories(source, kind).catch(() => []);
+    res.set('Cache-Control', 'private, no-store');
+    res.json({ categories: sortByName(live.map(entry => ({ id: String(entry.id), name: cleanCategoryName(entry.name) }))), origin: 'provider' });
   } catch (error) { res.status(502).json({ error: error.message }); }
 });
 

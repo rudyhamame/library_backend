@@ -27,7 +27,7 @@ import { backdropVideoFile, ensureBackdropRoot, getRecommendationBackdrop, listB
 import { getAndroidStartupSnapshot, saveAndroidStartupSnapshot } from './android-startup-store.js';
 import { providerPlaybackUrlIsUsable, resolveProviderMediaId, resolveProviderTitle } from './provider-playback-fields.js';
 import { acquireProviderStreamLease } from './provider-stream-leases.js';
-import { deleteProviderCatalog, getProviderCatalogCategories, getProviderCatalogItem, getProviderCatalogItems, getProviderCatalogItemsByIds, getProviderCatalogItemsForCategory, getProviderCatalogLanguagePrefixes, getProviderCatalogMeta, getProviderCatalogRails, hydrateContinueWatchingArtwork, listProviderCatalogMeta, queryProviderCatalogItems, recordProviderCatalogDuration, replaceProviderCatalog, replaceProviderCatalogCategories, replaceProviderSeriesEpisodes } from './provider-catalog-store.js';
+import { deleteProviderCatalog, getProviderCatalogCategories, getProviderCatalogItem, getProviderCatalogItems, getProviderCatalogItemsByIds, getProviderCatalogItemsForCategory, getProviderCatalogLanguagePrefixes, getProviderCatalogMeta, getProviderCatalogRails, listProviderCatalogMeta, queryProviderCatalogItems, recordProviderCatalogDuration, replaceProviderCatalog, replaceProviderCatalogCategories, replaceProviderSeriesEpisodes } from './provider-catalog-store.js';
 
 const app = express();
 app.use(enforceLibraryOnly);
@@ -719,6 +719,52 @@ async function attachProviderUrls(items, sources) {
     const kind = item.kind === 'episode' ? 'series' : String(item.kind || '');
     if (!source || !id || !['series', 'movie', 'channel'].includes(kind)) return item;
     return { ...item, id, title: resolveProviderTitle(item, item.kind, id), providerUrl: await sourceProviderUrl(source, kind, id, item.extension) };
+  }));
+}
+
+// Watch-state records intentionally keep only playback state plus a provider
+// reference. Hydrate their display metadata from the provider for this
+// response; never copy the provider row into the account library or MongoDB.
+async function hydrateHistoryFromProviders(items, sources) {
+  const bySource = new Map((sources || []).map(source => [String(source._id), source]));
+  const catalogCache = new Map();
+  const episodeCache = new Map();
+  return Promise.all((items || []).map(async item => {
+    const source = bySource.get(String(item.sourceId || item.providerURL?.sourceId || ''));
+    if (!source) return item;
+    const kind = item.kind === 'channel' ? 'channel' : item.kind === 'movie' ? 'movie' : 'series';
+    const itemId = String(item.itemId || item.providerURL?.itemId || '');
+    if (!itemId) return item;
+    try {
+      let providerItem;
+      if (kind === 'series') {
+        const seriesId = String(item.seriesId || item.providerURL?.seriesId || '');
+        const cacheKey = `${source._id}:${seriesId}`;
+        if (!episodeCache.has(cacheKey)) episodeCache.set(cacheKey, getXtreamSeriesEpisodes(source, seriesId));
+        const details = await episodeCache.get(cacheKey);
+        providerItem = (details?.episodes || []).find(episode => String(episode.id) === itemId);
+        if (providerItem) providerItem = { ...providerItem, title: providerItem.title || `${details.title || ''} · ${providerItem.episodeNumber || ''}`, seriesName: details.title || '' };
+      } else {
+        const cacheKey = `${source._id}:${kind}`;
+        if (!catalogCache.has(cacheKey)) catalogCache.set(cacheKey, getSourceCatalog(source, kind));
+        providerItem = (await catalogCache.get(cacheKey)).find(row => String(row.id) === itemId);
+      }
+      if (!providerItem) return item;
+      const merged = {
+        ...item,
+        title: providerItem.title || item.title || '',
+        seriesName: providerItem.seriesName || item.seriesName || '',
+        poster: providerItem.logo || providerItem.thumbnail || item.poster || '',
+        thumbnail: providerItem.logo || providerItem.thumbnail || item.thumbnail || '',
+        extension: providerItem.extension || item.extension || '',
+        category: providerItem.category || item.category || '',
+        duration: providerItem.duration || item.duration || '',
+      };
+      return { ...merged, providerUrl: await sourceProviderUrl(source, kind, itemId, merged.extension).catch(() => merged.providerUrl || '') };
+    } catch (error) {
+      console.warn(`[History] provider metadata unavailable for ${kind}:${itemId}: ${error.message}`);
+      return item;
+    }
   }));
 }
 
@@ -2356,6 +2402,7 @@ app.get('/api/streaming-history', async (req, res) => {
       items = items.filter(item => String(item.sourceId || '') === selectedSourceId)
         .map(item => ({ ...item, providerName: item.providerName || selectedSource?.name || '' }));
       items = await attachProviderUrls(items, sources);
+      items = await hydrateHistoryFromProviders(items, sources);
     }
     res.json({ items });
   }
@@ -2377,8 +2424,8 @@ app.get('/api/streaming-history/continue-watching', async (req, res) => {
       items = items.filter(item => String(item.sourceId || '') === selectedSourceId)
         .map(item => ({ ...item, providerName: item.providerName || selectedSource?.name || '' }));
       items = await attachProviderUrls(items, sources);
+      items = await hydrateHistoryFromProviders(items, sources);
     }
-    items = await hydrateContinueWatchingArtwork(accountOwner, items);
     res.set('Cache-Control', 'no-store');
     res.json({ items });
   }

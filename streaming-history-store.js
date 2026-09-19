@@ -39,7 +39,15 @@ const seriesRecordHistory = record => record ? ({
   lastMoment: record.lastWatched || '00:00:00',
 }) : null;
 const kindRecord = update => ({
-  ...update,
+  itemId: update.itemId,
+  kind: update.kind,
+  sourceId: update.sourceId,
+  seriesId: update.seriesId,
+  endPositionMs: update.endPositionMs,
+  mediaDurationMs: update.mediaDurationMs,
+  completed: update.completed === true,
+  sessionId: update.sessionId,
+  updatedAt: update.updatedAt,
   providerURL: { sourceId: update.sourceId, itemId: update.itemId, seriesId: update.seriesId },
   lastWatched: update.lastMoment,
 });

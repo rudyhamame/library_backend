@@ -72,6 +72,8 @@ const rokuMoviePageLimit = 10;
 const rokuCatalogPageLimit = 10;
 const welcomeRailLimit = 10;
 const xtreamItemsInFlight = new Map();
+const welcomeProviderMemoryCache = new Map();
+const welcomeProviderMemoryTtlMs = 30_000;
 // Self-hosted on a real machine now (not a 256 MB cloud box), so a few catalog
 // downloads can run at once instead of strictly one.
 const catalogMemoryConcurrency = Math.max(1, Number.parseInt(process.env.CATALOG_MEMORY_CONCURRENCY || '3', 10) || 3);
@@ -2882,19 +2884,32 @@ app.get('/api/catalog/welcome', async (req, res) => {
     const ownerId = requestOwner(req), accountOwner = requestAccountOwner(req);
     if (!ownerId || !accountOwner) return res.status(401).json({ error: 'Authentication required' });
     const sourceId = String(req.query.sourceId || '').trim();
+    const cacheKey = `${accountOwner}:${ownerId}:${sourceId}`;
+    const cached = welcomeProviderMemoryCache.get(cacheKey);
+    if (cached && cached.expires > Date.now()) {
+      res.set('Cache-Control', 'private, no-store');
+      return res.json(cached.payload);
+    }
     const kinds = ['series', 'movie', 'channel'];
-    const results = await Promise.all(kinds.map(kind => getRokuLiveCatalog(ownerId, kind, 'all', accountOwner, sourceId)));
+    const source = sourceId
+      ? (flattenSelection(await getAllXtreamSources(accountOwner), ownerId, accountOwner).find(candidate => String(candidate._id) === sourceId) || null)
+      : await getRokuServerProvider(ownerId, accountOwner);
+    if (!source) return res.json({ sourceId: '', sourceName: '', series: [], movie: [], channel: [], seriesCount: 0, movieCount: 0, channelCount: 0, origin: 'provider' });
+    // Welcome does not need category lists. Avoid three extra provider calls;
+    // the full catalog response is still provider-backed and only the compact
+    // ten-item rails are retained briefly in process memory.
+    const results = await Promise.all(kinds.map(async kind => (await getSourceCatalog(source, kind))
+      .map(item => selectedXtreamItem(source, item)).filter(item => item.id)));
     const payload = {};
     for (let i = 0; i < kinds.length; i++) {
-      const kind = kinds[i], result = results[i];
-      const items = [...result.items].sort((a, b) => Number(b.added || 0) - Number(a.added || 0));
+      const kind = kinds[i], items = results[i].sort((a, b) => Number(b.added || 0) - Number(a.added || 0));
       payload[kind] = items.slice(0, 10);
       payload[`${kind}Count`] = items.length;
-      payload[`${kind}Categories`] = result.categories;
     }
-    const source = results.find(result => result.source)?.source || null;
+    const response = { sourceId: String(source._id), sourceName: source.name || '', ...payload, origin: 'provider' };
+    welcomeProviderMemoryCache.set(cacheKey, { expires: Date.now() + welcomeProviderMemoryTtlMs, payload: response });
     res.set('Cache-Control', 'private, no-store');
-    res.json({ sourceId: source ? String(source._id) : '', sourceName: source?.name || '', ...payload, origin: 'provider' });
+    res.json(response);
   } catch (error) { res.status(502).json({ error: error.message }); }
 });
 

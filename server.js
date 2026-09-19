@@ -688,7 +688,9 @@ function selectedXtreamItem(source, item) {
   // "test" is the source display name, not a media category. Never expose it
   // as a Roku filter when an old saved item is missing category metadata.
   const category = /^test$/i.test(suppliedCategory) || !suppliedCategory ? 'Other' : suppliedCategory;
-  const suppliedProviderUrl = providerPlaybackUrlIsUsable(item.providerUrl) ? String(item.providerUrl) : '';
+  const suppliedProviderUrl = providerPlaybackUrlIsUsable(item.providerUrl)
+    ? String(item.providerUrl)
+    : (providerPlaybackUrlIsUsable(item.streamUrl) ? String(item.streamUrl) : '');
   const providerUrl = suppliedProviderUrl || String(
     sourceType(source) === 'xtream' && kind !== 'series' && id
       ? sourceProviderUrl(source, kind, id, item.extension)
@@ -723,15 +725,26 @@ async function attachProviderUrls(items, sources) {
 async function getLibrarySelectedItems(ownerId = null, requestedKind = '', accountOwner = ownerId) {
   if (!ownerId) return [];
   const sources = flattenSelection(await getAllXtreamSources(accountOwner), ownerId, accountOwner);
-  const groups = sources.map(source => {
-    const enabledItems = (Array.isArray(source.enabledItems) ? source.enabledItems : [])
-      .filter(item => item?.kind && (!requestedKind || item.kind === requestedKind));
-    // Roku catalog reads must only use the Library selection already stored in
-    // MongoDB. Fetching a provider's entire catalog here to backfill one absent
-    // logo made every page wait on an unrelated upstream request. Logo
-    // enrichment belongs to the source import/update path, never this hot path.
-    return enabledItems.map(item => selectedXtreamItem(source, item)).filter(item => item.id);
-  });
+  const kinds = requestedKind ? [requestedKind] : ['series', 'movie', 'channel'];
+  const groups = await Promise.all(sources.map(async source => {
+    const saved = selectionFor(source, ownerId, accountOwner).savedSelections || {};
+    const urlsByKind = {
+      series: Array.isArray(saved.series) ? saved.series : [],
+      movie: Array.isArray(saved.movies) ? saved.movies : [],
+      channel: Array.isArray(saved.live) ? saved.live : [],
+    };
+    const rows = [];
+    for (const kind of kinds) {
+      const wanted = new Set(urlsByKind[kind] || []);
+      if (!wanted.size) continue;
+      const providerRows = await getSourceCatalog(source, kind).catch(() => []);
+      for (const row of providerRows) {
+        const item = selectedXtreamItem(source, row);
+        if (wanted.has(String(item.providerUrl || ''))) rows.push(item);
+      }
+    }
+    return rows;
+  }));
   return groups.flat();
 }
 
@@ -2275,9 +2288,8 @@ async function getRokuServerCatalog(ownerId, kind, requestedCategory, accountOwn
 async function getRokuServerSavedItems(ownerId, kind, accountOwner = ownerId) {
   const source = await getRokuServerProvider(ownerId, accountOwner);
   if (!source) return { source: null, category: 'all', items: [] };
-  const items = (Array.isArray(source.enabledItems) ? source.enabledItems : [])
-    .filter(item => item && item.kind === kind)
-    .map(item => selectedXtreamItem(source, item))
+  const items = (await getLibrarySelectedItems(ownerId, kind, accountOwner))
+    .filter(item => String(item.sourceId) === String(source._id))
     .filter(item => item.id)
     .sort((a, b) => String(a.title || '').localeCompare(String(b.title || ''), undefined, { numeric: true, sensitivity: 'base' }));
   return { source, category: 'all', items };

@@ -9,7 +9,7 @@ let clientPromise;
 async function accountCollections() {
   if (!clientPromise) clientPromise = new MongoClient(mongoUri, { serverSelectionTimeoutMS: 5000 }).connect().catch(error => { clientPromise = undefined; throw error; });
   const client = await clientPromise;
-  return [client.db(rokuDb).collection('identity'), client.db(generalDb).collection(process.env.MONGODB_ACCOUNT_COLLECTION || 'accounts')];
+  return [client.db(rokuDb).collection('identity'), client.db(generalDb).collection('identity')];
 }
 
 export async function allAccountDocuments() {

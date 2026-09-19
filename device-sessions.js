@@ -44,9 +44,9 @@ async function accounts(realm = 'roku') {
     promise = new MongoClient(mongoUri, { serverSelectionTimeoutMS: 5000 }).connect()
       .then(async client => {
         const dbName = normalizedRealm === 'general' ? generalDatabaseName : databaseName;
-        const collection = client.db(dbName).collection(normalizedRealm === 'roku' ? 'identity' : accountCollectionName);
+        const collection = client.db(dbName).collection('identity');
         const options = { unique: true };
-        if (normalizedRealm === 'roku') options.name = 'identity_auth_email';
+        options.name = 'identity_auth_email';
         await collection.createIndex({ email: 1 }, options);
         return collection;
       })
@@ -63,13 +63,11 @@ async function verifiedEmails(realm = 'roku') {
     promise = new MongoClient(mongoUri, { serverSelectionTimeoutMS: 5000 }).connect()
       .then(async client => {
         const dbName = normalizedRealm === 'general' ? generalDatabaseName : databaseName;
-        const collection = client.db(dbName).collection(normalizedRealm === 'roku' ? 'meta' : verifiedEmailCollectionName);
+        const collection = client.db(dbName).collection('meta');
         const options = { unique: true };
-        if (normalizedRealm === 'roku') {
-          options.name = 'meta_auth_email';
-          options.partialFilterExpression = { type: { $in: ['verified-account', 'signup-verification'] } };
-        }
-        await collection.createIndex(normalizedRealm === 'roku' ? { type: 1, email: 1 } : { email: 1 }, options);
+        options.name = 'meta_auth_email';
+        options.partialFilterExpression = { type: { $in: ['verified-account', 'signup-verification'] } };
+        await collection.createIndex({ type: 1, email: 1 }, options);
         return collection;
       })
       .catch(error => { verifiedEmailPromises.delete(normalizedRealm); throw error; });
@@ -85,7 +83,7 @@ async function signupVerificationStore(realm = 'roku') {
     promise = new MongoClient(mongoUri, { serverSelectionTimeoutMS: 5000 }).connect()
       .then(async client => {
         const dbName = normalizedRealm === 'general' ? generalDatabaseName : databaseName;
-        return client.db(dbName).collection(normalizedRealm === 'roku' ? 'meta' : (process.env.MONGODB_SIGNUP_VERIFICATION_COLLECTION || 'signup_verifications'));
+        return client.db(dbName).collection('meta');
       })
       .catch(error => { signupVerificationPromises.delete(normalizedRealm); throw error; });
     signupVerificationPromises.set(normalizedRealm, promise);
@@ -94,15 +92,15 @@ async function signupVerificationStore(realm = 'roku') {
 }
 
 const unverifiedAccountsId = 'unverified_accounts';
-async function findUnverifiedAccount(email) {
+async function findUnverifiedAccount(email, realm = 'roku') {
   const normalizedEmail = normalizeEmail(email);
-  const row = await (await signupVerificationStore('roku')).findOne({ _id: unverifiedAccountsId }, { projection: { unverified_accounts: 1 } });
+  const row = await (await signupVerificationStore(realm)).findOne({ _id: unverifiedAccountsId }, { projection: { unverified_accounts: 1 } });
   return (row?.unverified_accounts || []).find(item => item.email === normalizedEmail) || null;
 }
 
-async function saveUnverifiedAccount(email, changes) {
+async function saveUnverifiedAccount(email, changes, realm = 'roku') {
   const normalizedEmail = normalizeEmail(email);
-  const collection = await signupVerificationStore('roku');
+  const collection = await signupVerificationStore(realm);
   const row = await collection.findOne({ _id: unverifiedAccountsId }, { projection: { unverified_accounts: 1 } });
   const entries = Array.isArray(row?.unverified_accounts) ? row.unverified_accounts.slice() : [];
   const index = entries.findIndex(item => item.email === normalizedEmail);
@@ -119,8 +117,8 @@ async function saveUnverifiedAccount(email, changes) {
   return next;
 }
 
-async function deleteUnverifiedAccount(email) {
-  const collection = await signupVerificationStore('roku');
+async function deleteUnverifiedAccount(email, realm = 'roku') {
+  const collection = await signupVerificationStore(realm);
   await collection.updateOne({ _id: unverifiedAccountsId }, { $pull: { unverified_accounts: { email: normalizeEmail(email) } }, $set: { updatedAt: new Date() } });
 }
 
@@ -197,11 +195,11 @@ function validPassword(password) { return typeof password === 'string' && passwo
 function normalizeEmail(email) { return String(email || '').trim().toLowerCase(); }
 function validEmail(email) { return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) && email.length <= 254; }
 
-function identityAccountDocument({ email, passwordHash, createdAt = new Date(), updatedAt = new Date() }) {
+function identityAccountDocument({ email, passwordHash, realm = 'roku', createdAt = new Date(), updatedAt = new Date() }) {
   return {
     email, passwordHash, createdAt, updatedAt,
     providers: [], profiles: [], devices: [],
-    realm: 'roku',
+    realm: normalizeAccountRealm(realm),
   };
 }
 
@@ -617,8 +615,9 @@ export async function registerAccount(email, password, firstName = '', lastName 
   if (await collection.findOne({ email: normalizedEmail }, { projection: { _id: 1 } })) return { error: 'An account with this email already exists. Sign in instead.' };
   let passwordHash = hashPassword(password);
   if (!verificationId) {
+    if (normalizeAccountRealm(realm) === 'general') return requestAccountSignupVerification(normalizedEmail, realm);
     if (await isEmailVerified(normalizedEmail, realm)) {
-      const created = await collection.insertOne(identityAccountDocument({ email: normalizedEmail, passwordHash }));
+      const created = await collection.insertOne(identityAccountDocument({ email: normalizedEmail, passwordHash, realm }));
       return { ok: true };
     }
     const id = randomBytes(18).toString('base64url');
@@ -628,21 +627,60 @@ export async function registerAccount(email, password, firstName = '', lastName 
     catch (error) { console.error('[signup verification] email send failed:', error.message); }
     return { verificationRequired: true, verificationId: id };
   }
+  if (normalizeAccountRealm(realm) === 'general') {
+    const pending = await findUnverifiedAccount(normalizedEmail, realm);
+    if (!pending || pending._id !== String(verificationId) || pending.code !== String(verificationCode || '').trim()) {
+      return { error: 'Incorrect verification code', verificationInvalid: true };
+    }
+    await markEmailVerified(normalizedEmail, realm);
+    try {
+      await collection.insertOne(identityAccountDocument({ email: normalizedEmail, passwordHash, realm }));
+      await deleteUnverifiedAccount(normalizedEmail, realm);
+    } catch (error) {
+      if (error?.code === 11000) return { error: 'An account with this email already exists. Sign in instead.' };
+      throw error;
+    }
+    return { ok: true };
+  }
   const pending = accountSignupVerifications.get(String(verificationId));
   if (!pending || pending.email !== normalizedEmail || pending.realm !== normalizeAccountRealm(realm) || pending.code !== String(verificationCode).trim()) {
     accountSignupVerifications.delete(String(verificationId));
     return { error: 'Verification code expired or invalid' };
   }
   accountSignupVerifications.delete(String(verificationId));
-  passwordHash = pending.passwordHash;
+  passwordHash = pending.passwordHash || hashPassword(password);
   await markEmailVerified(normalizedEmail, realm);
   try {
-    const created = await collection.insertOne(identityAccountDocument({ email: normalizedEmail, passwordHash }));
+    const created = await collection.insertOne(identityAccountDocument({ email: normalizedEmail, passwordHash, realm }));
   } catch (error) {
     if (error?.code === 11000) return { error: 'An account with this email already exists. Sign in instead.' };
     throw error;
   }
   return { ok: true };
+}
+
+export async function requestAccountSignupVerification(email, realm = 'general') {
+  const normalizedEmail = normalizeEmail(email);
+  if (!validEmail(normalizedEmail)) return { error: 'Enter a valid email address' };
+  const collection = await accounts(realm);
+  if (await collection.findOne({ email: normalizedEmail }, { projection: { _id: 1 } })) {
+    return { error: 'An account with this email already exists. Sign in instead.' };
+  }
+  if (await isEmailVerified(normalizedEmail, realm)) return { verificationNotRequired: true };
+  const pending = await findUnverifiedAccount(normalizedEmail, realm);
+  if (pending) {
+    return {
+      verificationRequired: true,
+      verificationId: pending._id,
+      verificationSent: false,
+      verificationAlreadyPending: true,
+    };
+  }
+  const code = String(randomInt(100000, 1000000));
+  await saveUnverifiedAccount(normalizedEmail, { code, updatedAt: new Date() }, realm);
+  try { await sendSignupVerificationEmail(normalizedEmail, code); }
+  catch (error) { await deleteUnverifiedAccount(normalizedEmail, realm); console.error('[signup verification] email send failed:', error.message); return { error: 'Verification email could not be sent. Please try again.' }; }
+  return { verificationRequired: true, verificationId: metaRecordId('signup-verification', normalizedEmail), verificationSent: true };
 }
 
 export async function getRokuDeviceSessionStatus(code) {

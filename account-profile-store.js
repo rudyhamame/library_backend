@@ -18,7 +18,7 @@ async function accountRecord(accountId) {
   if (!ObjectId.isValid(accountId)) throw Object.assign(new Error('Authentication required'), { status: 401 });
   const client = await databaseClient();
   const id = new ObjectId(String(accountId));
-  for (const [dbName, name] of [[databaseName, 'identity'], [generalDatabaseName, process.env.MONGODB_ACCOUNT_COLLECTION || 'accounts']]) {
+  for (const [dbName, name] of [[databaseName, 'identity'], [generalDatabaseName, 'identity']]) {
     const database = client.db(dbName);
     const collection = database.collection(name);
     const account = await collection.findOne({ _id: id });
@@ -115,7 +115,7 @@ export async function getProfileByCode(accountId, code) {
 export async function getProfileRokuSourcePreferenceByOwner(ownerId) {
   if (!ownerId) return null;
   const client = await databaseClient();
-  for (const [dbName, name] of [[databaseName, 'identity'], [generalDatabaseName, process.env.MONGODB_ACCOUNT_COLLECTION || 'accounts']]) {
+  for (const [dbName, name] of [[databaseName, 'identity'], [generalDatabaseName, 'identity']]) {
     const account = await client.db(dbName).collection(name).findOne({ 'profiles.ownerId': String(ownerId) }, { projection: { profiles: 1 } });
     const profile = profilesOf(account).find(row => row.ownerId === String(ownerId));
     if (profile) return String(profile.rokuSourceId || '');

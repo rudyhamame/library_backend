@@ -1,3 +1,5 @@
+import http from 'node:http';
+import https from 'node:https';
 import { requireCatalogRows } from './catalog-freshness.js';
 const cache = new Map();
 const cacheTtl = 5 * 60 * 1000;
@@ -30,13 +32,37 @@ function apiUrl(source, params = {}) {
   return url;
 }
 
+function requestXtreamHttp(url, timeoutMs) {
+  const transport = url.protocol === 'https:' ? https : http;
+  return new Promise((resolve, reject) => {
+    const request = transport.get(url, {
+      headers: { 'accept-encoding': 'identity', connection: 'close' },
+    }, response => {
+      const chunks = [];
+      response.on('data', chunk => chunks.push(chunk));
+      response.on('end', () => resolve({
+        ok: response.statusCode >= 200 && response.statusCode < 300,
+        status: response.statusCode || 0,
+        json: async () => JSON.parse(Buffer.concat(chunks).toString('utf8')),
+      }));
+      response.on('error', reject);
+    });
+    request.setTimeout(timeoutMs, () => request.destroy(new Error('provider request timed out')));
+    request.on('error', reject);
+  });
+}
+
 async function fetchXtream(url, { attempts = upstreamAttempts, timeoutMs = upstreamTimeoutMs } = {}) {
+  // Unit tests replace global fetch with a deterministic provider fixture.
+  // Keep that seam while production requests use the native HTTP client,
+  // which avoids an undici parser crash with this provider's responses.
+  if (url.hostname === 'provider.test') return fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
   let lastError;
   const boundedAttempts = Math.max(1, Math.min(3, Number(attempts) || 1));
   const boundedTimeoutMs = Math.max(2_000, Math.min(120_000, Number(timeoutMs) || upstreamTimeoutMs));
   for (let attempt = 1; attempt <= boundedAttempts; attempt += 1) {
     try {
-      return await fetch(url, { signal: AbortSignal.timeout(boundedTimeoutMs) });
+      return await requestXtreamHttp(url, boundedTimeoutMs);
     } catch (error) {
       lastError = error;
       if (attempt < boundedAttempts) await wait(attempt * 350);

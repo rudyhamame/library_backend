@@ -92,14 +92,17 @@ test('Roku Welcome content is selected by profile and constrained to its provide
   assert.match(server, /getFavorites\(accountOwner, requestProfile\(req\)\)/);
 });
 
-test('Roku Welcome counters use complete stored provider catalog totals', async () => {
+test('Roku Welcome counters use complete live provider catalog totals', async () => {
   const server = await readFile(new URL('../server.js', import.meta.url), 'utf8');
   const content = await readFile(new URL('../../roku/components/HomeScreenContent.brs', import.meta.url), 'utf8');
   const bootstrap = server.slice(server.indexOf("app.get('/api/roku/bootstrap'"), server.indexOf("app.get('/api/roku/series/categories'"));
-  assert.match(bootstrap, /catalogMeta = await getProviderCatalogMeta\(accountOwner, selectedSourceId\)/);
-  assert.match(bootstrap, /series: Math\.max\(0, Number\(catalogMeta\?\.kinds\?\.series\?\.count\) \|\| 0\)/);
-  assert.match(bootstrap, /movies: Math\.max\(0, Number\(catalogMeta\?\.kinds\?\.movie\?\.count\) \|\| 0\)/);
-  assert.match(bootstrap, /channels: Math\.max\(0, Number\(catalogMeta\?\.kinds\?\.channel\?\.count\) \|\| 0\)/);
+  assert.match(bootstrap, /getSourceCatalog\(selectedSource, 'series'\)/);
+  assert.match(bootstrap, /getSourceCatalog\(selectedSource, 'movie'\)/);
+  assert.match(bootstrap, /getSourceCatalog\(selectedSource, 'channel'\)/);
+  assert.match(bootstrap, /series: liveCatalog\.series\.length/);
+  assert.match(bootstrap, /movies: liveCatalog\.movie\.length/);
+  assert.match(bootstrap, /channels: liveCatalog\.channel\.length/);
+  assert.doesNotMatch(bootstrap, /ensureCatalogSnapshot|getProviderCatalog/);
   assert.doesNotMatch(bootstrap, /rokuSavedCount/);
   assert.match(content, /welcomeSeriesCount\.text = welcomeStatText\(m\.librarySeriesCount\)/);
 });
@@ -118,12 +121,13 @@ test('an unsaved Welcome series can open without bypassing the active provider',
   assert.match(server, /String\(source\._id\) !== sourceId/);
 });
 
-test('Roku deep links resolve unsaved IDs from the active provider snapshot', async () => {
+test('Roku deep links resolve unsaved IDs from the active provider', async () => {
   const server = await readFile(new URL('../server.js', import.meta.url), 'utf8');
   const scene = await readFile(new URL('../../roku/components/HomeScreenDeepLink.brs', import.meta.url), 'utf8');
   const route = server.slice(server.indexOf("app.get('/api/roku/deep-link-item'"), server.indexOf("app.get('/api/roku/series/detail'"));
   assert.match(route, /getRokuServerProvider\(ownerId, accountOwner\)/);
-  assert.match(route, /getProviderCatalogItem\(accountOwner, sourceId, kind, contentId\)/);
+  assert.match(route, /getSourceCatalog\(source, kind\)/);
+  assert.match(route, /find\(item => String\(item\.id\) === contentId\)/);
   assert.doesNotMatch(route, /enabledItems|enabledKeys|getRokuSelectedItems/);
   assert.match(scene, /\/api\/roku\/deep-link-item/);
   assert.match(scene, /queryParams = \{ mediaType: request\.mediaType, contentId: request\.contentId \}/);

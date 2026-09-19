@@ -204,7 +204,6 @@ async function getIndexedXtreamSeriesEpisodes(source, seriesId) {
     ...episode,
     providerUrl: await sourceProviderUrl(source, 'series', episode.id, episode.extension),
   })));
-  await replaceProviderSeriesEpisodes(source.ownerId, String(source._id), String(seriesId), details.title, episodes);
   return { ...details, episodes };
 }
 
@@ -737,18 +736,15 @@ async function getLibrarySelectedItems(ownerId = null, requestedKind = '', accou
 }
 
 async function getRokuSelectedItems(kind, ownerId = null, accountOwner = ownerId, requestedSourceId = '') {
-  // The managed Library is the category source of truth. Provider categories
-  // only seed it; Roku never recomputes rails from the provider after that.
+  // Saved selections are profile-owned provider URLs. There is no managed
+  // category/assignment layer in the Roku library anymore.
   if (!ownerId) return [];
   const suppliedItems = await getLibrarySelectedItems(ownerId, kind, accountOwner);
-  const managed = await getManagedLibrary(ownerId, suppliedItems, kind);
   const selectedSourcePreference = String(requestedSourceId || '') || await getRokuSourcePreferenceByOwner(ownerId);
   const selectedSourceId = pickRokuSourceId(selectedSourcePreference, await getAllXtreamSources(accountOwner));
-  return managed.categories.flatMap(category => category.items.map(item => ({
-    ...item,
-    category: category.name,
-    rokuCategory: rokuText(category.name),
-  }))).filter(item => !selectedSourceId || String(item.sourceId || '') === selectedSourceId);
+  return suppliedItems
+    .filter(item => !selectedSourceId || String(item.sourceId || '') === selectedSourceId)
+    .map(item => ({ ...item, category: item.category || 'Other', rokuCategory: item.rokuCategory || rokuText(item.category || 'Other') }));
 }
 
 function directXtreamItem(item) {
@@ -1943,20 +1939,26 @@ app.get('/api/roku/bootstrap', async (req, res) => {
       })
       .filter(Boolean)
       .slice(0, 10);
-    // "New" rails come from the stored provider snapshot (newest per kind), not
-    // the Android startup snapshot which is only built when the phone app runs.
     const profileSources = flattenSelection(sources, ownerId, accountOwner);
     const selectedSource = profileSources.find(source => String(source._id) === selectedSourceId) || null;
     let rails = { series: [], movie: [], channel: [] };
-    let catalogMeta = null;
+    let liveCatalog = { series: [], movie: [], channel: [] };
     if (selectedSource) {
-      // The bootstrap response owns the Welcome counters. Wait for the first
-      // snapshot of every kind so Series and Movies cannot render as zero
-      // while their downloads are still running in the background.
-      await Promise.all(['series', 'movie', 'channel'].map(kind => ensureCatalogSnapshot(accountOwner, selectedSource, kind)));
-      const r = await getProviderCatalogRails(accountOwner, selectedSourceId, welcomeRailLimit).catch(() => null);
-      if (r) rails = { series: r.series || [], movie: r.movie || [], channel: r.channel || [] };
-      catalogMeta = await getProviderCatalogMeta(accountOwner, selectedSourceId).catch(() => null);
+      const [seriesCatalog, movieCatalog, channelCatalog] = await Promise.all([
+        getSourceCatalog(selectedSource, 'series'),
+        getSourceCatalog(selectedSource, 'movie'),
+        getSourceCatalog(selectedSource, 'channel'),
+      ]);
+      liveCatalog = {
+        series: seriesCatalog.map(item => selectedXtreamItem(selectedSource, item)),
+        movie: movieCatalog.map(item => selectedXtreamItem(selectedSource, item)),
+        channel: channelCatalog.map(item => selectedXtreamItem(selectedSource, item)),
+      };
+      rails = {
+        series: liveCatalog.series.slice().sort((a, b) => Number(b.added || 0) - Number(a.added || 0)).slice(0, welcomeRailLimit),
+        movie: liveCatalog.movie.slice().sort((a, b) => Number(b.added || 0) - Number(a.added || 0)).slice(0, welcomeRailLimit),
+        channel: liveCatalog.channel.slice().sort((a, b) => Number(b.added || 0) - Number(a.added || 0)).slice(0, welcomeRailLimit),
+      };
     }
     const railItems = list => (Array.isArray(list) ? list : [])
       .map(item => rokuDiscoveryItem(selectedSource
@@ -1964,22 +1966,11 @@ app.get('/api/roku/bootstrap', async (req, res) => {
         : { ...item, sourceId: selectedSourceId }))
       .filter(Boolean)
       .slice(0, welcomeRailLimit);
-    // Favorites store only id/title/kind - re-hydrate each one against the
-    // catalog snapshot for its real logo/category, and fall back to the
-    // selected source when the saved favorite has no sourceId (that snapshot
-    // has one implicit provider). Without the sourceId, rokuDiscoveryItem
-    // drops the item and the whole Favorites rail silently disappears.
-    // A favorite without a provider identity is legacy/ambiguous and must not
-    // leak its old title into whichever provider happens to be active now.
     const providerFavorites = favorites.filter(favorite => String(favorite.sourceId || '') === selectedSourceId);
-    const favoriteSnapshot = new Map();
-    if (selectedSourceId && providerFavorites.length) {
-      for (const row of await getProviderCatalogItemsByIds(accountOwner, selectedSourceId, providerFavorites.map(favorite => favorite.id)).catch(() => [])) {
-        favoriteSnapshot.set(`${row.kind}:${row.id}`, row);
-      }
-    }
+    const favoriteLive = new Map(liveCatalog.series.concat(liveCatalog.movie, liveCatalog.channel)
+      .map(item => [`${item.kind}:${item.id}`, item]));
     const hydratedFavorites = providerFavorites.map(favorite => {
-      const match = favoriteSnapshot.get(`${favorite.kind}:${favorite.id}`);
+      const match = favoriteLive.get(`${favorite.kind}:${favorite.id}`);
       return rokuDiscoveryItem({
         ...favorite,
         sourceId: favorite.sourceId || match?.sourceId || selectedSourceId,
@@ -2001,11 +1992,9 @@ app.get('/api/roku/bootstrap', async (req, res) => {
         channels: railItems(rails.channel),
       },
       stats: {
-        // Welcome counters come from the complete provider catalog snapshot
-        // already stored in MongoDB, not the profile's saved/enabled subset.
-        series: Math.max(0, Number(catalogMeta?.kinds?.series?.count) || 0),
-        movies: Math.max(0, Number(catalogMeta?.kinds?.movie?.count) || 0),
-        channels: Math.max(0, Number(catalogMeta?.kinds?.channel?.count) || 0),
+        series: liveCatalog.series.length,
+        movies: liveCatalog.movie.length,
+        channels: liveCatalog.channel.length,
         selectedSourceId,
         selectedSourceName: selectedSource?.name || '',
       },
@@ -2051,16 +2040,13 @@ app.get('/api/roku/search', async (req, res) => {
         console.warn(`[Roku search] kind=${kind} q="${query}" -> no server provider for owner`);
         return res.json({ items: [] });
       }
-      // Search must cover the WHOLE stored snapshot, not a category-bounded
-      // slice: getRokuServerCatalog(...,'all') truncates at 1500 items, which
-      // silently hid almost everything in a 200k+ item movie catalog. Query
-      // Mongo directly, independent of any category filter.
-      const regexSource = arabicSearchRegexSource(query) || query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      const result = await queryProviderCatalogItems(requestAccountOwner(req), String(source._id), kind, {
-        categoryId: '', page: 1, limit: 60, extraFilters: [{ title: { $regex: regexSource, $options: 'i' } }],
-      });
-      console.log(`[Roku search] kind=${kind} q="${query}" source=${String(source._id).slice(0, 8)} matches=${result.total}`);
-      const matches = result.items.map(item => selectedXtreamItem(source, item));
+      const catalog = await getSourceCatalog(source, kind);
+      const normalizedQuery = normalizeArabicSearch(query);
+      const matches = catalog
+        .map(item => selectedXtreamItem(source, item))
+        .filter(item => normalizeArabicSearch(item.title).includes(normalizedQuery))
+        .slice(0, 60);
+      console.log(`[Roku search] kind=${kind} q="${query}" source=${String(source._id).slice(0, 8)} matches=${matches.length}`);
       const savedKeys = Array.isArray(source.enabledKeys) ? source.enabledKeys.map(String) : [];
       if (kind === 'series') {
         return res.json({ savedKeys, items: matches.map(item => ({
@@ -2128,8 +2114,7 @@ app.get('/api/roku/deep-link-item', async (req, res) => {
     }
     const sourceId = String(source._id);
     if (kind) {
-      await ensureCatalogSnapshot(accountOwner, source, kind);
-      const row = await getProviderCatalogItem(accountOwner, sourceId, kind, contentId);
+      const row = (await getSourceCatalog(source, kind)).find(item => String(item.id) === contentId);
       if (!row) {
         console.warn(`[Roku deep link] mediaType=${mediaType} id=${contentId} source=${sourceId.slice(0, 8)} not found`);
         return res.status(404).json({ error: 'Content not found' });
@@ -2149,8 +2134,7 @@ app.get('/api/roku/deep-link-item', async (req, res) => {
       if (watched) seriesId = String(watched.seriesId);
     }
     if (!seriesId) return res.status(404).json({ error: 'Episode requires a series-qualified contentId' });
-    await ensureCatalogSnapshot(accountOwner, source, 'series');
-    const seriesRow = await getProviderCatalogItem(accountOwner, sourceId, 'series', seriesId);
+    const seriesRow = (await getSourceCatalog(source, 'series')).find(item => String(item.id) === seriesId);
     if (!seriesRow) return res.status(404).json({ error: 'Series not found' });
     const episodes = await buildXtreamSeriesPayload({
       selected: [selectedXtreamItem(source, seriesRow)], accountOwner, strict: true,
@@ -2256,21 +2240,33 @@ async function getRokuServerProvider(ownerId, accountOwner = ownerId) {
   return sources.find(source => String(source._id) === pickRokuSourceId(preferredId, sources)) || null;
 }
 
-// The Roku "server" library source reads the SAME MongoDB provider snapshot the
-// web app uses — never a live provider call. A missing snapshot is fetched once;
-// a stale one serves immediately and refreshes in the background.
-async function getRokuServerCatalog(ownerId, kind, requestedCategory, accountOwner = ownerId) {
+// Roku catalog browsing is server-mediated but never persisted. Fetch the
+// selected provider on demand, normalize the response, and keep only the
+// in-memory result for the lifetime of this request.
+async function getRokuLiveCatalog(ownerId, kind, requestedCategory = 'all', accountOwner = ownerId) {
   const source = await getRokuServerProvider(ownerId, accountOwner);
-  if (!source) return { source: null, category: '', items: [] };
-  await ensureCatalogSnapshot(accountOwner, source, kind);
-  const categories = await getProviderCatalogCategories(accountOwner, String(source._id), kind).catch(() => []);
-  const category = String(requestedCategory || categories[0]?.id || 'all');
-  const categoryName = categories.find(entry => String(entry.id) === category)?.name || 'Other';
-  const stored = await getProviderCatalogItemsForCategory(accountOwner, String(source._id), kind, category).catch(() => []);
-  const items = stored
-    .map(item => selectedXtreamItem(source, { ...item, category: item.category || categoryName }))
-    .sort((a, b) => String(a.title || '').localeCompare(String(b.title || ''), undefined, { numeric: true, sensitivity: 'base' }));
-  return { source, category, items };
+  if (!source) return { source: null, category: '', categories: [], items: [] };
+  const [categories, catalog] = await Promise.all([
+    getSourceCategories(source, kind).catch(() => []),
+    getSourceCatalog(source, kind, String(requestedCategory || 'all')),
+  ]);
+  const categoryRows = (Array.isArray(categories) ? categories : [])
+    .map(entry => ({ id: String(entry.id), name: cleanCategoryName(entry.name) }));
+  const category = String(requestedCategory || 'all');
+  const categoryName = categoryRows.find(entry => entry.id === category)?.name || '';
+  const items = (Array.isArray(catalog) ? catalog : [])
+    .map(item => selectedXtreamItem(source, {
+      ...item,
+      category: item.category || categoryName || 'Other',
+    }))
+    .filter(item => item.id);
+  return { source, category, categories: categoryRows, items };
+}
+
+async function getRokuServerCatalog(ownerId, kind, requestedCategory, accountOwner = ownerId) {
+  const result = await getRokuLiveCatalog(ownerId, kind, requestedCategory, accountOwner);
+  result.items.sort((a, b) => String(a.title || '').localeCompare(String(b.title || ''), undefined, { numeric: true, sensitivity: 'base' }));
+  return result;
 }
 
 // The "SAVED" filter on a Roku server-catalog page: only the items the account
@@ -2293,14 +2289,12 @@ app.get('/api/roku/provider/categories', async (req, res) => {
     if (!ownerId || !accountOwner) return res.status(401).json({ error: 'Authentication required' });
     const kind = ['series', 'movie', 'channel'].includes(String(req.query.kind)) ? String(req.query.kind) : '';
     if (!kind) return res.status(400).json({ error: 'kind must be series, movie, or channel' });
-    const source = await getRokuServerProvider(ownerId, accountOwner);
-    if (!source) return res.json({ sourceId: '', categories: [] });
-    await ensureCatalogSnapshot(accountOwner, source, kind);
-    const categories = (await getProviderCatalogCategories(accountOwner, String(source._id), kind).catch(() => []))
+    const catalog = await getRokuLiveCatalog(ownerId, kind, 'all', accountOwner);
+    const categories = catalog.categories
       .map(entry => ({ id: String(entry.id), name: cleanCategoryName(entry.name), rokuName: rokuText(cleanCategoryName(entry.name)) }))
       .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
     res.set('Cache-Control', 'private, no-store');
-    res.json({ sourceId: String(source._id), sourceName: source.name, categories });
+    res.json({ sourceId: catalog.source ? String(catalog.source._id) : '', sourceName: catalog.source?.name || '', categories });
   } catch (error) { res.status(502).json({ error: error.message }); }
 });
 

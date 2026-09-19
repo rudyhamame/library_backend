@@ -58,7 +58,11 @@ function sourcesForAccount(account, ownerId) {
   return sources.map(source => {
     const selections = {};
     for (const profile of account.profiles || []) {
-      const profileOwner = profile.isDefault ? accountOwner : String(profile.ownerId);
+      // Saved selections are profile-specific even for the default profile.
+      // The account owner remains the library/database owner, but Roku asks
+      // for the selected profile's saved URLs using its profile owner scope.
+      const profileOwner = String(profile.ownerId || (profile.isDefault ? accountOwner : ''));
+      if (!profileOwner) continue;
       const selection = profile.library?.savedSelections;
       if (selection) selections[profileOwner] = selection;
     }

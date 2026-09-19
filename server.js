@@ -786,7 +786,13 @@ async function getLibrarySelectedItems(ownerId = null, requestedKind = '', accou
       const providerRows = await getSourceCatalog(source, kind).catch(() => []);
       for (const row of providerRows) {
         const item = selectedXtreamItem(source, row);
-        if (wanted.has(String(item.providerUrl || ''))) rows.push(item);
+        const exact = wanted.has(String(item.providerUrl || ''));
+        const providerId = url => {
+          const match = String(url || '').match(/\/(?:series|movie|live)\/[^/]+\/[^/]+\/([^/?#]+)/i);
+          return match ? match[1].replace(/\.[a-z0-9]+$/i, '') : '';
+        };
+        const byProviderId = [...wanted].some(url => providerId(url) === String(item.id));
+        if (exact || byProviderId) rows.push(item);
       }
     }
     return rows;

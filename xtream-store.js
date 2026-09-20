@@ -130,11 +130,12 @@ export async function updateXtreamSelection(id, selection, accountOwner, profile
   const account = (await accountForLibraryOwner(profileOwner)).account;
   const profile = (account.profiles || []).find(row => String(row.ownerId) === String(profileOwner) || String(row.id) === String(profileOwner));
   const next = savedShape(profile?.library?.savedSelections);
-  for (const kind of savedKinds) next[kind] = next[kind].filter(url => !String(url).startsWith(String(located.source.baseUrl || '').replace(/\/$/, '') + '/'));
+  const sourceId = String(located.source._id);
+  for (const kind of savedKinds) next[kind] = next[kind].filter(identity => identity.sourceId !== sourceId);
   for (const item of Array.isArray(selection?.enabledItems) ? selection.enabledItems : []) {
-    const kind = kindFor(item.kind);
-    const url = String(item.providerUrl || sourceUrl(located.source, kind, item.id, item.extension));
-    if (url) next[kind].push(url);
+    const bucket = kindFor(item.kind);
+    const itemId = String(item.id || item.itemId || '');
+    if (itemId) next[bucket].push({ sourceId, kind: identityKindFor(bucket), itemId });
   }
   await updateAccountLibrary(profileOwner, library => { library.savedSelections = next; return library; });
   return publicXtreamSource({ ...located.source, selections: { [String(profileOwner)]: next } }, profileOwner, accountOwner);

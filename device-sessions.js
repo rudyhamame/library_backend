@@ -230,7 +230,7 @@ export async function requestPasswordReset(email, realm = 'roku') {
   if (!validEmail(normalizedEmail)) return { error: 'Enter a valid email address' };
   const account = await (await accounts(realm)).findOne({ email: normalizedEmail }, { projection: { _id: 1 } });
   if (account) {
-    const code = randomBytes(4).toString('hex').toUpperCase();
+    const code = String(randomInt(100000, 1000000));
     resetCodes.set(code, { email: normalizedEmail, realm: normalizeAccountRealm(realm), accountId: String(account._id), expiresAt: Date.now() + resetCodeTtlMs });
     try { await sendPasswordResetEmail(normalizedEmail, code); }
     catch (error) { console.error('[password reset] email send failed:', error.message); }

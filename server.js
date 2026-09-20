@@ -1662,6 +1662,7 @@ app.post('/api/account/password-reset/request', async (req, res) => {
   try {
     const realm = req.body?.realm === 'roku' ? 'roku' : 'general';
     const result = await requestPasswordReset(req.body?.email, realm);
+    console.log(`[password-reset] phase=request realm=${realm} outcome=${result.error ? 'error message=' + result.error : 'ok'}`);
     if (result.error) return res.status(400).json(result);
     res.json(result);
   } catch (error) { res.status(500).json({ error: error.message }); }
@@ -1669,6 +1670,7 @@ app.post('/api/account/password-reset/request', async (req, res) => {
 app.post('/api/account/password-reset/confirm', async (req, res) => {
   try {
     const result = await confirmPasswordReset(req.body?.code, req.body?.newPassword);
+    console.log(`[password-reset] phase=confirm outcome=${result.error ? 'error message=' + result.error : 'ok'}`);
     if (result.error) return res.status(result.error.includes('expired') ? 404 : 400).json(result);
     res.json(result);
   } catch (error) { res.status(500).json({ error: error.message }); }

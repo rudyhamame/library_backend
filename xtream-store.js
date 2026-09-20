@@ -142,8 +142,18 @@ export async function deleteXtreamSource(id, ownerId) {
 
 export async function moveXtreamSources(fromOwnerId, toOwnerId) {
   if (!fromOwnerId || !toOwnerId || fromOwnerId === toOwnerId) return;
-  const from = await accountForLibraryOwner(fromOwnerId);
+  let from;
+  try {
+    from = await accountForLibraryOwner(fromOwnerId);
+  } catch (error) {
+    // Older linked-device records can still carry a device-scoped owner ID.
+    // Providers now live on the account document, so such an owner has no
+    // account library to move. Do not make sign-in fail for that account.
+    if (error?.status === 404) return;
+    throw error;
+  }
   const to = await accountForLibraryOwner(toOwnerId);
+  if (String(from.account._id) === String(to.account._id)) return;
   const providers = [...(to.account.providers || [])];
   for (const source of from.account.providers || []) if (!providers.some(item => item._id === source._id)) providers.push(source);
   await to.collection.updateOne({ _id: to.account._id }, { $set: { providers, updatedAt: new Date() } });

@@ -74,6 +74,8 @@ const welcomeRailLimit = 10;
 const xtreamItemsInFlight = new Map();
 const welcomeProviderMemoryCache = new Map();
 const welcomeProviderMemoryTtlMs = 30_000;
+const browserProviderCatalogCache = new Map();
+const browserProviderCatalogTtlMs = Math.max(60_000, Number.parseInt(process.env.BROWSER_PROVIDER_CATALOG_TTL_MS || '900000', 10) || 900_000);
 // Self-hosted on a real machine now (not a 256 MB cloud box), so a few catalog
 // downloads can run at once instead of strictly one.
 const catalogMemoryConcurrency = Math.max(1, Number.parseInt(process.env.CATALOG_MEMORY_CONCURRENCY || '3', 10) || 3);
@@ -240,6 +242,22 @@ const catalogSnapshotHasKind = async (ownerId, sourceId, kind) => {
   const meta = await getProviderCatalogMeta(ownerId, String(sourceId)).catch(() => null);
   return Boolean(meta?.kinds?.[kind]?.syncedAt);
 };
+
+async function getBrowserProviderCatalog(source, kind) {
+  const key = `${source._id}:${kind}`;
+  const cached = browserProviderCatalogCache.get(key);
+  if (cached?.expires > Date.now()) return cached;
+  const categories = await getSourceCategories(source, kind).catch(() => []);
+  const categoryNames = new Map(categories.map(entry => [String(entry.id), cleanCategoryName(entry.name)]));
+  const rawItems = await getSourceCatalog(source, kind);
+  const items = rawItems.map(item => selectedXtreamItem(source, {
+    ...item,
+    category: item.category || item.categoryName || categoryNames.get(String(item.categoryId)) || 'Other',
+  })).filter(item => item.id);
+  const payload = { items, categories: categories.map(entry => ({ id: String(entry.id), name: cleanCategoryName(entry.name) })) };
+  browserProviderCatalogCache.set(key, { ...payload, expires: Date.now() + browserProviderCatalogTtlMs });
+  return payload;
+}
 
 // The title-prefix language list only changes when a kind re-syncs. Compute it
 // once per snapshot and reuse it for every browse/search request.
@@ -2902,8 +2920,8 @@ app.get('/api/catalog/welcome', async (req, res) => {
     // Category lists are included so Android can seed its local category cache
     // during Welcome refresh; Playlist then remains cache-only.
     const results = await Promise.all(kinds.map(async kind => {
-      const [items, categories] = await Promise.all([getSourceCatalog(source, kind), getSourceCategories(source, kind).catch(() => [])]);
-      return { items: items.map(item => selectedXtreamItem(source, item)).filter(item => item.id), categories };
+      const catalog = await getBrowserProviderCatalog(source, kind);
+      return { items: catalog.items, categories: catalog.categories };
     }));
     const payload = {};
     for (let i = 0; i < kinds.length; i++) {
@@ -3531,12 +3549,28 @@ app.get('/api/xtream/catalog', async (req, res) => {
     if (!category) return res.status(400).json({ error: 'Select a playlist category first' });
     // Browsing respects the selected category. Searching must use the full
     // playlist catalog for this content type so matches in other categories
-    // are not hidden by the category currently open in the UI.
-    // Served strictly from the MongoDB provider snapshot - the playlist
-    // provider is never contacted here. The snapshot is populated by the Roku
-    // bootstrap and the dashboard's catalog controls.
+    // are not hidden by the category currently open in the UI. If Mongo has
+    // not received a snapshot yet, fetch the provider once and keep the result
+    // in the bounded server cache; the browser caches each returned page.
     if (!await catalogSnapshotHasKind(accountOwner, source._id, kind)) {
-      return res.json({ source: publicXtreamSource(source, ownerId, accountOwner), languages: [], items: [], pagination: { page: 1, pageSize: 0, pageCount: 1, total: 0 }, origin: 'unavailable' });
+      const live = await getBrowserProviderCatalog(source, kind);
+      const titleLanguage = String(req.query.titleLanguage || req.query.language || 'all').toUpperCase();
+      const matches = live.items.filter(item => {
+        if (category !== 'all' && String(item.categoryId || '') !== category) return false;
+        if (query && !normalizeSearchText(item.title).includes(query)) return false;
+        if (titleLanguage !== 'ALL' && !new RegExp(`^\\s*${titleLanguage.replace(/[^A-Z]/gi, '')}\\s*[-|:]`, 'i').test(String(item.title || ''))) return false;
+        return true;
+      }).sort((left, right) => String(left.title || '').localeCompare(String(right.title || ''), undefined, { numeric: true, sensitivity: 'base' }));
+      const requestedPage = Math.max(1, Number.parseInt(req.query.page, 10) || 1);
+      const pageSize = Math.min(200, Math.max(10, Number.parseInt(req.query.limit, 10) || 50));
+      const pageCount = Math.max(1, Math.ceil(matches.length / pageSize));
+      const pageItems = matches.slice((requestedPage - 1) * pageSize, requestedPage * pageSize);
+      const languages = [...new Set(live.items.map(item => titleLanguageCode(item)).filter(Boolean))].sort();
+      return res.json({
+        source: publicXtreamSource(source, ownerId, accountOwner), languages,
+        categories: live.categories, items: pageItems,
+        pagination: { page: requestedPage, pageSize, pageCount, total: matches.length }, origin: 'provider',
+      });
     }
     const selectedSource = { ...source, ...selectionFor(source, ownerId, accountOwner) };
     const enabled = new Set(selectedSource.enabledKeys);

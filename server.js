@@ -1120,7 +1120,13 @@ app.post('/api/roku/device-session/on-device-auth', async (req, res) => {
     if (recoveredSession && !result.error) result.sessionCode = activeCode;
     if (result.error) {
       console.log(`[roku on-device-auth] phase=${authPhase} outcome=error message=${result.error}`);
-      return res.status(result.error.includes('expired') ? 404 : result.error.includes('Incorrect') ? 401 : 400).json(result);
+      // Some Roku firmware silently drops the response body on non-2xx
+      // replies, so the error text never reaches the viewer. 404 is kept for
+      // "expired" because the client branches on that status specifically to
+      // restart the pairing session; every other error rides a 200 so the
+      // body (which the client already reads before trusting a token) is
+      // guaranteed to arrive.
+      return res.status(result.error.includes('expired') ? 404 : 200).json(result);
     }
     console.log(`[roku on-device-auth] phase=${authPhase} outcome=${result.token ? 'token' : result.verificationValid ? 'verification-valid' : result.verificationResent ? 'resent' : result.verificationRequired ? 'verification-required' : result.verificationNotRequired ? 'verification-not-required' : 'ok'}`);
     if (!result.token && (result.verificationRequired || result.verificationNotRequired || result.verificationValid || result.verificationResent)) return res.json(result);

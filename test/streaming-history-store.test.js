@@ -17,6 +17,7 @@ test('last_kinds_watched stores provider identity and playback state only', () =
   });
   assert.deepEqual(record, {
     providerURL: 'http://provider.example/movie/movie-1.mkv',
+    providerIdentity: { sourceId: 'provider-1', kind: 'movie', itemId: 'movie-1', seriesId: '' },
     lastWatched: '00:22:00',
   });
 });

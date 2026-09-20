@@ -755,18 +755,19 @@ async function hydrateHistoryFromProviders(items, sources) {
   const episodeCache = new Map();
   return Promise.all((items || []).map(async item => {
     const providerUrl = typeof item.providerURL === 'string' ? item.providerURL : '';
-    const source = bySource.get(String(item.sourceId || item.providerURL?.sourceId || ''))
+    const source = bySource.get(String(item.sourceId || item.providerIdentity?.sourceId || item.providerURL?.sourceId || ''))
       || (providerUrl ? (sources || []).find(candidate => providerUrl.startsWith(`${String(candidate.baseUrl || '').replace(/\/$/, '')}/`)) : null);
     if (!source) return item;
-    const kind = item.kind === 'channel' ? 'channel' : item.kind === 'movie' ? 'movie' : 'series';
+    const identityKind = String(item.providerIdentity?.kind || '').toLowerCase();
+    const kind = item.kind === 'channel' || identityKind === 'live' ? 'channel' : item.kind === 'movie' || identityKind === 'movie' ? 'movie' : 'series';
     const providerPathId = providerUrl.match(/\/(?:series|movie|live)\/[^/]+\/[^/]+\/([^/?#]+)/i)?.[1]?.replace(/\.[a-z0-9]+$/i, '') || '';
-    const itemId = String(item.itemId || item.providerURL?.itemId || providerPathId);
+    const itemId = String(item.itemId || item.providerIdentity?.itemId || item.providerURL?.itemId || providerPathId);
     if (!itemId) return item;
     try {
       let providerItem;
       let resolvedSeriesId = '';
       if (kind === 'series') {
-        let seriesId = String(item.seriesId || item.providerURL?.seriesId || '');
+        let seriesId = String(item.seriesId || item.providerIdentity?.seriesId || item.providerURL?.seriesId || '');
         if (!seriesId) seriesId = await findProviderSeriesForEpisode(source.ownerId, source._id, itemId);
         if (!seriesId) return item;
         resolvedSeriesId = seriesId;
@@ -792,7 +793,7 @@ async function hydrateHistoryFromProviders(items, sources) {
         duration: providerItem.duration || item.duration || '',
           seasonNumber: providerItem.seasonNumber ?? item.seasonNumber ?? '',
           episodeNumber: providerItem.episodeNumber ?? item.episodeNumber ?? '',
-          seriesId: item.seriesId || item.providerURL?.seriesId || resolvedSeriesId,
+          seriesId: item.seriesId || item.providerIdentity?.seriesId || item.providerURL?.seriesId || resolvedSeriesId,
         };
       return { ...merged, providerUrl: await sourceProviderUrl(source, kind, itemId, merged.extension).catch(() => merged.providerUrl || '') };
     } catch (error) {

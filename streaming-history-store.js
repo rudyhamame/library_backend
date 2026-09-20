@@ -17,6 +17,7 @@ const historyKey = value => {
 export const seriesHistoryKey = (sourceId, seriesId) => `${String(sourceId || '')}:${String(seriesId || '')}`;
 const emptyLastKindsWatched = () => ({ episode: null, movie: null, live: null });
 const watchedSeriesKey = item => {
+  if (item?.providerIdentity) return `${String(item.providerIdentity.sourceId || '')}:${String(item.providerIdentity.seriesId || '')}`;
   if (typeof item?.providerURL === 'string') return item.providerURL;
   return `${String(item?.providerURL?.sourceId || '')}:${String(item?.providerURL?.seriesId || '')}`;
 };
@@ -27,12 +28,18 @@ const watchedPositionMs = value => {
 };
 const seriesWatchedRecord = update => ({
   providerURL: String(update.providerUrl || update.providerURL || ''),
+  providerIdentity: {
+    sourceId: update.sourceId,
+    kind: 'episode',
+    itemId: update.itemId,
+    seriesId: update.seriesId,
+  },
   lastWatched: update.lastMoment,
 });
 const seriesRecordHistory = record => record ? ({
-  itemId: record.providerURL?.itemId || '',
-  sourceId: record.providerURL?.sourceId || '',
-  seriesId: record.providerURL?.seriesId || '',
+  itemId: record.providerIdentity?.itemId || record.providerURL?.itemId || '',
+  sourceId: record.providerIdentity?.sourceId || record.providerURL?.sourceId || '',
+  seriesId: record.providerIdentity?.seriesId || record.providerURL?.seriesId || '',
   endPositionMs: watchedPositionMs(record.lastWatched),
   lastMoment: record.lastWatched || '00:00:00',
 }) : null;
@@ -41,6 +48,12 @@ const seriesRecordHistory = record => record ? ({
 // duration, and episode details are rehydrated by the server when requested.
 export const kindRecord = update => ({
   providerURL: String(update.providerUrl || update.providerURL || ''),
+  providerIdentity: {
+    sourceId: update.sourceId,
+    kind: update.kind === 'series' ? 'episode' : update.kind === 'channel' ? 'live' : update.kind || (String(update.providerUrl || update.providerURL || '').match(/\/(series|movie|live)\//i)?.[1] === 'series' ? 'episode' : String(update.providerUrl || update.providerURL || '').match(/\/(series|movie|live)\//i)?.[1] || 'movie'),
+    itemId: update.itemId,
+    seriesId: update.seriesId,
+  },
   lastWatched: update.lastMoment,
 });
 const kindRecordHistory = (record, kindKey = '') => record?.providerURL ? ({
@@ -48,9 +61,9 @@ const kindRecordHistory = (record, kindKey = '') => record?.providerURL ? ({
   // The account-library pivot kept older watch records in their compact
   // providerURL form. Expose the same flat identity used by the API and Roku
   // client so those records remain playable after migration.
-  itemId: record.itemId || (typeof record.providerURL === 'string' ? record.providerURL.match(/\/(?:series|movie|live)\/[^/]+\/[^/]+\/([^/?#]+)/i)?.[1]?.replace(/\.[a-z0-9]+$/i, '') : record.providerURL.itemId) || '',
-  sourceId: record.sourceId || (typeof record.providerURL === 'string' ? '' : record.providerURL.sourceId) || '',
-  seriesId: record.seriesId || (typeof record.providerURL === 'string' ? '' : record.providerURL.seriesId) || '',
+  itemId: record.itemId || record.providerIdentity?.itemId || (typeof record.providerURL === 'string' ? record.providerURL.match(/\/(?:series|movie|live)\/[^/]+\/[^/]+\/([^/?#]+)/i)?.[1]?.replace(/\.[a-z0-9]+$/i, '') : record.providerURL.itemId) || '',
+  sourceId: record.sourceId || record.providerIdentity?.sourceId || (typeof record.providerURL === 'string' ? '' : record.providerURL.sourceId) || '',
+  seriesId: record.seriesId || record.providerIdentity?.seriesId || (typeof record.providerURL === 'string' ? '' : record.providerURL.seriesId) || '',
   kind: record.kind || (kindKey === 'episode' ? 'series' : kindKey === 'live' ? 'channel' : kindKey),
   endPositionMs: watchedPositionMs(record.lastWatched),
   lastMoment: record.lastWatched || '00:00:00',
@@ -176,9 +189,9 @@ export async function getStreamingContinueWatching(ownerId) {
 }
 
 export function isContinueWatchingItem(item) {
-  const sourceId = item?.sourceId || item?.providerURL?.sourceId;
+  const sourceId = item?.sourceId || item?.providerIdentity?.sourceId || item?.providerURL?.sourceId;
   const providerUrl = typeof item?.providerURL === 'string' ? item.providerURL : '';
-  const itemId = item?.itemId || item?.providerURL?.itemId || providerUrl.match(/\/(?:series|movie|live)\/[^/]+\/[^/]+\/([^/?#]+)/i)?.[1];
+  const itemId = item?.itemId || item?.providerIdentity?.itemId || item?.providerURL?.itemId || providerUrl.match(/\/(?:series|movie|live)\/[^/]+\/[^/]+\/([^/?#]+)/i)?.[1];
   if ((!sourceId && !providerUrl) || !itemId) return false;
   if (item.kind === 'channel') return true;
   if (item.completed === true) return false;

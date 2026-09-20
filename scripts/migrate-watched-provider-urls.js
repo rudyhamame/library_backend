@@ -28,7 +28,18 @@ function providerUrl(record, kind, account) {
 function compactRecord(record, kind, account) {
   const url = providerUrl(record, kind, account);
   if (!url || !record?.lastWatched) return null;
-  return { providerURL: url, lastWatched: String(record.lastWatched) };
+  const source = (account.providers || []).find(item => String(item._id) === String(record?.providerIdentity?.sourceId || record?.providerURL?.sourceId || ''))
+    || (account.providers || []).find(item => url.startsWith(`${String(item.baseUrl || '').replace(/\/$/, '')}/`));
+  return {
+    providerURL: url,
+    providerIdentity: {
+      sourceId: String(record?.providerIdentity?.sourceId || record?.providerURL?.sourceId || source?._id || ''),
+      kind: kind === 'series' ? 'episode' : kind,
+      itemId: String(record?.providerIdentity?.itemId || record?.providerURL?.itemId || idFromUrl(url)),
+      seriesId: String(record?.providerIdentity?.seriesId || record?.providerURL?.seriesId || ''),
+    },
+    lastWatched: String(record.lastWatched),
+  };
 }
 
 const client = await MongoClient.connect(mongoUri, { serverSelectionTimeoutMS: 10_000 });

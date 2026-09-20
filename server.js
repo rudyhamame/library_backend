@@ -764,9 +764,12 @@ async function hydrateHistoryFromProviders(items, sources) {
     if (!itemId) return item;
     try {
       let providerItem;
+      let resolvedSeriesId = '';
       if (kind === 'series') {
-        const seriesId = String(item.seriesId || item.providerURL?.seriesId || '');
+        let seriesId = String(item.seriesId || item.providerURL?.seriesId || '');
+        if (!seriesId) seriesId = await findProviderSeriesForEpisode(source.ownerId, source._id, itemId);
         if (!seriesId) return item;
+        resolvedSeriesId = seriesId;
         const cacheKey = `${source._id}:${seriesId}`;
         if (!episodeCache.has(cacheKey)) episodeCache.set(cacheKey, getXtreamSeriesEpisodes(source, seriesId));
         const details = await episodeCache.get(cacheKey);
@@ -787,9 +790,10 @@ async function hydrateHistoryFromProviders(items, sources) {
         extension: providerItem.extension || item.extension || '',
         category: providerItem.category || item.category || '',
         duration: providerItem.duration || item.duration || '',
-        seasonNumber: providerItem.seasonNumber ?? item.seasonNumber ?? '',
-        episodeNumber: providerItem.episodeNumber ?? item.episodeNumber ?? '',
-      };
+          seasonNumber: providerItem.seasonNumber ?? item.seasonNumber ?? '',
+          episodeNumber: providerItem.episodeNumber ?? item.episodeNumber ?? '',
+          seriesId: item.seriesId || item.providerURL?.seriesId || resolvedSeriesId,
+        };
       return { ...merged, providerUrl: await sourceProviderUrl(source, kind, itemId, merged.extension).catch(() => merged.providerUrl || '') };
     } catch (error) {
       console.warn(`[History] provider metadata unavailable for ${kind}:${itemId}: ${error.message}`);

@@ -26,8 +26,9 @@ const seriesWatchedRecord = update => ({
   providerIdentity: {
     sourceId: update.sourceId,
     kind: 'episode',
-    itemId: update.itemId,
     seriesId: update.seriesId,
+    itemId: update.itemId,
+    sessionId: update.sessionId,
   },
   lastWatched: update.lastMoment,
 });
@@ -38,24 +39,23 @@ const seriesRecordHistory = record => record ? ({
   endPositionMs: watchedPositionMs(record.lastWatched),
   lastMoment: record.lastWatched || '00:00:00',
 }) : null;
-// Keep the account library independent from provider catalog metadata. The
-// provider reference is the durable identity; title, artwork, extension,
-// duration, and episode details are rehydrated by the server when requested.
-export const kindRecord = update => ({
-  providerIdentity: {
-    sourceId: update.sourceId,
-    kind: update.kind === 'series' ? 'episode' : update.kind === 'channel' ? 'live' : update.kind || 'movie',
-    itemId: update.itemId,
-    seriesId: update.seriesId,
-  },
+// The identity (sourceId/kind/itemId/seriesId) plus playback state is the
+// only thing kept here - never a precomputed provider URL. Playback URLs
+// are resolved fresh from the provider by the server when requested.
+const kindRecord = update => ({
+  itemId: update.itemId,
+  kind: update.kind,
+  sourceId: update.sourceId,
+  seriesId: update.seriesId,
+  endPositionMs: update.endPositionMs,
+  mediaDurationMs: update.mediaDurationMs,
+  completed: update.completed === true,
+  sessionId: update.sessionId,
+  updatedAt: update.updatedAt,
   lastWatched: update.lastMoment,
 });
-const kindRecordHistory = (record, kindKey = '') => record?.providerIdentity ? ({
+const kindRecordHistory = record => record?.sourceId ? ({
   ...record,
-  itemId: record.itemId || record.providerIdentity.itemId || '',
-  sourceId: record.sourceId || record.providerIdentity.sourceId || '',
-  seriesId: record.seriesId || record.providerIdentity.seriesId || '',
-  kind: record.kind || (kindKey === 'episode' ? 'series' : kindKey === 'live' ? 'channel' : kindKey),
   endPositionMs: watchedPositionMs(record.lastWatched),
   lastMoment: record.lastWatched || '00:00:00',
 }) : null;
@@ -96,17 +96,14 @@ export async function saveStreamingHistory({ ownerId, sessionId, itemId, title, 
 
 export async function getStreamingSession(ownerId, sessionId) {
   const library = await getAccountLibrary(ownerId);
-  return Object.entries(library.last_kinds_watched)
-    .map(([kind, record]) => kindRecordHistory(record, kind))
-    .find(item => item?.sessionId === String(sessionId)) || null;
+  return [
+    ...Object.values(library.last_kinds_watched).map(kindRecordHistory),
+  ].find(item => item?.sessionId === String(sessionId)) || null;
 }
 
 export async function getStreamingHistory(ownerId) {
   const library = await getAccountLibrary(ownerId);
-  return Object.entries(library.last_kinds_watched)
-    .map(([kind, record]) => kindRecordHistory(record, kind))
-    .filter(Boolean)
-    .sort((a, b) => new Date(b.updatedAt || 0) - new Date(a.updatedAt || 0));
+  return Object.values(library.last_kinds_watched).map(kindRecordHistory).filter(Boolean).sort((a, b) => new Date(b.updatedAt || 0) - new Date(a.updatedAt || 0));
 }
 
 export async function deleteStreamingSession(ownerId, sessionId) {
@@ -120,7 +117,7 @@ export async function deleteStreamingSession(ownerId, sessionId) {
       }
     }
     const before = library.series_last_watched.length;
-    library.series_last_watched = library.series_last_watched.filter(item => item?.sessionId !== String(sessionId));
+    library.series_last_watched = library.series_last_watched.filter(item => item?.providerIdentity?.sessionId !== String(sessionId));
     deleted += before - library.series_last_watched.length;
     return library;
   });
@@ -146,7 +143,7 @@ export async function getStreamingResume(ownerId, { sourceId, itemId, kind, seri
   const current = key === 'episode' && seriesId
     ? library.series_last_watched.find(item => watchedSeriesKey(item) === seriesHistoryKey(sourceId, seriesId))
     : null;
-  const item = current ? seriesRecordHistory(current) : kindRecordHistory(library.last_kinds_watched[key], key);
+  const item = current ? seriesRecordHistory(current) : kindRecordHistory(library.last_kinds_watched[key]);
   return item && item.sourceId === String(sourceId) && item.itemId === String(itemId) ? item : null;
 }
 
@@ -155,7 +152,7 @@ export async function getSeriesLastWatched(ownerId, sourceId, seriesId) {
   const library = await getAccountLibrary(ownerId);
   const keyed = library.series_last_watched.find(item => watchedSeriesKey(item) === seriesHistoryKey(sourceId, seriesId));
   if (keyed) return seriesRecordHistory(keyed);
-  const legacy = kindRecordHistory(library.last_kinds_watched.episode, 'episode');
+  const legacy = kindRecordHistory(library.last_kinds_watched.episode);
   if (!legacy || String(legacy.sourceId) !== String(sourceId) || String(legacy.seriesId) !== String(seriesId)) return null;
   // Preserve an older single-episode record until the next playback write.
   await updateAccountLibrary(ownerId, next => {
@@ -173,12 +170,10 @@ export async function getStreamingContinueWatching(ownerId) {
 }
 
 export function isContinueWatchingItem(item) {
-  const sourceId = item?.sourceId || item?.providerIdentity?.sourceId;
-  const itemId = item?.itemId || item?.providerIdentity?.itemId;
-  if (!sourceId || !itemId) return false;
+  if (!item?.sourceId || !item?.itemId) return false;
   if (item.kind === 'channel') return true;
   if (item.completed === true) return false;
-  const position = item.endPositionMs != null ? milliseconds(item.endPositionMs) : watchedPositionMs(item.lastWatched);
+  const position = milliseconds(item.endPositionMs);
   const duration = milliseconds(item.mediaDurationMs);
   return duration <= 0 || position < Math.max(duration - 30000, duration * 0.95);
 }

@@ -2,9 +2,12 @@
 // items. Converts:
 //   - profile.library.savedSelections.{series,movies,live}: array of URL
 //     strings -> array of {sourceId, kind, itemId}
-//   - profile.library.last_kinds_watched.{episode,movie,live} and
-//     profile.library.series_last_watched[]: drops the providerURL field,
-//     keeping only providerIdentity {sourceId, kind, itemId, seriesId}
+//   - profile.library.last_kinds_watched.{episode,movie,live}: drops the
+//     `providerURL` field (fully redundant - itemId/kind/sourceId/seriesId
+//     already live top-level on these records)
+//   - profile.library.series_last_watched[]: renames `providerURL` ->
+//     `providerIdentity` and adds `kind: 'episode'` (this was the only
+//     place these records' identity lived, just under a misleading name)
 // Run once against each database: `node scripts/migrate-saved-selections-to-identity.js`
 import 'dotenv/config';
 import { MongoClient } from 'mongodb';
@@ -14,10 +17,6 @@ const rokuDb = process.env.MONGODB_DB || 'rh_roku';
 const generalDb = process.env.MONGODB_GENERAL_DB || 'rh_general';
 
 const idFromUrl = value => String(value || '').match(/\/(?:series|movie|live)\/[^/]+\/[^/]+\/([^/?#]+)/i)?.[1]?.replace(/\.[a-z0-9]+$/i, '') || '';
-const kindFromUrl = value => {
-  const match = String(value || '').match(/\/(series|movie|live)\//i);
-  return match ? (match[1].toLowerCase() === 'live' ? 'channel' : match[1].toLowerCase()) : '';
-};
 const identityKindFor = bucket => bucket === 'live' ? 'channel' : bucket === 'movies' ? 'movie' : 'series';
 
 function migrateSavedSelectionBucket(entries, bucket, providers) {
@@ -43,20 +42,48 @@ function migrateSavedSelectionBucket(entries, bucket, providers) {
   return { items, changed };
 }
 
-function migrateWatchedRecord(record) {
+// bucketKey is the last_kinds_watched object key ('episode'/'movie'/'live'),
+// which is the source of truth for kind - not any stale identity.kind value,
+// since saveStreamingHistory's own convention is 'series'/'movie'/'channel'.
+const kindForBucketKey = bucketKey => bucketKey === 'episode' ? 'series' : bucketKey === 'live' ? 'channel' : 'movie';
+
+function migrateKindRecord(record, bucketKey) {
   if (!record) return { record, changed: false };
-  const hadProviderUrl = Object.prototype.hasOwnProperty.call(record, 'providerURL');
-  if (record.providerIdentity && !hadProviderUrl) return { record, changed: false };
-  const legacyUrl = typeof record.providerURL === 'string' ? record.providerURL : '';
-  const legacyObj = record.providerURL && typeof record.providerURL === 'object' ? record.providerURL : null;
-  const identity = record.providerIdentity || {
-    sourceId: legacyObj?.sourceId || '',
-    kind: kindFromUrl(legacyUrl) === 'series' ? 'episode' : kindFromUrl(legacyUrl) === 'channel' ? 'live' : (legacyObj?.kind || 'movie'),
-    itemId: legacyObj?.itemId || idFromUrl(legacyUrl),
-    seriesId: legacyObj?.seriesId || '',
+  const hasProviderUrl = Object.prototype.hasOwnProperty.call(record, 'providerURL');
+  const identity = record.providerIdentity;
+  const wrongKind = record.kind && record.kind !== kindForBucketKey(bucketKey);
+  if (!hasProviderUrl && !identity && !wrongKind) return { record, changed: false }; // already flat/clean
+  const { providerURL, providerIdentity, ...rest } = record;
+  return {
+    record: {
+      ...rest,
+      itemId: rest.itemId || identity?.itemId || '',
+      kind: kindForBucketKey(bucketKey),
+      sourceId: rest.sourceId || identity?.sourceId || '',
+      seriesId: rest.seriesId || identity?.seriesId || '',
+    },
+    changed: true,
   };
+}
+
+function migrateSeriesRecord(record) {
+  if (!record) return { record, changed: false };
+  if (record.providerIdentity) return { record, changed: false };
+  const legacy = record.providerURL && typeof record.providerURL === 'object' ? record.providerURL : {};
   const { providerURL, ...rest } = record;
-  return { record: { ...rest, providerIdentity: identity }, changed: true };
+  return {
+    record: {
+      ...rest,
+      providerIdentity: {
+        sourceId: legacy.sourceId || '',
+        kind: 'episode',
+        itemId: legacy.itemId || '',
+        seriesId: legacy.seriesId || '',
+        sessionId: legacy.sessionId || '',
+      },
+    },
+    changed: true,
+  };
 }
 
 async function migrateDatabase(client, databaseName) {
@@ -82,15 +109,15 @@ async function migrateDatabase(client, databaseName) {
 
       if (Array.isArray(library.series_last_watched)) {
         library.series_last_watched = library.series_last_watched.map(record => {
-          const { record: next, changed } = migrateWatchedRecord(record);
+          const { record: next, changed } = migrateSeriesRecord(record);
           if (changed) { profileChanged = true; watchedChanged++; }
           return next;
-        }).filter(Boolean);
+        });
       }
 
       if (library.last_kinds_watched) {
         for (const key of ['episode', 'movie', 'live']) {
-          const { record: next, changed } = migrateWatchedRecord(library.last_kinds_watched[key]);
+          const { record: next, changed } = migrateKindRecord(library.last_kinds_watched[key], key);
           if (changed) { profileChanged = true; watchedChanged++; }
           library.last_kinds_watched[key] = next;
         }

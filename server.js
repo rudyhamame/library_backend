@@ -1624,6 +1624,7 @@ app.post('/api/partner/invite', async (req, res) => {
       sourceId: String(sourceId),
       kind,
       id: String(id),
+      providerURL: await sourceProviderUrl(source, kind, String(id), extension),
       extension: String(extension || ''),
       streamTicket,
       start: Math.max(0, Number(req.body?.start) || 0),

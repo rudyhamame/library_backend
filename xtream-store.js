@@ -5,34 +5,41 @@ import { xtreamProviderUrl } from './xtream.js';
 
 const savedKinds = ['series', 'movies', 'live'];
 const kindFor = value => ['channel', 'live'].includes(String(value || '').toLowerCase()) ? 'live' : (['movie', 'movies'].includes(String(value || '').toLowerCase()) ? 'movies' : 'series');
-const savedShape = value => {
-  const next = Object.fromEntries(savedKinds.map(kind => [kind, Array.isArray(value?.[kind]) ? value[kind].map(String).filter(Boolean) : []]));
-  if (!savedKinds.some(kind => next[kind].length) && Array.isArray(value?.enabledItems)) for (const item of value.enabledItems) {
-    const url = String(item?.providerUrl || ''); if (url) next[kindFor(item.kind)].push(url);
+const identityKindFor = bucket => bucket === 'live' ? 'channel' : bucket === 'movies' ? 'movie' : 'series';
+// Saved items are identified by {sourceId, kind, itemId} only - never a
+// precomputed provider URL. The URL is derived fresh at read time (below)
+// so a provider's baseUrl/credentials can change without orphaning saved
+// items, and so playback always goes through the current provider. Legacy
+// rows that still hold raw URL strings are handled by
+// scripts/migrate-saved-selections-to-identity.js, not here.
+const normalizeIdentity = (entry, bucket) => {
+  if (entry && typeof entry === 'object' && entry.sourceId != null && entry.itemId != null) {
+    return { sourceId: String(entry.sourceId), kind: String(entry.kind || identityKindFor(bucket)), itemId: String(entry.itemId) };
   }
-  return next;
+  return null;
 };
+const savedShape = value => Object.fromEntries(savedKinds.map(bucket => [
+  bucket,
+  (Array.isArray(value?.[bucket]) ? value[bucket] : []).map(entry => normalizeIdentity(entry, bucket)).filter(Boolean),
+]));
 function sourceUrl(source, kind, id, extension = '') { return xtreamProviderUrl(source, kind === 'live' ? 'channel' : (kind === 'movies' ? 'movie' : 'series'), id, extension); }
-function urlsForSource(source, saved) {
+function identitiesForSource(source, saved) {
   const result = savedShape(saved);
-  for (const kind of savedKinds) result[kind] = result[kind].filter(url => String(url).startsWith(String(source.baseUrl || '').replace(/\/$/, '') + '/'));
+  for (const bucket of savedKinds) result[bucket] = result[bucket].filter(identity => identity.sourceId === String(source._id));
   return result;
 }
-function itemFromUrl(url, source) {
-  const text = String(url || '');
-  const match = text.match(/\/(series|movie|live)\/[^/]+\/[^/]+\/([^/?#]+?)(?:\.[a-z0-9]+)?(?:[?#].*)?$/i);
-  if (!match) return null;
-  const kind = match[1].toLowerCase() === 'live' ? 'channel' : match[1].toLowerCase();
-  const id = match[2];
-  return { key: `${kind}:${id}`, id, kind, providerUrl: text, sourceId: String(source._id), title: id, extension: text.split('.').pop()?.split('?')[0] || '' };
+function itemFromIdentity(identity, source) {
+  const kind = identity.kind === 'channel' ? 'channel' : identity.kind === 'movie' ? 'movie' : 'series';
+  const bucket = kind === 'channel' ? 'live' : kind === 'movie' ? 'movies' : 'series';
+  return { key: `${kind}:${identity.itemId}`, id: identity.itemId, kind, providerUrl: sourceUrl(source, bucket, identity.itemId), sourceId: identity.sourceId, title: identity.itemId };
 }
 
 export function selectionFor(source, ownerId, accountOwner) {
   void accountOwner;
   const raw = source?.selections?.[String(ownerId)] || source?.savedSelections || {};
   if (!Array.isArray(raw.series) && !Array.isArray(raw.movies) && !Array.isArray(raw.live) && Array.isArray(raw.enabledKeys)) return { enabledKeys: raw.enabledKeys, enabledItems: raw.enabledItems || [], archivedKeys: raw.archivedKeys || [], archivedItems: raw.archivedItems || [] };
-  const saved = urlsForSource(source, raw);
-  const enabledItems = savedKinds.flatMap(kind => saved[kind].map(url => itemFromUrl(url, source)).filter(Boolean));
+  const saved = identitiesForSource(source, raw);
+  const enabledItems = savedKinds.flatMap(bucket => saved[bucket].map(identity => itemFromIdentity(identity, source)));
   return { enabledKeys: enabledItems.map(item => item.key), enabledItems, archivedKeys: [], archivedItems: [], savedSelections: saved };
 }
 

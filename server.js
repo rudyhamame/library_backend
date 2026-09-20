@@ -2288,11 +2288,7 @@ app.get('/api/roku/series/last-watched', async (req, res) => {
     if (!sourceId || !seriesId) return res.status(400).json({ error: 'sourceId and seriesId are required' });
     // The badge is profile-specific and keyed by provider + series. Starting
     // another series updates its own entry without erasing this one.
-    const accountOwner = requestAccountOwner(req);
-    const watched = await getSeriesLastWatched(
-      requestProfileOwner(req), sourceId, seriesId,
-      episodeId => findProviderSeriesForEpisode(accountOwner, sourceId, episodeId),
-    );
+    const watched = await getSeriesLastWatched(requestProfileOwner(req), sourceId, seriesId);
     const episodeId = watched?.itemId || '';
     res.set('Cache-Control', 'no-store');
     res.json({
@@ -2508,16 +2504,6 @@ app.put('/api/streaming-history/:sessionId', async (req, res) => {
     if (!sessionId) return res.status(400).json({ error: 'Streaming session ID is required' });
     res.set('Cache-Control', 'no-store');
     const update = { ...req.query, ...req.body };
-    if (!update.providerUrl && !update.providerURL) {
-      const sourceId = String(update.sourceId || '');
-      const itemId = String(update.itemId || '');
-      const sources = await getAllXtreamSources(requestAccountOwner(req));
-      const source = sources.find(candidate => String(candidate._id) === sourceId);
-      const rawKind = String(update.kind || '').toLowerCase();
-      const kind = rawKind === 'episode' || rawKind === 'series' ? 'series' : rawKind === 'channel' || rawKind === 'live' ? 'channel' : rawKind === 'movie' ? 'movie' : '';
-      if (source && itemId && kind) update.providerUrl = sourceProviderUrl(source, kind, itemId, update.extension);
-    }
-    if (!update.providerUrl && typeof update.providerURL === 'string') update.providerUrl = update.providerURL;
     for (const field of ['startPosition', 'endPosition', 'mediaDuration', 'streamingDuration']) {
       const secondsField = `${field}Seconds`;
       const millisecondsField = `${field}Ms`;

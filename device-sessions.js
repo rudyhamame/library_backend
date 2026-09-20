@@ -549,8 +549,12 @@ async function consumePairing(code, email, password, setup, firstName = '', last
   let account;
   let createdAccount = false;
   if (setup) {
-    if (profile?.accountId) return { error: 'This Roku is already activated. Sign in instead.' };
-    if (await accountCollection.findOne({ email: normalizedEmail }, { projection: { _id: 1 } })) return { error: 'An account with this email already exists. Sign in instead.' };
+    if (profile?.accountId) {
+      const activatedAccount = await accountCollection.findOne({ _id: profile.accountId }, { projection: { email: 1 } });
+      const activatedEmail = activatedAccount?.email ? ` (${activatedAccount.email})` : '';
+      return { error: `This Roku is already activated${activatedEmail}. Sign in instead, or use "Forgot password?" if you don't remember it.` };
+    }
+    if (await accountCollection.findOne({ email: normalizedEmail }, { projection: { _id: 1 } })) return { error: 'An account with this email already exists. Sign in instead, or use "Forgot password?" if you don\'t remember it.' };
     if (!verificationCode && !verificationBypassed) {
       return requestDeviceSignupVerification(code, normalizedEmail, password, firstName, lastName);
     }

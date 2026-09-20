@@ -103,6 +103,21 @@ export async function getProviderSeriesEpisodes(ownerId, sourceId, seriesId) {
   );
 }
 
+// URL-only watch records do not carry the parent series ID. Resolve that
+// relationship from the persisted provider episode snapshots when a series
+// detail page asks for its last-watched episode.
+export async function findProviderSeriesForEpisode(ownerId, sourceId, episodeId) {
+  if (!ownerId || !sourceId || !episodeId) return '';
+  const { seriesEpisodes } = await collections();
+  const ids = [String(episodeId)];
+  if (/^\d+$/.test(String(episodeId))) ids.push(Number(episodeId));
+  const rows = await seriesEpisodes.find(
+    { ownerId: String(ownerId), sourceId: String(sourceId), 'episodes.id': { $in: ids } },
+    { projection: { _id: 0, seriesId: 1 } },
+  ).limit(1).toArray();
+  return String(rows[0]?.seriesId || '');
+}
+
 export async function markProviderCatalogFailure(ownerId, sourceId, kind) {
   void ownerId; void sourceId; void kind;
 }

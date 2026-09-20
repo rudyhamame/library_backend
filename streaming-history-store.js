@@ -146,11 +146,18 @@ export async function getStreamingResume(ownerId, { sourceId, itemId, kind, seri
   return item && item.sourceId === String(sourceId) && item.itemId === String(itemId) ? item : null;
 }
 
-export async function getSeriesLastWatched(ownerId, sourceId, seriesId) {
+export async function getSeriesLastWatched(ownerId, sourceId, seriesId, resolveSeriesId = null) {
   if (!ownerId || !sourceId || !seriesId) return null;
   const library = await getAccountLibrary(ownerId);
   const keyed = library.series_last_watched.find(item => watchedSeriesKey(item) === seriesHistoryKey(sourceId, seriesId));
   if (keyed) return seriesRecordHistory(keyed);
+  if (typeof resolveSeriesId === 'function') {
+    for (const record of library.series_last_watched) {
+      if (typeof record?.providerURL !== 'string') continue;
+      const episodeId = record.providerURL.match(/\/(?:series|movie|live)\/[^/]+\/[^/]+\/([^/?#]+)/i)?.[1]?.replace(/\.[a-z0-9]+$/i, '') || '';
+      if (episodeId && String(await resolveSeriesId(episodeId)) === String(seriesId)) return seriesRecordHistory(record);
+    }
+  }
   const legacy = kindRecordHistory(library.last_kinds_watched.episode, 'episode');
   if (!legacy || String(legacy.sourceId) !== String(sourceId) || String(legacy.seriesId) !== String(seriesId)) return null;
   // Preserve an older single-episode record until the next playback write.

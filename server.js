@@ -27,7 +27,7 @@ import { backdropVideoFile, ensureBackdropRoot, getRecommendationBackdrop, listB
 import { getAndroidStartupSnapshot, saveAndroidStartupSnapshot } from './android-startup-store.js';
 import { providerPlaybackUrlIsUsable, resolveProviderMediaId, resolveProviderTitle } from './provider-playback-fields.js';
 import { acquireProviderStreamLease } from './provider-stream-leases.js';
-import { deleteProviderCatalog, getProviderCatalogCategories, getProviderCatalogItem, getProviderCatalogItems, getProviderCatalogItemsByIds, getProviderCatalogItemsForCategory, getProviderCatalogLanguagePrefixes, getProviderCatalogMeta, getProviderCatalogRails, getProviderSeriesEpisodes, listProviderCatalogMeta, queryProviderCatalogItems, recordProviderCatalogDuration, replaceProviderCatalog, replaceProviderCatalogCategories, replaceProviderSeriesEpisodes } from './provider-catalog-store.js';
+import { deleteProviderCatalog, findProviderSeriesForEpisode, getProviderCatalogCategories, getProviderCatalogItem, getProviderCatalogItems, getProviderCatalogItemsByIds, getProviderCatalogItemsForCategory, getProviderCatalogLanguagePrefixes, getProviderCatalogMeta, getProviderCatalogRails, getProviderSeriesEpisodes, listProviderCatalogMeta, queryProviderCatalogItems, recordProviderCatalogDuration, replaceProviderCatalog, replaceProviderCatalogCategories, replaceProviderSeriesEpisodes } from './provider-catalog-store.js';
 
 const app = express();
 app.use(enforceLibraryOnly);
@@ -2288,7 +2288,11 @@ app.get('/api/roku/series/last-watched', async (req, res) => {
     if (!sourceId || !seriesId) return res.status(400).json({ error: 'sourceId and seriesId are required' });
     // The badge is profile-specific and keyed by provider + series. Starting
     // another series updates its own entry without erasing this one.
-    const watched = await getSeriesLastWatched(requestProfileOwner(req), sourceId, seriesId);
+    const accountOwner = requestAccountOwner(req);
+    const watched = await getSeriesLastWatched(
+      requestProfileOwner(req), sourceId, seriesId,
+      episodeId => findProviderSeriesForEpisode(accountOwner, sourceId, episodeId),
+    );
     const episodeId = watched?.itemId || '';
     res.set('Cache-Control', 'no-store');
     res.json({

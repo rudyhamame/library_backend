@@ -809,25 +809,19 @@ async function getLibrarySelectedItems(ownerId = null, requestedKind = '', accou
   const kinds = requestedKind ? [requestedKind] : ['series', 'movie', 'channel'];
   const groups = await Promise.all(sources.map(async source => {
     const saved = selectionFor(source, ownerId, accountOwner).savedSelections || {};
-    const urlsByKind = {
-      series: Array.isArray(saved.series) ? saved.series : [],
-      movie: Array.isArray(saved.movies) ? saved.movies : [],
-      channel: Array.isArray(saved.live) ? saved.live : [],
+    const idsByKind = {
+      series: new Set((Array.isArray(saved.series) ? saved.series : []).map(identity => String(identity.itemId))),
+      movie: new Set((Array.isArray(saved.movies) ? saved.movies : []).map(identity => String(identity.itemId))),
+      channel: new Set((Array.isArray(saved.live) ? saved.live : []).map(identity => String(identity.itemId))),
     };
     const rows = [];
     for (const kind of kinds) {
-      const wanted = new Set(urlsByKind[kind] || []);
+      const wanted = idsByKind[kind];
       if (!wanted.size) continue;
       const providerRows = await getSourceCatalog(source, kind).catch(() => []);
       for (const row of providerRows) {
         const item = selectedXtreamItem(source, row);
-        const exact = wanted.has(String(item.providerUrl || ''));
-        const providerId = url => {
-          const match = String(url || '').match(/\/(?:series|movie|live)\/[^/]+\/[^/]+\/([^/?#]+)/i);
-          return match ? match[1].replace(/\.[a-z0-9]+$/i, '') : '';
-        };
-        const byProviderId = [...wanted].some(url => providerId(url) === String(item.id));
-        if (exact || byProviderId) rows.push(item);
+        if (wanted.has(String(item.id))) rows.push(item);
       }
     }
     return rows;

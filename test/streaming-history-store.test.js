@@ -7,6 +7,7 @@ test('last_kinds_watched stores provider identity and playback state only', () =
     itemId: 'movie-1',
     sourceId: 'provider-1',
     seriesId: '',
+    providerUrl: 'http://provider.example/movie/movie-1.mkv',
     sessionId: 'session-1',
     lastMoment: '00:22:00',
     completed: false,
@@ -15,11 +16,8 @@ test('last_kinds_watched stores provider identity and playback state only', () =
     poster: 'https://example.invalid/poster.jpg',
   });
   assert.deepEqual(record, {
-    providerURL: { sourceId: 'provider-1', itemId: 'movie-1', seriesId: '', sessionId: 'session-1' },
+    providerURL: 'http://provider.example/movie/movie-1.mkv',
     lastWatched: '00:22:00',
-    completed: false,
-    sessionId: 'session-1',
-    updatedAt: '2026-09-19T00:00:00.000Z',
   });
 });
 

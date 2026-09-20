@@ -754,15 +754,19 @@ async function hydrateHistoryFromProviders(items, sources) {
   const catalogCache = new Map();
   const episodeCache = new Map();
   return Promise.all((items || []).map(async item => {
-    const source = bySource.get(String(item.sourceId || item.providerURL?.sourceId || ''));
+    const providerUrl = typeof item.providerURL === 'string' ? item.providerURL : '';
+    const source = bySource.get(String(item.sourceId || item.providerURL?.sourceId || ''))
+      || (providerUrl ? (sources || []).find(candidate => providerUrl.startsWith(`${String(candidate.baseUrl || '').replace(/\/$/, '')}/`)) : null);
     if (!source) return item;
     const kind = item.kind === 'channel' ? 'channel' : item.kind === 'movie' ? 'movie' : 'series';
-    const itemId = String(item.itemId || item.providerURL?.itemId || '');
+    const providerPathId = providerUrl.match(/\/(?:series|movie|live)\/[^/]+\/[^/]+\/([^/?#]+)/i)?.[1]?.replace(/\.[a-z0-9]+$/i, '') || '';
+    const itemId = String(item.itemId || item.providerURL?.itemId || providerPathId);
     if (!itemId) return item;
     try {
       let providerItem;
       if (kind === 'series') {
         const seriesId = String(item.seriesId || item.providerURL?.seriesId || '');
+        if (!seriesId) return item;
         const cacheKey = `${source._id}:${seriesId}`;
         if (!episodeCache.has(cacheKey)) episodeCache.set(cacheKey, getXtreamSeriesEpisodes(source, seriesId));
         const details = await episodeCache.get(cacheKey);
@@ -2498,6 +2502,16 @@ app.put('/api/streaming-history/:sessionId', async (req, res) => {
     if (!sessionId) return res.status(400).json({ error: 'Streaming session ID is required' });
     res.set('Cache-Control', 'no-store');
     const update = { ...req.query, ...req.body };
+    if (!update.providerUrl && !update.providerURL) {
+      const sourceId = String(update.sourceId || '');
+      const itemId = String(update.itemId || '');
+      const sources = await getAllXtreamSources(requestAccountOwner(req));
+      const source = sources.find(candidate => String(candidate._id) === sourceId);
+      const rawKind = String(update.kind || '').toLowerCase();
+      const kind = rawKind === 'episode' || rawKind === 'series' ? 'series' : rawKind === 'channel' || rawKind === 'live' ? 'channel' : rawKind === 'movie' ? 'movie' : '';
+      if (source && itemId && kind) update.providerUrl = sourceProviderUrl(source, kind, itemId, update.extension);
+    }
+    if (!update.providerUrl && typeof update.providerURL === 'string') update.providerUrl = update.providerURL;
     for (const field of ['startPosition', 'endPosition', 'mediaDuration', 'streamingDuration']) {
       const secondsField = `${field}Seconds`;
       const millisecondsField = `${field}Ms`;

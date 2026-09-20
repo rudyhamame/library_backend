@@ -16,19 +16,17 @@ const historyKey = value => {
 };
 export const seriesHistoryKey = (sourceId, seriesId) => `${String(sourceId || '')}:${String(seriesId || '')}`;
 const emptyLastKindsWatched = () => ({ episode: null, movie: null, live: null });
-const watchedSeriesKey = item => `${String(item?.providerURL?.sourceId || '')}:${String(item?.providerURL?.seriesId || '')}`;
+const watchedSeriesKey = item => {
+  if (typeof item?.providerURL === 'string') return item.providerURL;
+  return `${String(item?.providerURL?.sourceId || '')}:${String(item?.providerURL?.seriesId || '')}`;
+};
 const watchedPositionMs = value => {
   const parts = String(value || '').split(':').map(part => Number(part) || 0);
   if (parts.length !== 3) return 0;
   return ((parts[0] * 60 * 60) + (parts[1] * 60) + parts[2]) * 1000;
 };
 const seriesWatchedRecord = update => ({
-  providerURL: {
-    sourceId: update.sourceId,
-    seriesId: update.seriesId,
-    itemId: update.itemId,
-    sessionId: update.sessionId,
-  },
+  providerURL: String(update.providerUrl || update.providerURL || ''),
   lastWatched: update.lastMoment,
 });
 const seriesRecordHistory = record => record ? ({
@@ -42,25 +40,17 @@ const seriesRecordHistory = record => record ? ({
 // provider reference is the durable identity; title, artwork, extension,
 // duration, and episode details are rehydrated by the server when requested.
 export const kindRecord = update => ({
-  providerURL: {
-    sourceId: update.sourceId,
-    itemId: update.itemId,
-    seriesId: update.seriesId,
-    sessionId: update.sessionId,
-  },
+  providerURL: String(update.providerUrl || update.providerURL || ''),
   lastWatched: update.lastMoment,
-  completed: update.completed === true,
-  sessionId: update.sessionId,
-  updatedAt: update.updatedAt,
 });
 const kindRecordHistory = (record, kindKey = '') => record?.providerURL ? ({
   ...record,
   // The account-library pivot kept older watch records in their compact
   // providerURL form. Expose the same flat identity used by the API and Roku
   // client so those records remain playable after migration.
-  itemId: record.itemId || record.providerURL.itemId || '',
-  sourceId: record.sourceId || record.providerURL.sourceId || '',
-  seriesId: record.seriesId || record.providerURL.seriesId || '',
+  itemId: record.itemId || (typeof record.providerURL === 'string' ? record.providerURL.match(/\/(?:series|movie|live)\/[^/]+\/[^/]+\/([^/?#]+)/i)?.[1]?.replace(/\.[a-z0-9]+$/i, '') : record.providerURL.itemId) || '',
+  sourceId: record.sourceId || (typeof record.providerURL === 'string' ? '' : record.providerURL.sourceId) || '',
+  seriesId: record.seriesId || (typeof record.providerURL === 'string' ? '' : record.providerURL.seriesId) || '',
   kind: record.kind || (kindKey === 'episode' ? 'series' : kindKey === 'live' ? 'channel' : kindKey),
   endPositionMs: watchedPositionMs(record.lastWatched),
   lastMoment: record.lastWatched || '00:00:00',
@@ -180,8 +170,9 @@ export async function getStreamingContinueWatching(ownerId) {
 
 export function isContinueWatchingItem(item) {
   const sourceId = item?.sourceId || item?.providerURL?.sourceId;
-  const itemId = item?.itemId || item?.providerURL?.itemId;
-  if (!sourceId || !itemId) return false;
+  const providerUrl = typeof item?.providerURL === 'string' ? item.providerURL : '';
+  const itemId = item?.itemId || item?.providerURL?.itemId || providerUrl.match(/\/(?:series|movie|live)\/[^/]+\/[^/]+\/([^/?#]+)/i)?.[1];
+  if ((!sourceId && !providerUrl) || !itemId) return false;
   if (item.kind === 'channel') return true;
   if (item.completed === true) return false;
   const position = item.endPositionMs != null ? milliseconds(item.endPositionMs) : watchedPositionMs(item.lastWatched);

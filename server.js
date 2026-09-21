@@ -203,10 +203,14 @@ const getSourceCategories = (source, kind) => sourceType(source) === 'm3u' ? get
 const sourceProviderUrl = (source, kind, id, extension = '') => sourceType(source) === 'm3u' ? m3uProviderUrl(source, kind, id) : xtreamProviderUrl(source, kind, id, extension);
 
 async function getIndexedXtreamSeriesEpisodes(source, seriesId) {
-  // Series pages are read-only catalog views. Episode expansion must come from
-  // the catalog snapshot populated by the background sync, never from a live
-  // get_series_info request while a user is opening a show.
-  const details = await getProviderSeriesEpisodes(source.ownerId, source._id, seriesId);
+  // Prefer the account-scoped snapshot when available. Older/current
+  // deployments may not have episode snapshots (the catalog writer can be
+  // disabled), so a missing snapshot must fall back to the provider's
+  // get_series_info response instead of returning an empty series page.
+  let details = await getProviderSeriesEpisodes(source.ownerId, source._id, seriesId);
+  if (!details && sourceType(source) === 'xtream') {
+    details = await getXtreamSeriesEpisodes(source, seriesId);
+  }
   if (!details) return { title: '', episodes: [] };
   const episodes = await Promise.all((details.episodes || []).map(async episode => ({
     ...episode,

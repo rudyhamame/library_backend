@@ -39,14 +39,22 @@ const seriesRecordHistory = record => record ? ({
   endPositionMs: watchedPositionMs(record.lastWatched),
   lastMoment: record.lastWatched || '00:00:00',
 }) : null;
-// The identity (sourceId/kind/itemId/seriesId) plus playback state is the
-// only thing kept here - never a precomputed provider URL. Playback URLs
-// are resolved fresh from the provider by the server when requested.
-const kindRecord = update => ({
+// Preserve display/playback metadata captured when playback starts so
+// Continue Watching never degrades to "Movie 123" / "Series 456" merely
+// because a later provider lookup is unavailable. The provider URL itself is
+// deliberately excluded and is generated transiently when history is read.
+export const kindRecord = update => ({
   itemId: update.itemId,
   kind: update.kind,
   sourceId: update.sourceId,
   seriesId: update.seriesId,
+  title: update.title,
+  seriesName: update.seriesName,
+  extension: update.extension,
+  poster: update.poster,
+  category: update.category,
+  seasonNumber: update.seasonNumber,
+  episodeNumber: update.episodeNumber,
   endPositionMs: update.endPositionMs,
   mediaDurationMs: update.mediaDurationMs,
   completed: update.completed === true,
@@ -54,13 +62,24 @@ const kindRecord = update => ({
   updatedAt: update.updatedAt,
   lastWatched: update.lastMoment,
 });
-const kindRecordHistory = record => record?.sourceId ? ({
-  ...record,
-  endPositionMs: watchedPositionMs(record.lastWatched),
-  lastMoment: record.lastWatched || '00:00:00',
-}) : null;
+const kindRecordHistory = record => {
+  if (!record) return null;
+  const legacyIdentity = record.providerIdentity || (record.providerURL && typeof record.providerURL === 'object' ? record.providerURL : {});
+  const sourceId = String(record.sourceId || legacyIdentity.sourceId || '');
+  const itemId = String(record.itemId || legacyIdentity.itemId || '');
+  if (!sourceId || !itemId) return null;
+  return {
+    ...record,
+    sourceId,
+    itemId,
+    seriesId: String(record.seriesId || legacyIdentity.seriesId || ''),
+    kind: record.kind || (legacyIdentity.kind === 'live' ? 'channel' : legacyIdentity.kind === 'movie' ? 'movie' : 'series'),
+    endPositionMs: record.endPositionMs != null ? milliseconds(record.endPositionMs) : watchedPositionMs(record.lastWatched),
+    lastMoment: record.lastWatched || '00:00:00',
+  };
+};
 
-export async function saveStreamingHistory({ ownerId, sessionId, itemId, title, seriesName, kind, sourceId, seriesId, extension, poster, startedAt, endedAt, startPositionMs, endPositionMs, streamingDurationMs, mediaDurationMs, completed, seasonNumber, episodeNumber }) {
+export async function saveStreamingHistory({ ownerId, sessionId, itemId, title, seriesName, kind, sourceId, seriesId, extension, poster, category, startedAt, endedAt, startPositionMs, endPositionMs, streamingDurationMs, mediaDurationMs, completed, seasonNumber, episodeNumber }) {
   if (!ownerId || !sessionId) throw new Error('Profile owner and streaming session ID are required');
   const now = new Date();
   const startDate = startedAt ? new Date(startedAt) : now;
@@ -71,6 +90,7 @@ export async function saveStreamingHistory({ ownerId, sessionId, itemId, title, 
     kind: key === 'episode' ? 'series' : (key === 'live' ? 'channel' : 'movie'),
     sourceId: String(sourceId || ''), seriesId: String(seriesId || ''),
     extension: String(extension || '').replace(/[^a-z0-9]/gi, '').toLowerCase(), poster: String(poster || ''),
+    category: String(category || ''),
     startPositionMs: milliseconds(startPositionMs), endPositionMs: milliseconds(endPositionMs),
     streamingDurationMs: milliseconds(streamingDurationMs), mediaDurationMs: milliseconds(mediaDurationMs),
     lastMoment: formatLastMoment(endPositionMs), updatedAt: now, sessionId: String(sessionId),
@@ -170,7 +190,8 @@ export async function getStreamingContinueWatching(ownerId) {
 }
 
 export function isContinueWatchingItem(item) {
-  if (!item?.sourceId || !item?.itemId) return false;
+  const legacyIdentity = item?.providerIdentity || (item?.providerURL && typeof item.providerURL === 'object' ? item.providerURL : {});
+  if (!(item?.sourceId || legacyIdentity.sourceId) || !(item?.itemId || legacyIdentity.itemId)) return false;
   if (item.kind === 'channel') return true;
   if (item.completed === true) return false;
   const position = milliseconds(item.endPositionMs);

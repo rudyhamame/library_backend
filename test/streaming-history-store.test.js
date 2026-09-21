@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { isContinueWatchingItem, kindRecord, seriesHistoryKey } from '../streaming-history-store.js';
 
-test('last_kinds_watched stores provider identity and playback state only', () => {
+test('last_kinds_watched preserves metadata but never stores provider URLs', () => {
   const record = kindRecord({
     itemId: 'movie-1',
     sourceId: 'provider-1',
@@ -12,14 +12,27 @@ test('last_kinds_watched stores provider identity and playback state only', () =
     lastMoment: '00:22:00',
     completed: false,
     updatedAt: '2026-09-19T00:00:00.000Z',
-    title: 'Provider metadata must not be stored',
+    kind: 'movie',
+    title: 'Real provider title',
+    seriesName: '',
+    extension: 'mkv',
     poster: 'https://example.invalid/poster.jpg',
+    category: 'Drama',
+    seasonNumber: '',
+    episodeNumber: '',
+    endPositionMs: 1_320_000,
+    mediaDurationMs: 7_200_000,
   });
   assert.deepEqual(record, {
-    providerURL: 'http://provider.example/movie/movie-1.mkv',
-    providerIdentity: { sourceId: 'provider-1', kind: 'movie', itemId: 'movie-1', seriesId: '' },
-    lastWatched: '00:22:00',
+    itemId: 'movie-1', kind: 'movie', sourceId: 'provider-1', seriesId: '',
+    title: 'Real provider title', seriesName: '', extension: 'mkv',
+    poster: 'https://example.invalid/poster.jpg', category: 'Drama',
+    seasonNumber: '', episodeNumber: '', endPositionMs: 1_320_000,
+    mediaDurationMs: 7_200_000, completed: false, sessionId: 'session-1',
+    updatedAt: '2026-09-19T00:00:00.000Z', lastWatched: '00:22:00',
   });
+  assert.equal('providerURL' in record, false);
+  assert.equal('providerUrl' in record, false);
 });
 
 const episode = {

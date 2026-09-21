@@ -769,12 +769,13 @@ async function completeCatalogItem(source, requestedKind, item, categoryNames = 
 async function attachProviderUrls(items, sources) {
   const byId = new Map((sources || []).map(source => [String(source._id), source]));
   return Promise.all((items || []).map(async item => {
-    if (providerPlaybackUrlIsUsable(item.providerUrl)) return item;
+    if (providerPlaybackUrlIsUsable(item.providerUrl)) return { ...item, providerURL: item.providerUrl };
     const source = byId.get(String(item.sourceId || ''));
     const id = resolveProviderMediaId(item, item.kind);
     const kind = item.kind === 'episode' ? 'series' : String(item.kind || '');
     if (!source || !id || !['series', 'movie', 'channel'].includes(kind)) return item;
-    return { ...item, id, title: resolveProviderTitle(item, item.kind, id), providerUrl: await sourceProviderUrl(source, kind, id, item.extension) };
+    const providerUrl = await sourceProviderUrl(source, kind, id, item.extension);
+    return { ...item, id, title: resolveProviderTitle(item, item.kind, id), providerUrl, providerURL: providerUrl };
   }));
 }
 
@@ -798,19 +799,45 @@ async function hydrateHistoryFromProviders(items, sources) {
     try {
       let providerItem;
       let resolvedSeriesId = '';
+      let parentSeries;
       if (kind === 'series') {
         let seriesId = String(item.seriesId || item.providerIdentity?.seriesId || item.providerURL?.seriesId || '');
         if (!seriesId) seriesId = await findProviderSeriesForEpisode(source.ownerId, source._id, itemId);
+        const seriesCatalog = await getBrowserProviderCatalog(source, 'series');
+        if (!seriesId) {
+          // Some older clients wrote the parent series id as itemId. Recover
+          // those records directly before treating itemId as an episode id.
+          parentSeries = seriesCatalog.items.find(row => String(row.id) === itemId);
+          if (parentSeries) seriesId = itemId;
+        }
+        if (!seriesId) {
+          // Metadata-preserving history records can recover a legacy missing
+          // seriesId by matching the canonical series title.
+          const wanted = normalizeSearchText(item.seriesName || item.title || '');
+          const matches = wanted ? seriesCatalog.items.filter(row => normalizeSearchText(row.title) === wanted) : [];
+          if (matches.length === 1) seriesId = String(matches[0].id);
+        }
         if (!seriesId) return item;
         resolvedSeriesId = seriesId;
-        const cacheKey = `${source._id}:${seriesId}`;
-        if (!episodeCache.has(cacheKey)) episodeCache.set(cacheKey, getXtreamSeriesEpisodes(source, seriesId));
-        const details = await episodeCache.get(cacheKey);
-        providerItem = (details?.episodes || []).find(episode => String(episode.id) === itemId);
-        if (providerItem) providerItem = { ...providerItem, title: providerItem.title || `${details.title || ''} · ${providerItem.episodeNumber || ''}`, seriesName: details.title || '' };
+        parentSeries ||= seriesCatalog.items.find(row => String(row.id) === seriesId);
+        if (itemId === seriesId && parentSeries) {
+          providerItem = { ...parentSeries, seriesName: parentSeries.title || '' };
+        } else {
+          const cacheKey = `${source._id}:${seriesId}`;
+          if (!episodeCache.has(cacheKey)) episodeCache.set(cacheKey, getXtreamSeriesEpisodes(source, seriesId));
+          const details = await episodeCache.get(cacheKey);
+          providerItem = (details?.episodes || []).find(episode => String(episode.id) === itemId);
+          if (providerItem) providerItem = {
+            ...providerItem,
+            title: providerItem.title || item.title || `${details.title || parentSeries?.title || ''} · ${providerItem.episodeNumber || ''}`,
+            seriesName: details.title || parentSeries?.title || item.seriesName || '',
+            logo: parentSeries?.logo || providerItem.logo || '',
+            category: parentSeries?.category || providerItem.category || '',
+          };
+        }
       } else {
         const cacheKey = `${source._id}:${kind}`;
-        if (!catalogCache.has(cacheKey)) catalogCache.set(cacheKey, getSourceCatalog(source, kind));
+        if (!catalogCache.has(cacheKey)) catalogCache.set(cacheKey, getBrowserProviderCatalog(source, kind).then(result => result.items));
         providerItem = (await catalogCache.get(cacheKey)).find(row => String(row.id) === itemId);
       }
       if (!providerItem) return item;
@@ -827,7 +854,8 @@ async function hydrateHistoryFromProviders(items, sources) {
           episodeNumber: providerItem.episodeNumber ?? item.episodeNumber ?? '',
           seriesId: item.seriesId || item.providerIdentity?.seriesId || item.providerURL?.seriesId || resolvedSeriesId,
         };
-      return { ...merged, providerUrl: await sourceProviderUrl(source, kind, itemId, merged.extension).catch(() => merged.providerUrl || '') };
+      const providerUrl = await sourceProviderUrl(source, kind, itemId, merged.extension).catch(() => merged.providerUrl || '');
+      return { ...merged, providerUrl, providerURL: providerUrl };
     } catch (error) {
       console.warn(`[History] provider metadata unavailable for ${kind}:${itemId}: ${error.message}`);
       return item;

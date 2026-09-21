@@ -250,10 +250,10 @@ async function getBrowserProviderCatalog(source, kind) {
   const categories = await getSourceCategories(source, kind).catch(() => []);
   const categoryNames = new Map(categories.map(entry => [String(entry.id), cleanCategoryName(entry.name)]));
   const rawItems = await getSourceCatalog(source, kind);
-  const items = rawItems.map(item => selectedXtreamItem(source, {
+  const items = (await Promise.all(rawItems.map(item => completeCatalogItem(source, kind, {
     ...item,
     category: item.category || item.categoryName || categoryNames.get(String(item.categoryId)) || 'Other',
-  })).filter(item => item.id);
+  }, categoryNames)))).filter(item => item.id);
   const payload = { items, categories: categories.map(entry => ({ id: String(entry.id), name: cleanCategoryName(entry.name) })) };
   browserProviderCatalogCache.set(key, { ...payload, expires: Date.now() + browserProviderCatalogTtlMs });
   return payload;
@@ -731,6 +731,34 @@ function selectedXtreamItem(source, item) {
     language: item.language || detectXtreamLanguage(item, category),
     rokuCategory: item.rokuCategory || rokuText(category),
     providerUrl,
+  };
+}
+
+async function completeCatalogItem(source, requestedKind, item, categoryNames = new Map()) {
+  const normalized = selectedXtreamItem(source, item);
+  const kind = normalized.kind === 'episode' ? 'series' : String(normalized.kind || requestedKind || '');
+  const id = String(normalized.id || '');
+  const categoryId = String(normalized.categoryId || '');
+  const category = cleanCategoryName(
+    categoryNames.get(categoryId) || normalized.categoryName || normalized.category || 'Uncategorized',
+  );
+  let providerUrl = providerPlaybackUrlIsUsable(normalized.providerUrl) ? String(normalized.providerUrl) : '';
+  // A series catalog row is a show, not a playable episode. The details route
+  // hydrates each episode with its own exact provider URL.
+  if (!providerUrl && id && kind !== 'series') {
+    providerUrl = String(await sourceProviderUrl(source, kind, id, normalized.extension).catch(() => ''));
+  }
+  return {
+    ...normalized,
+    key: String(normalized.key || `${kind}:${id}`), id, kind,
+    sourceId: String(source._id), sourceName: String(source.name || ''),
+    providerName: String(normalized.providerName || source.name || ''),
+    categoryId, category, categoryName: category,
+    providerUrl, providerURL: providerUrl,
+    extension: String(normalized.extension || (kind === 'channel' ? 'm3u8' : 'mp4')),
+    duration: String(normalized.duration || ''), rating: String(normalized.rating || ''),
+    added: String(normalized.added || ''), logo: String(normalized.logo || ''),
+    metadata: normalized.metadata && typeof normalized.metadata === 'object' ? normalized.metadata : {},
   };
 }
 
@@ -2364,13 +2392,14 @@ async function getRokuLiveCatalog(ownerId, kind, requestedCategory = 'all', acco
   ]);
   const categoryRows = (Array.isArray(categories) ? categories : [])
     .map(entry => ({ id: String(entry.id), name: cleanCategoryName(entry.name) }));
+  const categoryNames = new Map(categoryRows.map(entry => [entry.id, entry.name]));
   const category = String(requestedCategory || 'all');
   const categoryName = categoryRows.find(entry => entry.id === category)?.name || '';
-  const items = (Array.isArray(catalog) ? catalog : [])
-    .map(item => selectedXtreamItem(source, {
+  const items = (await Promise.all((Array.isArray(catalog) ? catalog : [])
+    .map(item => completeCatalogItem(source, kind, {
       ...item,
-      category: item.category || categoryName || 'Other',
-    }))
+      category: item.category || categoryNames.get(String(item.categoryId)) || categoryName || 'Other',
+    }, categoryNames))))
     .filter(item => item.id);
   return { source, category, categories: categoryRows, items };
 }
@@ -2897,7 +2926,9 @@ app.get('/api/android/catalog', async (req, res) => {
     const limit = Math.min(100, Math.max(1, Number.parseInt(req.query.limit, 10) || 50));
     const page = Math.max(1, Number.parseInt(req.query.page, 10) || 1);
     const start = (page - 1) * limit;
-    const items = matches.slice(start, start + limit);
+    const categoryNames = new Map(sourceResult.categories.map(entry => [String(entry.id), entry.name]));
+    const items = await Promise.all(matches.slice(start, start + limit)
+      .map(item => completeCatalogItem(sourceResult.source, kind, item, categoryNames)));
     res.set('Cache-Control', 'private, no-store');
     res.json({
       sourceId: sourceResult.source ? String(sourceResult.source._id) : '',
@@ -3612,7 +3643,10 @@ app.get('/api/xtream/catalog', async (req, res) => {
     res.json({
       source: publicXtreamSource(source, ownerId, accountOwner), languages, categories,
       stale: result.stale, syncedAt: result.syncedAt,
-      items: result.items.map(item => ({ ...item, category: categoryNameById.get(String(item.categoryId)) || item.category || 'Uncategorized', languageCode: titleLanguageCode(item), titleLanguage: titleLanguageCode(item), enabled: enabled.has(item.key) })),
+      items: await Promise.all(result.items.map(async item => {
+        const complete = await completeCatalogItem(source, kind, item, categoryNameById);
+        return { ...complete, languageCode: titleLanguageCode(complete), titleLanguage: titleLanguageCode(complete), enabled: enabled.has(complete.key) };
+      })),
       pagination: { page: result.page, pageSize: result.limit, pageCount: result.pageCount, total: result.total },
     });
   } catch (error) { res.status(502).json({ error: error.message }); }

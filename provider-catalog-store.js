@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { MongoClient } from 'mongodb';
+import { accountOwnerId } from './account-library-owner.js';
 import { arabicSearchRegexSource, normalizeArabicSearch } from './arabic-search.js';
 import { catalogFreshness, requireCatalogRows } from './catalog-freshness.js';
 
@@ -18,23 +19,47 @@ export const ADULT_RE = /adult|\bxxx\b|(?:^|\D)18\s*\+|\+\s*18|\bporn|erotic|\bs
 
 const mongoUri = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017';
 const databaseName = process.env.MONGODB_DB || 'rh_roku';
+const generalDatabaseName = process.env.MONGODB_GENERAL_DB || 'rh_general';
 const collectionName = process.env.MONGODB_PROVIDER_CATALOG_COLLECTION || 'provider_catalog_items';
 const metaCollectionName = process.env.MONGODB_PROVIDER_CATALOG_SYNC_COLLECTION || 'provider_catalog_syncs';
-let collectionsPromise;
+let clientPromise;
+const collectionsCache = new Map();
 
-async function collections() {
-  if (!collectionsPromise) {
-    collectionsPromise = new MongoClient(mongoUri, { serverSelectionTimeoutMS: 5000 }).connect()
-      .then(async client => {
-        const database = client.db(databaseName);
-        const items = database.collection(collectionName);
-        const meta = database.collection(metaCollectionName);
-        const seriesEpisodes = database.collection(`${collectionName}_episodes`);
-        return { items, meta, seriesEpisodes };
-      })
-      .catch(error => { collectionsPromise = undefined; throw error; });
+async function mongoClient() {
+  if (!clientPromise) clientPromise = new MongoClient(mongoUri, { serverSelectionTimeoutMS: 5000 }).connect()
+    .catch(error => { clientPromise = undefined; throw error; });
+  return clientPromise;
+}
+
+async function databaseNameForOwner(ownerId) {
+  const key = String(ownerId || '');
+  if (!key) return databaseName;
+  const client = await mongoClient();
+  for (const name of [generalDatabaseName, databaseName]) {
+    const identity = client.db(name).collection('identity');
+    const direct = await identity.findOne(
+      { $or: [{ ownerId: key }, { 'profiles.ownerId': key }] },
+      { projection: { _id: 1 } },
+    );
+    if (direct) return name;
+    const legacy = await identity.find({}, { projection: { _id: 1 } }).toArray();
+    if (legacy.some(row => accountOwnerId(row._id) === key)) return name;
   }
-  return collectionsPromise;
+  return databaseName;
+}
+
+async function collections(ownerId = '') {
+  const name = await databaseNameForOwner(ownerId);
+  if (!collectionsCache.has(name)) {
+    const client = await mongoClient();
+    const database = client.db(name);
+    collectionsCache.set(name, {
+      items: database.collection(collectionName),
+      meta: database.collection(metaCollectionName),
+      seriesEpisodes: database.collection(`${collectionName}_episodes`),
+    });
+  }
+  return collectionsCache.get(name);
 }
 
 const cleanItem = (item, sourceId, providerName) => ({
@@ -71,13 +96,13 @@ export async function replaceProviderCatalogCategories(ownerId, sourceId, kind, 
 // { kinds: { series: {count, syncedAt}, ... }, categories: { series: {list, syncedAt} }, updatedAt }
 export async function getProviderCatalogMeta(ownerId, sourceId) {
   if (!ownerId || !sourceId) return null;
-  const { meta } = await collections();
+  const { meta } = await collections(ownerId);
   return meta.findOne({ ownerId: String(ownerId), sourceId: String(sourceId) }, { projection: { _id: 0 } });
 }
 
 export async function replaceProviderSeriesEpisodes(ownerId, sourceId, seriesId, title, episodes) {
   if (!ownerId || !sourceId || !seriesId) return 0;
-  const { seriesEpisodes } = await collections();
+  const { seriesEpisodes } = await collections(ownerId);
   const rows = Array.isArray(episodes) ? episodes : [];
   await seriesEpisodes.replaceOne(
     { ownerId: String(ownerId), sourceId: String(sourceId), seriesId: String(seriesId) },
@@ -96,7 +121,7 @@ export async function replaceProviderSeriesEpisodes(ownerId, sourceId, seriesId,
 
 export async function getProviderSeriesEpisodes(ownerId, sourceId, seriesId) {
   if (!ownerId || !sourceId || !seriesId) return null;
-  const { seriesEpisodes } = await collections();
+  const { seriesEpisodes } = await collections(ownerId);
   return seriesEpisodes.findOne(
     { ownerId: String(ownerId), sourceId: String(sourceId), seriesId: String(seriesId) },
     { projection: { _id: 0, ownerId: 0, sourceId: 0, seriesId: 0 } },
@@ -108,7 +133,7 @@ export async function getProviderSeriesEpisodes(ownerId, sourceId, seriesId) {
 // detail page asks for its last-watched episode.
 export async function findProviderSeriesForEpisode(ownerId, sourceId, episodeId) {
   if (!ownerId || !sourceId || !episodeId) return '';
-  const { seriesEpisodes } = await collections();
+  const { seriesEpisodes } = await collections(ownerId);
   const ids = [String(episodeId)];
   if (/^\d+$/.test(String(episodeId))) ids.push(Number(episodeId));
   const rows = await seriesEpisodes.find(
@@ -126,7 +151,7 @@ export async function markProviderCatalogFailure(ownerId, sourceId, kind) {
 // doing its own category/language/search filtering on this array.
 export async function getProviderCatalogItems(ownerId, sourceId, kind) {
   if (!ownerId || !sourceId || !['series', 'movie', 'channel'].includes(kind)) return [];
-  const { items } = await collections();
+  const { items } = await collections(ownerId);
   const blockedIds = await blockedCategoryIds(ownerId, sourceId, kind);
   const filter = excludeAdultContent({ ownerId: String(ownerId), sourceId: String(sourceId), kind }, blockedIds);
   return items
@@ -142,7 +167,7 @@ export async function getProviderCatalogItems(ownerId, sourceId, kind) {
 export async function getProviderCatalogItemsByIds(ownerId, sourceId, ids) {
   const wanted = [...new Set((Array.isArray(ids) ? ids : []).map(String).filter(Boolean))];
   if (!ownerId || !sourceId || wanted.length === 0) return [];
-  const { items } = await collections();
+  const { items } = await collections(ownerId);
   return items
     .find({ ownerId: String(ownerId), sourceId: String(sourceId), id: { $in: wanted } })
     .project({ _id: 0, ownerId: 0, syncToken: 0, syncedAt: 0 })
@@ -201,7 +226,7 @@ export async function hydrateContinueWatchingArtwork(ownerId, historyItems) {
     .filter(query => query.title.$regex);
   const queries = [...exactQueries, ...titleQueries];
   if (queries.length === 0) return history;
-  const { items, seriesEpisodes } = await collections();
+  const { items, seriesEpisodes } = await collections(ownerId);
   const rows = await items.find({ ownerId: String(ownerId), $or: queries }).project({ _id: 0, sourceId: 1, kind: 1, id: 1, title: 1, logo: 1 }).toArray();
   const catalogByItem = new Map(rows.map(row => [`${row.sourceId}:${row.kind}:${row.id}`, row]));
   const episodeRefs = history
@@ -269,7 +294,7 @@ export async function hydrateContinueWatchingArtwork(ownerId, historyItems) {
 // even when the item has never been saved to the current profile's Library.
 export async function getProviderCatalogItem(ownerId, sourceId, kind, id) {
   if (!ownerId || !sourceId || !id || !['series', 'movie', 'channel'].includes(kind)) return null;
-  const { items } = await collections();
+  const { items } = await collections(ownerId);
   return items.findOne(
     { ownerId: String(ownerId), sourceId: String(sourceId), kind, id: String(id) },
     { projection: { _id: 0, ownerId: 0, syncToken: 0, syncedAt: 0 } },
@@ -288,7 +313,7 @@ export async function recordProviderCatalogDuration(ownerId, sourceId, kind, id,
 // just to populate the language filter.
 export async function getProviderCatalogLanguagePrefixes(ownerId, sourceId, kind) {
   if (!ownerId || !sourceId || !['series', 'movie', 'channel'].includes(kind)) return [];
-  const { items } = await collections();
+  const { items } = await collections(ownerId);
   const rows = await items.aggregate([
     { $match: { ownerId: String(ownerId), sourceId: String(sourceId), kind } },
     { $project: { p: { $regexFind: { input: { $ifNull: ['$title', ''] }, regex: '^\\s*([A-Za-z]{2})\\s*[-|:]' } } } },
@@ -301,7 +326,7 @@ export async function getProviderCatalogLanguagePrefixes(ownerId, sourceId, kind
 // Resolved from the category list (not the items) since that's where the
 // human-readable name lives - items only carry the opaque categoryId.
 async function blockedCategoryIds(ownerId, sourceId, kind) {
-  const { meta } = await collections();
+  const { meta } = await collections(ownerId);
   const metaDoc = await meta.findOne(
     { ownerId: String(ownerId), sourceId: String(sourceId) },
     { projection: { [`categories.${kind}`]: 1 } },
@@ -324,7 +349,7 @@ function excludeAdultContent(filter, blockedIds) {
 // pulls hundreds of thousands of documents into the Roku response path.
 export async function getProviderCatalogItemsForCategory(ownerId, sourceId, kind, categoryId, limit = 1500) {
   if (!ownerId || !sourceId || !['series', 'movie', 'channel'].includes(kind)) return [];
-  const { items } = await collections();
+  const { items } = await collections(ownerId);
   const blockedIds = await blockedCategoryIds(ownerId, sourceId, kind);
   if (categoryId && String(categoryId) !== 'all' && blockedIds.includes(String(categoryId))) return [];
   const filter = { ownerId: String(ownerId), sourceId: String(sourceId), kind };
@@ -341,7 +366,7 @@ export async function getProviderCatalogItemsForCategory(ownerId, sourceId, kind
 
 // Newest N rows per kind for the Welcome rails, plus the sync/count metadata.
 export async function getProviderCatalogRails(ownerId, sourceId, limit = 10) {
-  const { items, meta } = await collections();
+  const { items, meta } = await collections(ownerId);
   const boundedLimit = Math.max(1, Math.min(50, Number(limit) || 10));
   const filter = { ownerId: String(ownerId), sourceId: String(sourceId) };
   const projection = { _id: 0, ownerId: 0, syncToken: 0, addedSort: 0, providerOrder: 0, syncedAt: 0 };
@@ -364,7 +389,7 @@ export async function getProviderCatalogRails(ownerId, sourceId, limit = 10) {
 // categories are dropped here so they never appear as a browsable folder.
 export async function getProviderCatalogCategories(ownerId, sourceId, kind) {
   if (!ownerId || !sourceId || !['series', 'movie', 'channel'].includes(kind)) return [];
-  const { items, meta } = await collections();
+  const { items, meta } = await collections(ownerId);
   const metaDoc = await meta.findOne(
     { ownerId: String(ownerId), sourceId: String(sourceId) },
     { projection: { [`categories.${kind}`]: 1 } },
@@ -384,8 +409,13 @@ export async function getProviderCatalogCategories(ownerId, sourceId, kind) {
 
 // Every stored snapshot's metadata, across all owners/sources (dashboard use).
 export async function listProviderCatalogMeta() {
-  const { meta } = await collections();
-  return meta.find({}, { projection: { _id: 0 } }).sort({ providerName: 1 }).toArray();
+  const client = await mongoClient();
+  const rows = [];
+  for (const name of [...new Set([generalDatabaseName, databaseName])]) {
+    rows.push(...await client.db(name).collection(metaCollectionName)
+      .find({}, { projection: { _id: 0 } }).sort({ providerName: 1 }).toArray());
+  }
+  return rows;
 }
 
 // Paginated stored rows for one owner/source/kind, optional category filter and
@@ -395,7 +425,7 @@ export async function queryProviderCatalogItems(ownerId, sourceId, kind, { q = '
   if (!ownerId || !sourceId || !['series', 'movie', 'channel'].includes(kind)) {
     return { items: [], total: 0, page: 1, limit, pageCount: 1 };
   }
-  const { items } = await collections();
+  const { items } = await collections(ownerId);
   const filter = { ownerId: String(ownerId), sourceId: String(sourceId), kind };
   const category = String(categoryId || '').trim();
   if (category && category !== 'all') filter.categoryId = category;

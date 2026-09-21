@@ -20,6 +20,8 @@ test('rejects stale provider URLs containing undefined media IDs', () => {
 test('recovers missing provider names without displaying undefined', () => {
   assert.equal(resolveProviderTitle({ name: 'News' }, 'channel', '1'), 'News');
   assert.equal(resolveProviderTitle({ title: 'undefined' }, 'series', '33'), 'Series 33');
+  assert.equal(resolveProviderTitle({ title: '123', name: 'Actual title' }, 'movie', '123'), 'Actual title');
+  assert.equal(resolveProviderTitle({ title: '123', metadata: { name: 'Metadata title' } }, 'movie', '123'), 'Metadata title');
 });
 
 test('matches a Continue Watching episode title to its parent series artwork', () => {

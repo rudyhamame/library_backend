@@ -29,10 +29,16 @@ export function providerPlaybackUrlIsUsable(value) {
 }
 
 export function resolveProviderTitle(item = {}, kind = item.kind, id = resolveProviderMediaId(item, kind)) {
-  for (const candidate of [item.title, item.name]) {
-    const title = invalidLiteral(candidate);
-    if (title) return title;
-  }
+  const metadata = item.metadata && typeof item.metadata === 'object' ? item.metadata : {};
+  const candidates = [
+    item.name, item.title,
+    metadata.name, metadata.title, metadata.stream_name, metadata.movie_name, metadata.series_name,
+  ].map(invalidLiteral).filter(Boolean);
+  // Provider rows sometimes put the numeric stream ID in `title` while the
+  // real display name is in `name` or the retained metadata object.
+  const meaningful = candidates.find(title => !/^\d+$/.test(title) && !/^(?:series|movie|channel)\s+\d+$/i.test(title));
+  if (meaningful) return meaningful;
+  if (candidates[0]) return candidates[0];
   const label = kind === 'channel' ? 'Channel' : kind === 'series' ? 'Series' : kind === 'episode' ? 'Episode' : 'Movie';
   return id ? `${label} ${id}` : label;
 }

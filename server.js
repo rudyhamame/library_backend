@@ -2791,7 +2791,23 @@ app.get('/api/xtream/sources', async (req, res) => {
   try {
     const ownerId = requestOwner(req), accountOwner = requestAccountOwner(req);
     if (!ownerId || !accountOwner) return res.status(401).json({ error: 'Authentication required' });
-    res.json({ items: (await getAllXtreamSources(accountOwner)).map(source => publicXtreamSource(source, ownerId, accountOwner)) });
+    const sources = await getAllXtreamSources(accountOwner);
+    // Saved selections are identity-only by design. Rehydrate them from the
+    // current provider catalog before Browser/Android receives the source
+    // list, otherwise old selections can render their numeric item ID as the
+    // title until the user happens to browse that catalog page.
+    const resolved = await getLibrarySelectedItems(ownerId, '', accountOwner).catch(() => []);
+    const metadataByKey = new Map((resolved || []).map(item => [`${item.sourceId}:${item.kind}:${item.id}`, item]));
+    res.json({ items: sources.map(source => {
+      const payload = publicXtreamSource(source, ownerId, accountOwner);
+      return {
+        ...payload,
+        enabledItems: (payload.enabledItems || []).map(item => {
+          const match = metadataByKey.get(`${item.sourceId || source._id}:${item.kind}:${item.id}`);
+          return match ? { ...item, ...match, key: item.key } : item;
+        }),
+      };
+    }) });
   }
   catch (error) { res.status(500).json({ error: error.message }); }
 });

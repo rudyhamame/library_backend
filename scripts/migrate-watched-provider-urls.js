@@ -11,7 +11,7 @@ const kindFolder = kind => kind === 'live' ? 'live' : kind === 'movie' ? 'movie'
 
 function providerUrl(record, kind, account) {
   if (typeof record?.providerURL === 'string' && record.providerURL) return record.providerURL;
-  const reference = record?.providerURL;
+  const reference = record?.providerIdentity || (record?.providerURL && typeof record.providerURL === 'object' ? record.providerURL : record);
   const source = (account.providers || []).find(item => String(item._id) === String(reference?.sourceId || ''));
   const itemId = String(reference?.itemId || '');
   if (!source || !itemId) return '';
@@ -27,15 +27,20 @@ function providerUrl(record, kind, account) {
 
 function compactRecord(record, kind, account) {
   const url = providerUrl(record, kind, account);
-  if (!url || !record?.lastWatched) return null;
-  const source = (account.providers || []).find(item => String(item._id) === String(record?.providerIdentity?.sourceId || record?.providerURL?.sourceId || ''))
+  if (!record?.lastWatched) return null;
+  const source = (account.providers || []).find(item => String(item._id) === String(record?.providerIdentity?.sourceId || record?.providerURL?.sourceId || record?.sourceId || ''))
     || (account.providers || []).find(item => url.startsWith(`${String(item.baseUrl || '').replace(/\/$/, '')}/`));
+  const resolvedItemId = String(record?.providerIdentity?.itemId || record?.providerURL?.itemId || record?.itemId || idFromUrl(url));
+  const resolvedSourceId = String(record?.providerIdentity?.sourceId || record?.providerURL?.sourceId || record?.sourceId || source?._id || '');
+  if (!resolvedItemId || !resolvedSourceId) return null;
+  const { providerURL, providerUrl, providerIdentity, itemId, sourceId, seriesId, kind: oldKind, ...metadata } = record;
   return {
-    providerURL: url,
+    ...metadata,
+    lastWatched: String(record.lastWatched),
     providerIdentity: {
-      sourceId: String(record?.providerIdentity?.sourceId || record?.providerURL?.sourceId || source?._id || ''),
-      kind: kind === 'series' ? 'episode' : kind,
-      itemId: String(record?.providerIdentity?.itemId || record?.providerURL?.itemId || idFromUrl(url)),
+      sourceId: resolvedSourceId,
+      kind: kind === 'series' ? 'series' : kind === 'live' ? 'channel' : 'movie',
+      itemId: resolvedItemId,
       seriesId: String(record?.providerIdentity?.seriesId || record?.providerURL?.seriesId || ''),
     },
     lastWatched: String(record.lastWatched),
@@ -59,9 +64,23 @@ try {
           movie: compactRecord(library.last_kinds_watched?.movie, 'movie', account),
           live: compactRecord(library.last_kinds_watched?.live, 'live', account),
         };
+        const candidates = [
+          ...(Array.isArray(library.streaming_history) ? library.streaming_history : []).map(record => compactRecord(record, record?.providerIdentity?.kind === 'channel' ? 'live' : record?.providerIdentity?.kind === 'series' ? 'series' : 'movie', account)),
+          ...nextSeries,
+          ...Object.values(nextKinds),
+        ].filter(Boolean);
+        const historyByIdentity = new Map();
+        for (const record of candidates) {
+          const identity = record.providerIdentity;
+          const key = `${identity.sourceId}:${identity.kind}:${identity.itemId}`;
+          const previous = historyByIdentity.get(key);
+          if (!previous || new Date(record.updatedAt || 0) >= new Date(previous.updatedAt || 0)) historyByIdentity.set(key, record);
+        }
+        const nextHistory = [...historyByIdentity.values()].sort((a, b) => new Date(b.updatedAt || 0) - new Date(a.updatedAt || 0));
         if (JSON.stringify(nextSeries) !== JSON.stringify(library.series_last_watched || [])
-          || JSON.stringify(nextKinds) !== JSON.stringify(library.last_kinds_watched || {})) changed = true;
-        return { ...profile, library: { ...library, series_last_watched: nextSeries, last_kinds_watched: nextKinds } };
+          || JSON.stringify(nextKinds) !== JSON.stringify(library.last_kinds_watched || {})
+          || JSON.stringify(nextHistory) !== JSON.stringify(library.streaming_history || [])) changed = true;
+        return { ...profile, library: { ...library, streaming_history: nextHistory, series_last_watched: nextSeries, last_kinds_watched: nextKinds } };
       });
       if (changed) {
         await collection.updateOne({ _id: account._id }, { $set: { profiles, updatedAt: new Date() } });

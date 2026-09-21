@@ -8,7 +8,7 @@ function withoutMongoId(document = {}) {
 }
 
 function groupByKind(rows = []) {
-  return Object.fromEntries(kinds.map(kind => [kind, rows.filter(row => text(row.kind) === kind).map(withoutMongoId)]));
+  return Object.fromEntries(kinds.map(kind => [kind, rows.filter(row => text(row.providerIdentity?.kind || row.kind) === kind).map(withoutMongoId)]));
 }
 
 function providerSelection(source) {

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { isContinueWatchingItem, kindRecord, seriesHistoryKey } from '../streaming-history-store.js';
 
-test('last_kinds_watched preserves metadata but never stores provider URLs', () => {
+test('streaming history stores provider identity in one nested object and never stores provider URLs', () => {
   const record = kindRecord({
     itemId: 'movie-1',
     sourceId: 'provider-1',
@@ -24,7 +24,7 @@ test('last_kinds_watched preserves metadata but never stores provider URLs', () 
     mediaDurationMs: 7_200_000,
   });
   assert.deepEqual(record, {
-    itemId: 'movie-1', kind: 'movie', sourceId: 'provider-1', seriesId: '',
+    providerIdentity: { itemId: 'movie-1', kind: 'movie', sourceId: 'provider-1', seriesId: '' },
     title: 'Real provider title', seriesName: '', extension: 'mkv',
     poster: 'https://example.invalid/poster.jpg', category: 'Drama',
     seasonNumber: '', episodeNumber: '', endPositionMs: 1_320_000,
@@ -33,6 +33,7 @@ test('last_kinds_watched preserves metadata but never stores provider URLs', () 
   });
   assert.equal('providerURL' in record, false);
   assert.equal('providerUrl' in record, false);
+  for (const field of ['itemId', 'kind', 'sourceId', 'seriesId']) assert.equal(field in record, false);
 });
 
 const episode = {

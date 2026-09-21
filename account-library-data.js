@@ -27,6 +27,44 @@ export function normalizedAccountLibrary(library) {
     if (value instanceof Date || value._bsontype) return value;
     return Object.fromEntries(Object.entries(value).filter(([key]) => !['providerURL', 'providerUrl'].includes(key)).map(([key, child]) => [key, withoutProviderUrls(child)]));
   };
+  const legacyHistory = [
+    ...(Array.isArray(library?.series_last_watched) ? library.series_last_watched : []),
+    ...Object.entries(library?.last_kinds_watched || {}).filter(([, row]) => Boolean(row)).map(([bucket, row]) => ({
+      ...row,
+      kind: row.kind || (bucket === 'episode' ? 'series' : bucket === 'live' ? 'channel' : 'movie'),
+    })),
+  ];
+  const historyRows = [...legacyHistory, ...(Array.isArray(library?.streaming_history) ? library.streaming_history : [])];
+  const normalizeHistoryRecord = row => {
+    if (!row || typeof row !== 'object') return null;
+    const identity = row?.providerIdentity || (row?.providerURL && typeof row.providerURL === 'object' ? row.providerURL : {});
+    const sourceId = String(identity.sourceId || row?.sourceId || '');
+    const itemId = String(identity.itemId || row?.itemId || '');
+    if (!sourceId || !itemId) return null;
+    const kind = String(identity.kind || row?.kind || 'movie').toLowerCase();
+    const { itemId: _itemId, kind: _kind, sourceId: _sourceId, seriesId: _seriesId, providerIdentity: _providerIdentity, providerURL: _providerURL, providerUrl: _providerUrl, ...metadata } = row;
+    return {
+      ...withoutProviderUrls(metadata),
+      lastWatched: String(row?.lastWatched || '00:00:00'),
+      ...(row?.sessionId || identity.sessionId ? { sessionId: String(row?.sessionId || identity.sessionId) } : {}),
+      providerIdentity: {
+        itemId,
+        kind: ['live', 'channel'].includes(kind) ? 'channel' : (['series', 'episode'].includes(kind) ? 'series' : 'movie'),
+        sourceId,
+        seriesId: String(identity.seriesId || row?.seriesId || ''),
+      },
+    };
+  };
+  const byIdentity = new Map();
+  for (const raw of historyRows) {
+    const row = normalizeHistoryRecord(raw);
+    if (!row) continue;
+    const identity = row.providerIdentity;
+    const key = `${identity.sourceId}:${identity.kind}:${identity.itemId}`;
+    const previous = byIdentity.get(key);
+    if (!previous || new Date(row.updatedAt || 0) >= new Date(previous.updatedAt || 0)) byIdentity.set(key, row);
+  }
+  const streamingHistory = [...byIdentity.values()].sort((a, b) => new Date(b.updatedAt || 0) - new Date(a.updatedAt || 0));
   return {
     favorites: Array.isArray(library?.favorites) ? withoutProviderUrls(library.favorites) : [],
     savedSelections: {
@@ -34,11 +72,12 @@ export function normalizedAccountLibrary(library) {
       movies: Array.isArray(library?.savedSelections?.movies) ? withoutProviderUrls(library.savedSelections.movies) : [],
       live: Array.isArray(library?.savedSelections?.live) ? withoutProviderUrls(library.savedSelections.live) : [],
     },
-    series_last_watched: Array.isArray(library?.series_last_watched) ? withoutProviderUrls(library.series_last_watched) : [],
+    series_last_watched: Array.isArray(library?.series_last_watched) ? library.series_last_watched.map(normalizeHistoryRecord).filter(Boolean) : [],
+    streaming_history: streamingHistory,
     last_kinds_watched: {
-      episode: withoutProviderUrls(library?.last_kinds_watched?.episode || null),
-      movie: withoutProviderUrls(library?.last_kinds_watched?.movie || null),
-      live: withoutProviderUrls(library?.last_kinds_watched?.live || null),
+      episode: normalizeHistoryRecord(library?.last_kinds_watched?.episode ? { ...library.last_kinds_watched.episode, kind: library.last_kinds_watched.episode.kind || 'series' } : null) || null,
+      movie: normalizeHistoryRecord(library?.last_kinds_watched?.movie ? { ...library.last_kinds_watched.movie, kind: library.last_kinds_watched.movie.kind || 'movie' } : null) || null,
+      live: normalizeHistoryRecord(library?.last_kinds_watched?.live ? { ...library.last_kinds_watched.live, kind: library.last_kinds_watched.live.kind || 'channel' } : null) || null,
     },
   };
 }

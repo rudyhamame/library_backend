@@ -45,8 +45,30 @@ try {
     const key = ['channel', 'live'].includes(String(row.kind || '').toLowerCase()) ? 'live' : (['series', 'episode'].includes(String(row.kind || '').toLowerCase()) ? 'episode' : 'movie');
     await updateAccountLibrary(row.ownerId, library => {
       const { _id, ownerId, ...item } = row;
+      const oldIdentity = item.providerIdentity || (item.providerURL && typeof item.providerURL === 'object' ? item.providerURL : {});
+      const identity = {
+        itemId: String(oldIdentity.itemId || item.itemId || ''),
+        kind: key === 'live' ? 'channel' : (key === 'episode' ? 'series' : 'movie'),
+        sourceId: String(oldIdentity.sourceId || item.sourceId || ''),
+        seriesId: String(oldIdentity.seriesId || item.seriesId || ''),
+      };
+      const { itemId, kind: _kind, sourceId, seriesId, providerIdentity, providerURL, providerUrl, ...metadata } = item;
+      const migratedRecord = {
+        ...metadata,
+        ...(item.sessionId || oldIdentity.sessionId ? { sessionId: String(item.sessionId || oldIdentity.sessionId) } : {}),
+        lastWatched: String(item.lastWatched || '00:00:00'), providerIdentity: identity,
+      };
+      const historyIndex = library.streaming_history.findIndex(current => {
+        const currentIdentity = current.providerIdentity || {};
+        return currentIdentity.sourceId === identity.sourceId && currentIdentity.kind === identity.kind && currentIdentity.itemId === identity.itemId;
+      });
+      const oldHistory = historyIndex >= 0 ? library.streaming_history[historyIndex] : null;
+      if (!oldHistory || new Date(migratedRecord.updatedAt || 0) >= new Date(oldHistory.updatedAt || 0)) {
+        if (historyIndex >= 0) library.streaming_history[historyIndex] = migratedRecord;
+        else library.streaming_history.push(migratedRecord);
+      }
       const current = library.last_kinds_watched[key];
-      if (!current || new Date(item.updatedAt || 0) >= new Date(current.updatedAt || 0)) library.last_kinds_watched[key] = item;
+      if (!current || new Date(item.updatedAt || 0) >= new Date(current.updatedAt || 0)) library.last_kinds_watched[key] = migratedRecord;
       return library;
     });
     migrated++;

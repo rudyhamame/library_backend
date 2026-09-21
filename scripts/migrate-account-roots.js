@@ -25,7 +25,16 @@ async function migrateAccount(db, account, roots) {
     Promise.resolve(Array.isArray(account.providers) ? account.providers : []),
     Promise.resolve((account.profiles || []).flatMap(profile => profile.library?.favorites || [])),
     ownerRows(db.collection(names.playback), ownerId),
-    Promise.resolve((account.profiles || []).flatMap(profile => Object.values(profile.library?.last_kinds_watched || {}).filter(Boolean).map(item => ({ ...item, ownerId: profile.ownerId })))),
+    Promise.resolve((account.profiles || []).flatMap(profile => {
+      const library = profile.library || {};
+      const records = Array.isArray(library.streaming_history) && library.streaming_history.length
+        ? library.streaming_history
+        : [
+          ...(Array.isArray(library.series_last_watched) ? library.series_last_watched : []),
+          ...Object.values(library.last_kinds_watched || {}).filter(Boolean),
+        ];
+      return records.map(item => ({ ...item, ownerId: profile.ownerId }));
+    })),
   ]);
   const root = buildAccountRoot({
     account: { ...account, ownerId, realm: 'roku' }, profiles, providers,

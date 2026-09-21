@@ -20,6 +20,7 @@ try {
       'profiles.$[].library.savedSelections.movies.$[].providerURL', 'profiles.$[].library.savedSelections.movies.$[].providerUrl',
       'profiles.$[].library.savedSelections.live.$[].providerURL', 'profiles.$[].library.savedSelections.live.$[].providerUrl',
       'profiles.$[].library.series_last_watched.$[].providerURL', 'profiles.$[].library.series_last_watched.$[].providerUrl',
+      'profiles.$[].library.streaming_history.$[].providerURL', 'profiles.$[].library.streaming_history.$[].providerUrl',
       'profiles.$[].library.last_kinds_watched.episode.providerURL', 'profiles.$[].library.last_kinds_watched.episode.providerUrl',
       'profiles.$[].library.last_kinds_watched.movie.providerURL', 'profiles.$[].library.last_kinds_watched.movie.providerUrl',
       'profiles.$[].library.last_kinds_watched.live.providerURL', 'profiles.$[].library.last_kinds_watched.live.providerUrl',

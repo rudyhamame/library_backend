@@ -23,6 +23,18 @@ function attribute(line, name) {
     .trim();
 }
 
+function attributes(line) {
+  const result = {};
+  const pattern = /([A-Za-z][\w-]*)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s,]+))/g;
+  for (const match of line.matchAll(pattern)) {
+    const key = String(match[1] || '').trim();
+    const value = String(match[2] ?? match[3] ?? match[4] ?? '')
+      .replace(/&amp;/gi, '&').replace(/&#38;/g, '&').trim();
+    if (key) result[key] = value;
+  }
+  return result;
+}
+
 function itemId(url) {
   return createHash('sha256').update(url).digest('hex').slice(0, 20);
 }
@@ -41,10 +53,12 @@ async function downloadM3u(source, key, timeoutMs = 25_000) {
   const consumeLine = rawLine => {
     const line = rawLine.replace(/^\uFEFF/, '').trim();
     if (line.startsWith('#EXTINF:')) {
+      const extended = attributes(line);
       metadata = {
         title: line.slice(line.indexOf(',') + 1).trim() || 'Untitled channel',
         logo: attribute(line, 'tvg-logo'),
         category: attribute(line, 'group-title') || 'Other',
+        extended,
       };
       return;
     }
@@ -58,6 +72,7 @@ async function downloadM3u(source, key, timeoutMs = 25_000) {
       categoryId: metadata.category, category: metadata.category,
       logo: metadata.logo, extension: extension(streamUrl), streamUrl,
       duration: '', rating: '', added: '',
+      metadata: { ...metadata.extended, streamUrl },
     });
     metadata = null;
   };

@@ -197,7 +197,7 @@ function resolveStreamTicket(token, sourceId, kind, id) {
   } catch { return null; }
 }
 
-const sourceType = source => source?.type === 'm3u' ? 'm3u' : 'xtream';
+const sourceType = source => ['m3u', 'm3u_plus'].includes(String(source?.type || '').toLowerCase()) ? 'm3u' : 'xtream';
 const getSourceCatalog = (source, kind, category = 'all') => sourceType(source) === 'm3u' ? getM3uCatalog(source, kind) : getXtreamCatalog(source, kind, category);
 const getSourceCategories = (source, kind) => sourceType(source) === 'm3u' ? getM3uCategories(source, kind) : getXtreamCategories(source, kind);
 const sourceProviderUrl = (source, kind, id, extension = '') => sourceType(source) === 'm3u' ? m3uProviderUrl(source, kind, id) : xtreamProviderUrl(source, kind, id, extension);
@@ -2761,25 +2761,25 @@ app.get('/api/roku/dashboard', async (req, res) => {
   } catch (error) { res.status(502).json({ backend: 'online', error: error.message }); }
 });
 function parsePlaylistInput(body, existing = null) {
-  let type = body?.type === 'm3u' ? 'm3u' : body?.type === 'xtream' ? 'xtream' : sourceType(existing);
+  let type = ['m3u', 'm3u_plus'].includes(String(body?.type || '').toLowerCase()) ? String(body.type).toLowerCase() : body?.type === 'xtream' ? 'xtream' : sourceType(existing);
   const supplied = String(body?.url || '').trim();
   const suppliedName = String(body?.name || existing?.name || '').trim();
   if (!supplied && existing) {
     if (!suppliedName) throw new Error('Source name is required');
     return { name: suppliedName };
   }
-  if (!supplied) throw new Error(`Paste the ${type === 'm3u' ? 'M3U playlist' : 'Xtream server'} URL`);
+  if (!supplied) throw new Error(`Paste the ${type === 'xtream' ? 'Xtream server' : 'M3U playlist'} URL`);
   let url;
   try { url = new URL(supplied); } catch { throw new Error('Enter a valid playlist URL'); }
   if (!['http:', 'https:'].includes(url.protocol)) throw new Error('Playlist URL must use HTTP or HTTPS');
-  const name = suppliedName || url.hostname || (type === 'm3u' ? 'M3U Playlist' : 'Xtream Playlist');
+  const name = suppliedName || url.hostname || (type === 'xtream' ? 'Xtream Playlist' : 'M3U Plus Playlist');
   // Many providers label their Xtream get.php URL as an M3U link. Downloading
   // that generated file can take minutes for a large catalog and made Add
   // Source fail even though the account API was healthy. Detect the embedded
   // Xtream credentials and use player_api.php instead.
-  if (type === 'm3u' && /\/(?:get|player_api)\.php\/?$/i.test(url.pathname)
+  if (type !== 'xtream' && /\/(?:get|player_api)\.php\/?$/i.test(url.pathname)
     && url.searchParams.get('username') && url.searchParams.get('password')) type = 'xtream';
-  if (type === 'm3u') return { name, type, baseUrl: url.toString(), username: '', password: '' };
+  if (type !== 'xtream') return { name, type, baseUrl: url.toString(), username: '', password: '' };
   const username = String(body?.username || url.searchParams.get('username') || existing?.username || '').trim();
   const password = String(body?.password || url.searchParams.get('password') || existing?.password || '').trim();
   if (!username || !password) throw new Error('Xtream username and password are required');
@@ -3389,13 +3389,13 @@ function validateSavedPlaylistSource(source, sourceId, ownerId) {
   setImmediate(async () => {
     try {
       const candidate = { ...source, _id: sourceId };
-      if (source.type === 'm3u') await validateM3uConnection(candidate, { attempts: 3, timeoutMs: 12_000 });
+      if (sourceType(source) === 'm3u') await validateM3uConnection(candidate, { attempts: 3, timeoutMs: 12_000 });
       else await validateXtreamConnection(candidate, { attempts: 1, timeoutMs: 8_000 });
       await updateXtreamSource(sourceId, { connectionStatus: 'online', connectionMessage: '' }, ownerId);
       // The initial catalog request shares the validation download and fails
       // with it. Rebuild the M3U snapshot after a retry succeeds so Live TV
       // appears without making the user add the playlist again.
-      if (source.type === 'm3u') {
+      if (sourceType(source) === 'm3u') {
         await refreshCatalogSnapshot(ownerId, candidate, 'channel').catch(error => {
           console.warn(`[Playlist] post-validation catalog refresh failed source=${sourceId}: ${error.message}`);
         });

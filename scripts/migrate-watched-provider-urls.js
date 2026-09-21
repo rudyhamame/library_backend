@@ -64,8 +64,11 @@ try {
           movie: compactRecord(library.last_kinds_watched?.movie, 'movie', account),
           live: compactRecord(library.last_kinds_watched?.live, 'live', account),
         };
+        const oldHistory = Array.isArray(library.streaming_history)
+          ? library.streaming_history
+          : ['episodes', 'movies', 'live'].flatMap(bucket => Array.isArray(library.streaming_history?.[bucket]) ? library.streaming_history[bucket] : []);
         const candidates = [
-          ...(Array.isArray(library.streaming_history) ? library.streaming_history : []).map(record => compactRecord(record, record?.providerIdentity?.kind === 'channel' ? 'live' : record?.providerIdentity?.kind === 'series' ? 'series' : 'movie', account)),
+          ...oldHistory.map(record => compactRecord(record, record?.providerIdentity?.kind === 'channel' ? 'live' : record?.providerIdentity?.kind === 'series' ? 'series' : 'movie', account)),
           ...nextSeries,
           ...Object.values(nextKinds),
         ].filter(Boolean);
@@ -76,10 +79,15 @@ try {
           const previous = historyByIdentity.get(key);
           if (!previous || new Date(record.updatedAt || 0) >= new Date(previous.updatedAt || 0)) historyByIdentity.set(key, record);
         }
-        const nextHistory = [...historyByIdentity.values()].sort((a, b) => new Date(b.updatedAt || 0) - new Date(a.updatedAt || 0));
+        const nextHistoryRows = [...historyByIdentity.values()].sort((a, b) => new Date(b.updatedAt || 0) - new Date(a.updatedAt || 0));
+        const nextHistory = { episodes: [], movies: [], live: [] };
+        for (const record of nextHistoryRows) {
+          const bucket = record.providerIdentity.kind === 'channel' ? 'live' : (record.providerIdentity.kind === 'series' ? 'episodes' : 'movies');
+          nextHistory[bucket].push(record);
+        }
         if (JSON.stringify(nextSeries) !== JSON.stringify(library.series_last_watched || [])
           || JSON.stringify(nextKinds) !== JSON.stringify(library.last_kinds_watched || {})
-          || JSON.stringify(nextHistory) !== JSON.stringify(library.streaming_history || [])) changed = true;
+          || JSON.stringify(nextHistory) !== JSON.stringify(library.streaming_history || {})) changed = true;
         return { ...profile, library: { ...library, streaming_history: nextHistory, series_last_watched: nextSeries, last_kinds_watched: nextKinds } };
       });
       if (changed) {

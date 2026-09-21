@@ -34,7 +34,14 @@ export function normalizedAccountLibrary(library) {
       kind: row.kind || (bucket === 'episode' ? 'series' : bucket === 'live' ? 'channel' : 'movie'),
     })),
   ];
-  const historyRows = [...legacyHistory, ...(Array.isArray(library?.streaming_history) ? library.streaming_history : [])];
+  const existingHistory = Array.isArray(library?.streaming_history)
+    ? library.streaming_history
+    : [
+      ...(Array.isArray(library?.streaming_history?.episodes) ? library.streaming_history.episodes : []),
+      ...(Array.isArray(library?.streaming_history?.movies) ? library.streaming_history.movies : []),
+      ...(Array.isArray(library?.streaming_history?.live) ? library.streaming_history.live : []),
+    ];
+  const historyRows = [...legacyHistory, ...existingHistory];
   const normalizeHistoryRecord = row => {
     if (!row || typeof row !== 'object') return null;
     const identity = row?.providerIdentity || (row?.providerURL && typeof row.providerURL === 'object' ? row.providerURL : {});
@@ -64,7 +71,12 @@ export function normalizedAccountLibrary(library) {
     const previous = byIdentity.get(key);
     if (!previous || new Date(row.updatedAt || 0) >= new Date(previous.updatedAt || 0)) byIdentity.set(key, row);
   }
-  const streamingHistory = [...byIdentity.values()].sort((a, b) => new Date(b.updatedAt || 0) - new Date(a.updatedAt || 0));
+  const streamingHistory = { episodes: [], movies: [], live: [] };
+  for (const row of [...byIdentity.values()].sort((a, b) => new Date(b.updatedAt || 0) - new Date(a.updatedAt || 0))) {
+    const kind = row.providerIdentity.kind;
+    const bucket = kind === 'channel' ? 'live' : (kind === 'series' ? 'episodes' : 'movies');
+    streamingHistory[bucket].push(row);
+  }
   return {
     favorites: Array.isArray(library?.favorites) ? withoutProviderUrls(library.favorites) : [],
     savedSelections: {

@@ -27,8 +27,12 @@ async function migrateAccount(db, account, roots) {
     ownerRows(db.collection(names.playback), ownerId),
     Promise.resolve((account.profiles || []).flatMap(profile => {
       const library = profile.library || {};
-      const records = Array.isArray(library.streaming_history) && library.streaming_history.length
-        ? library.streaming_history
+      const groupedHistory = library.streaming_history || {};
+      const currentHistory = Array.isArray(groupedHistory)
+        ? groupedHistory
+        : ['episodes', 'movies', 'live'].flatMap(bucket => Array.isArray(groupedHistory[bucket]) ? groupedHistory[bucket] : []);
+      const records = currentHistory.length
+        ? currentHistory
         : [
           ...(Array.isArray(library.series_last_watched) ? library.series_last_watched : []),
           ...Object.values(library.last_kinds_watched || {}).filter(Boolean),

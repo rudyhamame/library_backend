@@ -112,14 +112,19 @@ async function migrateDatabase(client, databaseName) {
         }
       }
 
-      if (Array.isArray(library.streaming_history)) {
-        library.streaming_history = library.streaming_history.map(record => {
+      const historyRows = Array.isArray(library.streaming_history)
+        ? library.streaming_history
+        : ['episodes', 'movies', 'live'].flatMap(bucket => Array.isArray(library.streaming_history?.[bucket]) ? library.streaming_history[bucket] : []);
+      if (historyRows.length) {
+        const nextHistory = { episodes: [], movies: [], live: [] };
+        historyRows.forEach(record => {
           const kind = record?.providerIdentity?.kind || record?.kind || 'movie';
           const bucket = ['channel', 'live'].includes(String(kind).toLowerCase()) ? 'live' : (['series', 'episode'].includes(String(kind).toLowerCase()) ? 'episode' : 'movie');
           const { record: next, changed } = migrateKindRecord(record, bucket);
           if (changed) { profileChanged = true; watchedChanged++; }
-          return next;
+          nextHistory[bucket === 'live' ? 'live' : (bucket === 'episode' ? 'episodes' : 'movies')].push(next);
         });
+        library.streaming_history = nextHistory;
       }
 
       if (profileChanged) accountChanged = true;

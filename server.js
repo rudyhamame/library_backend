@@ -2557,7 +2557,11 @@ app.get('/api/streaming-history/resume', async (req, res) => {
     const ownerId = requestProfileOwner(req);
     if (!ownerId) return res.status(401).json({ error: 'Authentication required' });
     res.set('Cache-Control', 'no-store');
-    const item = await getStreamingResume(ownerId, req.query);
+    let providerIdentity = req.query.providerIdentity;
+    if (typeof providerIdentity === 'string') {
+      try { providerIdentity = JSON.parse(providerIdentity); } catch { providerIdentity = null; }
+    }
+    const item = await getStreamingResume(ownerId, { ...req.query, providerIdentity });
     res.json({ item });
   }
   catch (error) { res.status(500).json({ error: error.message }); }
@@ -2581,7 +2585,10 @@ app.put('/api/streaming-history/:sessionId', async (req, res) => {
     if ((update.ended === true || String(update.ended).toLowerCase() === 'true') && !update.endedAt) update.endedAt = new Date();
     res.json({ item: await saveStreamingHistory({ ownerId, sessionId, ...update }) });
   }
-  catch (error) { res.status(500).json({ error: error.message }); }
+  catch (error) {
+    const status = /Provider identity requires|Profile owner and streaming session ID are required/.test(error.message) ? 400 : 500;
+    res.status(status).json({ error: error.message });
+  }
 });
 
 app.delete('/api/streaming-history/:sessionId', async (req, res) => {

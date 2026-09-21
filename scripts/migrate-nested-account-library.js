@@ -58,14 +58,16 @@ try {
         ...(item.sessionId || oldIdentity.sessionId ? { sessionId: String(item.sessionId || oldIdentity.sessionId) } : {}),
         lastWatched: String(item.lastWatched || '00:00:00'), providerIdentity: identity,
       };
-      const historyIndex = library.streaming_history.findIndex(current => {
+      const historyBucket = key === 'live' ? 'live' : (key === 'episode' ? 'episodes' : 'movies');
+      const records = library.streaming_history[historyBucket];
+      const historyIndex = records.findIndex(current => {
         const currentIdentity = current.providerIdentity || {};
         return currentIdentity.sourceId === identity.sourceId && currentIdentity.kind === identity.kind && currentIdentity.itemId === identity.itemId;
       });
-      const oldHistory = historyIndex >= 0 ? library.streaming_history[historyIndex] : null;
+      const oldHistory = historyIndex >= 0 ? records[historyIndex] : null;
       if (!oldHistory || new Date(migratedRecord.updatedAt || 0) >= new Date(oldHistory.updatedAt || 0)) {
-        if (historyIndex >= 0) library.streaming_history[historyIndex] = migratedRecord;
-        else library.streaming_history.push(migratedRecord);
+        if (historyIndex >= 0) records[historyIndex] = migratedRecord;
+        else records.push(migratedRecord);
       }
       const current = library.last_kinds_watched[key];
       if (!current || new Date(item.updatedAt || 0) >= new Date(current.updatedAt || 0)) library.last_kinds_watched[key] = migratedRecord;

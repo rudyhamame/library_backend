@@ -1,4 +1,4 @@
-// Rebuild the account/profile library's streaming_history arrays from any
+// Rebuild the account/profile library's grouped streaming_history buckets from any
 // legacy last_kinds_watched / series_last_watched fields and the old history
 // collection. The migration is idempotent and deliberately keeps the old
 // collection as a backup; it never deletes source history.
@@ -54,19 +54,21 @@ try {
             lastWatched: String(row.lastWatched || '00:00:00'),
             providerIdentity: { itemId, kind, sourceId, seriesId: String(identity.seriesId || row.seriesId || '') },
           };
+          const bucket = kind === 'channel' ? 'live' : (kind === 'series' ? 'episodes' : 'movies');
+          const records = library.streaming_history[bucket];
           const key = `${sourceId}:${kind}:${itemId}`;
-          const index = library.streaming_history.findIndex(item => {
+          const index = records.findIndex(item => {
             const id = item.providerIdentity || {};
             return `${id.sourceId || ''}:${id.kind || ''}:${id.itemId || ''}` === key;
           });
-          const existing = index >= 0 ? library.streaming_history[index] : null;
+          const existing = index >= 0 ? records[index] : null;
           if (!existing || new Date(record.updatedAt || 0) >= new Date(existing.updatedAt || 0)) {
-            if (index >= 0) library.streaming_history[index] = record;
-            else library.streaming_history.push(record);
+            if (index >= 0) records[index] = record;
+            else records.push(record);
           }
-          const bucket = kind === 'channel' ? 'live' : (kind === 'series' ? 'episode' : 'movie');
-          const current = library.last_kinds_watched[bucket];
-          if (!current || new Date(record.updatedAt || 0) >= new Date(current.updatedAt || 0)) library.last_kinds_watched[bucket] = record;
+          const legacyBucket = kind === 'channel' ? 'live' : (kind === 'series' ? 'episode' : 'movie');
+          const current = library.last_kinds_watched[legacyBucket];
+          if (!current || new Date(record.updatedAt || 0) >= new Date(current.updatedAt || 0)) library.last_kinds_watched[legacyBucket] = record;
           return library;
         });
         legacyRowsImported++;

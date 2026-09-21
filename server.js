@@ -2436,8 +2436,10 @@ app.get('/api/roku/provider/categories', async (req, res) => {
     const kind = ['series', 'movie', 'channel'].includes(String(req.query.kind)) ? String(req.query.kind) : '';
     if (!kind) return res.status(400).json({ error: 'kind must be series, movie, or channel' });
     const catalog = await getRokuLiveCatalog(ownerId, kind, 'all', accountOwner);
+    const counts = new Map();
+    for (const item of catalog.items) counts.set(item.categoryId, (counts.get(item.categoryId) || 0) + 1);
     const categories = catalog.categories
-      .map(entry => ({ id: String(entry.id), name: cleanCategoryName(entry.name), rokuName: rokuText(cleanCategoryName(entry.name)) }))
+      .map(entry => ({ id: String(entry.id), name: cleanCategoryName(entry.name), rokuName: rokuText(cleanCategoryName(entry.name)), count: counts.get(String(entry.id)) || 0 }))
       .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
     res.set('Cache-Control', 'private, no-store');
     res.json({ sourceId: catalog.source ? String(catalog.source._id) : '', sourceName: catalog.source?.name || '', categories });

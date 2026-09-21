@@ -54,14 +54,14 @@ export function normalizedAccountLibrary(library) {
     const itemId = String(identity.itemId || row?.itemId || '');
     if (!sourceId || !itemId) return null;
     const kind = String(identity.kind || row?.kind || 'movie').toLowerCase();
+    const normalizedKind = ['live', 'channel'].includes(kind) ? 'channel' : (['series', 'episode'].includes(kind) ? 'series' : 'movie');
     const { itemId: _itemId, kind: _kind, sourceId: _sourceId, seriesId: _seriesId, providerIdentity: _providerIdentity, providerURL: _providerURL, providerUrl: _providerUrl, ...metadata } = row;
     return {
-      ...withoutProviderUrls(metadata),
-      lastWatched: String(row?.lastWatched || '00:00:00'),
-      ...(row?.sessionId || identity.sessionId ? { sessionId: String(row?.sessionId || identity.sessionId) } : {}),
+      ...(normalizedKind === 'series' ? withoutProviderUrls(metadata) : {}),
+      ...(normalizedKind === 'movie' ? { lastWatched: String(row?.lastWatched || '00:00:00') } : {}),
       providerIdentity: {
         itemId,
-        kind: ['live', 'channel'].includes(kind) ? 'channel' : (['series', 'episode'].includes(kind) ? 'series' : 'movie'),
+        kind: normalizedKind,
         sourceId,
         ...(['series', 'episode'].includes(kind) && (identity.seriesId || row?.seriesId)
           ? { seriesId: String(identity.seriesId || row?.seriesId) }

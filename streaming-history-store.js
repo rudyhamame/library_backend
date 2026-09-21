@@ -38,31 +38,35 @@ const watchedPositionMs = value => {
   if (parts.length !== 3) return 0;
   return ((parts[0] * 60 * 60) + (parts[1] * 60) + parts[2]) * 1000;
 };
-// Preserve display/playback metadata captured when playback starts so
-// Continue Watching never degrades to "Movie 123" / "Series 456" merely
-// because a later provider lookup is unavailable. The provider URL itself is
-// deliberately excluded and is generated transiently when history is read.
-export const kindRecord = update => ({
-  providerIdentity: {
+// Movies and live channels intentionally store only the fields needed by
+// their history contracts. Series episodes retain playback/display metadata.
+// Provider URLs are always generated transiently when history is read.
+export const kindRecord = update => {
+  const providerIdentity = {
     itemId: String(update.itemId || ''),
     kind: update.kind,
     sourceId: String(update.sourceId || ''),
     ...(update.kind === 'series' && update.seriesId ? { seriesId: String(update.seriesId) } : {}),
-  },
-  title: update.title,
-  seriesName: update.seriesName,
-  extension: update.extension,
-  poster: update.poster,
-  category: update.category,
-  seasonNumber: update.seasonNumber,
-  episodeNumber: update.episodeNumber,
-  endPositionMs: update.endPositionMs,
-  mediaDurationMs: update.mediaDurationMs,
-  completed: update.completed === true,
-  sessionId: update.sessionId,
-  updatedAt: update.updatedAt,
-  lastWatched: update.lastMoment,
-});
+  };
+  if (update.kind === 'channel') return { providerIdentity };
+  if (update.kind === 'movie') return { lastWatched: update.lastMoment, providerIdentity };
+  return {
+    providerIdentity,
+    title: update.title,
+    seriesName: update.seriesName,
+    extension: update.extension,
+    poster: update.poster,
+    category: update.category,
+    seasonNumber: update.seasonNumber,
+    episodeNumber: update.episodeNumber,
+    endPositionMs: update.endPositionMs,
+    mediaDurationMs: update.mediaDurationMs,
+    completed: update.completed === true,
+    sessionId: update.sessionId,
+    updatedAt: update.updatedAt,
+    lastWatched: update.lastMoment,
+  };
+};
 const kindRecordHistory = record => {
   if (!record) return null;
   const legacyIdentity = record.providerIdentity || (record.providerURL && typeof record.providerURL === 'object' ? record.providerURL : {});

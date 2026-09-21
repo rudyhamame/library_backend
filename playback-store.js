@@ -28,13 +28,13 @@ export async function getPlayback(ownerId, itemId) {
   return publicItem;
 }
 
-export async function savePlayback({ ownerId, itemId, title, kind, poster, source, url, position, duration, completed = false }) {
+export async function savePlayback({ ownerId, itemId, title, kind, poster, source, position, duration, completed = false }) {
   if (!ownerId || !itemId) throw new Error('Account owner and item ID are required');
   const collection = await playbackCollection();
   const now = new Date();
   await collection.updateOne(
     { ownerId: String(ownerId), itemId: String(itemId) },
-    { $set: { title: String(title || ''), kind: String(kind || ''), poster: String(poster || ''), source: String(source || ''), url: String(url || ''), position: Math.max(0, Number(position) || 0), duration: Math.max(0, Number(duration) || 0), completed: Boolean(completed), updatedAt: now }, $setOnInsert: { ownerId: String(ownerId), itemId: String(itemId), createdAt: now } },
+    { $set: { title: String(title || ''), kind: String(kind || ''), poster: String(poster || ''), source: String(source || ''), position: Math.max(0, Number(position) || 0), duration: Math.max(0, Number(duration) || 0), completed: Boolean(completed), updatedAt: now }, $unset: { url: '' }, $setOnInsert: { ownerId: String(ownerId), itemId: String(itemId), createdAt: now } },
     { upsert: true },
   );
   return getPlayback(ownerId, itemId);

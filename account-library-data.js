@@ -21,18 +21,24 @@ export async function allAccountDocuments() {
 }
 
 export function normalizedAccountLibrary(library) {
+  const withoutProviderUrls = value => {
+    if (Array.isArray(value)) return value.map(withoutProviderUrls);
+    if (!value || typeof value !== 'object') return value;
+    if (value instanceof Date || value._bsontype) return value;
+    return Object.fromEntries(Object.entries(value).filter(([key]) => !['providerURL', 'providerUrl'].includes(key)).map(([key, child]) => [key, withoutProviderUrls(child)]));
+  };
   return {
-    favorites: Array.isArray(library?.favorites) ? library.favorites : [],
+    favorites: Array.isArray(library?.favorites) ? withoutProviderUrls(library.favorites) : [],
     savedSelections: {
-      series: Array.isArray(library?.savedSelections?.series) ? library.savedSelections.series : [],
-      movies: Array.isArray(library?.savedSelections?.movies) ? library.savedSelections.movies : [],
-      live: Array.isArray(library?.savedSelections?.live) ? library.savedSelections.live : [],
+      series: Array.isArray(library?.savedSelections?.series) ? withoutProviderUrls(library.savedSelections.series) : [],
+      movies: Array.isArray(library?.savedSelections?.movies) ? withoutProviderUrls(library.savedSelections.movies) : [],
+      live: Array.isArray(library?.savedSelections?.live) ? withoutProviderUrls(library.savedSelections.live) : [],
     },
-    series_last_watched: Array.isArray(library?.series_last_watched) ? library.series_last_watched : [],
+    series_last_watched: Array.isArray(library?.series_last_watched) ? withoutProviderUrls(library.series_last_watched) : [],
     last_kinds_watched: {
-      episode: library?.last_kinds_watched?.episode || null,
-      movie: library?.last_kinds_watched?.movie || null,
-      live: library?.last_kinds_watched?.live || null,
+      episode: withoutProviderUrls(library?.last_kinds_watched?.episode || null),
+      movie: withoutProviderUrls(library?.last_kinds_watched?.movie || null),
+      live: withoutProviderUrls(library?.last_kinds_watched?.live || null),
     },
   };
 }

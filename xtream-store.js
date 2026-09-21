@@ -118,7 +118,8 @@ export async function createXtreamSource({ name, type = 'xtream', baseUrl, usern
 export async function updateXtreamSource(id, changes, ownerId) {
   const located = await locateSource(id, ownerId);
   if (!located) return null;
-  const next = { ...located.source, ...changes, _id: located.source._id, updatedAt: new Date() };
+  const { providerURL: _providerURL, providerUrl: _providerUrl, ...safeChanges } = changes || {};
+  const next = { ...located.source, ...safeChanges, _id: located.source._id, updatedAt: new Date() };
   await located.collection.updateOne({ _id: located.account._id, 'providers._id': located.source._id }, { $set: { 'providers.$': next, updatedAt: new Date() } });
   return publicXtreamSource({ ...next, selections: {} }, ownerId || located.accountOwner, located.accountOwner);
 }

@@ -62,6 +62,15 @@ async function collections(ownerId = '') {
   return collectionsCache.get(name);
 }
 
+const withoutProviderUrls = value => {
+  if (Array.isArray(value)) return value.map(withoutProviderUrls);
+  if (!value || typeof value !== 'object') return value;
+  if (value instanceof Date || value._bsontype) return value;
+  return Object.fromEntries(Object.entries(value)
+    .filter(([key]) => key !== 'providerURL' && key !== 'providerUrl')
+    .map(([key, child]) => [key, withoutProviderUrls(child)]));
+};
+
 const cleanItem = (item, sourceId, providerName) => ({
   key: String(item?.key || ''),
   id: String(item?.id || ''),
@@ -70,7 +79,6 @@ const cleanItem = (item, sourceId, providerName) => ({
   categoryId: String(item?.categoryId || ''),
   category: String(item?.category || item?.categoryName || ''),
   logo: String(item?.logo || ''),
-  providerUrl: String(item?.providerUrl || ''),
   extension: String(item?.extension || ''),
   duration: String(item?.duration || ''),
   rating: String(item?.rating || ''),
@@ -111,7 +119,7 @@ export async function replaceProviderSeriesEpisodes(ownerId, sourceId, seriesId,
       sourceId: String(sourceId),
       seriesId: String(seriesId),
       title: String(title || ''),
-      episodes: rows,
+      episodes: withoutProviderUrls(rows),
       updatedAt: new Date(),
     },
     { upsert: true },

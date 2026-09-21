@@ -1400,20 +1400,22 @@ app.post('/api/account/login', async (req, res) => {
 });
 app.post('/api/account/signup', async (req, res) => {
   try {
-    const result = await registerAccount(req.body?.email, req.body?.password, req.body?.firstName, req.body?.lastName, 'general', req.body?.verificationId, req.body?.verificationCode);
+    const realm = req.body?.realm === 'roku' ? 'roku' : 'general';
+    const result = await registerAccount(req.body?.email, req.body?.password, req.body?.firstName, req.body?.lastName, realm, req.body?.verificationId, req.body?.verificationCode);
     if (result.error) return res.status(400).json(result);
     if (result.verificationRequired) return res.json(result);
     // Sign-up is also authentication. Return the same browser session payload
     // as sign-in so a newly created account can continue without a second
     // credential round-trip.
-    const session = await loginAccount(req.body?.email, req.body?.password, req.body?.deviceId || '', 'general');
+    const session = await loginAccount(req.body?.email, req.body?.password, req.body?.deviceId || '', realm);
     if (session.error) return res.status(400).json(session);
     res.status(201).json(session);
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 app.post('/api/account/signup/request-verification', async (req, res) => {
   try {
-    const result = await requestAccountSignupVerification(req.body?.email, 'general');
+    const realm = req.body?.realm === 'roku' ? 'roku' : 'general';
+    const result = await requestAccountSignupVerification(req.body?.email, realm);
     if (result.error) return res.status(400).json(result);
     res.json(result);
   } catch (error) { res.status(500).json({ error: error.message }); }

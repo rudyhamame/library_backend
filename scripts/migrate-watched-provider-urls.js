@@ -41,7 +41,9 @@ function compactRecord(record, kind, account) {
       sourceId: resolvedSourceId,
       kind: kind === 'series' ? 'series' : kind === 'live' ? 'channel' : 'movie',
       itemId: resolvedItemId,
-      seriesId: String(record?.providerIdentity?.seriesId || record?.providerURL?.seriesId || ''),
+      ...(kind === 'series' && (record?.providerIdentity?.seriesId || record?.providerURL?.seriesId)
+        ? { seriesId: String(record.providerIdentity?.seriesId || record.providerURL?.seriesId) }
+        : {}),
     },
     lastWatched: String(record.lastWatched),
   };
@@ -57,21 +59,20 @@ try {
       const profiles = (account.profiles || []).map(profile => {
         const library = profile.library;
         if (!library) return profile;
-        const nextSeries = (library.series_last_watched || [])
-          .map(record => compactRecord(record, 'series', account)).filter(Boolean);
-        const nextKinds = {
-          episode: compactRecord(library.last_kinds_watched?.episode, 'series', account),
-          movie: compactRecord(library.last_kinds_watched?.movie, 'movie', account),
-          live: compactRecord(library.last_kinds_watched?.live, 'live', account),
-        };
-        const oldHistory = Array.isArray(library.streaming_history)
-          ? library.streaming_history
-          : ['episodes', 'movies', 'live'].flatMap(bucket => Array.isArray(library.streaming_history?.[bucket]) ? library.streaming_history[bucket] : []);
-        const candidates = [
-          ...oldHistory.map(record => compactRecord(record, record?.providerIdentity?.kind === 'channel' ? 'live' : record?.providerIdentity?.kind === 'series' ? 'series' : 'movie', account)),
-          ...nextSeries,
-          ...Object.values(nextKinds),
-        ].filter(Boolean);
+        const history = library.streaming_history || {};
+        const oldHistory = Array.isArray(history) ? history : [
+          ...(Array.isArray(history.series) ? history.series.flatMap(group => (group.episodes || []).map(episode => ({
+            ...episode, providerIdentity: { ...group.providerIdentity, ...episode.providerIdentity, kind: 'series' },
+          }))) : []),
+          ...(Array.isArray(history.episodes) ? history.episodes : []),
+          ...(Array.isArray(history.movies) ? history.movies : []),
+          ...(Array.isArray(history.live) ? history.live : []),
+        ];
+        const candidates = oldHistory.map(record => compactRecord(
+          record,
+          ['channel', 'live'].includes(record?.providerIdentity?.kind) ? 'live' : record?.providerIdentity?.kind === 'series' ? 'series' : 'movie',
+          account,
+        )).filter(Boolean);
         const historyByIdentity = new Map();
         for (const record of candidates) {
           const identity = record.providerIdentity;
@@ -80,15 +81,20 @@ try {
           if (!previous || new Date(record.updatedAt || 0) >= new Date(previous.updatedAt || 0)) historyByIdentity.set(key, record);
         }
         const nextHistoryRows = [...historyByIdentity.values()].sort((a, b) => new Date(b.updatedAt || 0) - new Date(a.updatedAt || 0));
-        const nextHistory = { episodes: [], movies: [], live: [] };
+        const nextHistory = { series: [], movies: [], live: [] };
         for (const record of nextHistoryRows) {
-          const bucket = record.providerIdentity.kind === 'channel' ? 'live' : (record.providerIdentity.kind === 'series' ? 'episodes' : 'movies');
-          nextHistory[bucket].push(record);
+          const kind = record.providerIdentity.kind;
+          if (kind === 'channel') nextHistory.live.push(record);
+          else if (kind === 'series') {
+            const seriesId = record.providerIdentity.seriesId || '';
+            let group = nextHistory.series.find(item => item.providerIdentity.sourceId === record.providerIdentity.sourceId && item.providerIdentity.seriesId === seriesId);
+            if (!group) { group = { providerIdentity: { sourceId: record.providerIdentity.sourceId, kind: 'series', seriesId }, episodes: [] }; nextHistory.series.push(group); }
+            group.episodes.push({ ...record, providerIdentity: { itemId: record.providerIdentity.itemId } });
+          } else nextHistory.movies.push(record);
         }
-        if (JSON.stringify(nextSeries) !== JSON.stringify(library.series_last_watched || [])
-          || JSON.stringify(nextKinds) !== JSON.stringify(library.last_kinds_watched || {})
-          || JSON.stringify(nextHistory) !== JSON.stringify(library.streaming_history || {})) changed = true;
-        return { ...profile, library: { ...library, streaming_history: nextHistory, series_last_watched: nextSeries, last_kinds_watched: nextKinds } };
+        if (JSON.stringify(nextHistory) !== JSON.stringify(library.streaming_history || {})) changed = true;
+        const { series_last_watched, last_kinds_watched, ...historyLibrary } = library;
+        return { ...profile, library: { ...historyLibrary, streaming_history: nextHistory } };
       });
       if (changed) {
         await collection.updateOne({ _id: account._id }, { $set: { profiles, updatedAt: new Date() } });

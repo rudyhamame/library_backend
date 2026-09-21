@@ -27,21 +27,26 @@ export function normalizedAccountLibrary(library) {
     if (value instanceof Date || value._bsontype) return value;
     return Object.fromEntries(Object.entries(value).filter(([key]) => !['providerURL', 'providerUrl'].includes(key)).map(([key, child]) => [key, withoutProviderUrls(child)]));
   };
-  const legacyHistory = [
-    ...(Array.isArray(library?.series_last_watched) ? library.series_last_watched : []),
-    ...Object.entries(library?.last_kinds_watched || {}).filter(([, row]) => Boolean(row)).map(([bucket, row]) => ({
-      ...row,
-      kind: row.kind || (bucket === 'episode' ? 'series' : bucket === 'live' ? 'channel' : 'movie'),
-    })),
-  ];
-  const existingHistory = Array.isArray(library?.streaming_history)
-    ? library.streaming_history
+  const currentHistory = library?.streaming_history || {};
+  const existingHistory = Array.isArray(currentHistory)
+    ? currentHistory
     : [
-      ...(Array.isArray(library?.streaming_history?.episodes) ? library.streaming_history.episodes : []),
-      ...(Array.isArray(library?.streaming_history?.movies) ? library.streaming_history.movies : []),
-      ...(Array.isArray(library?.streaming_history?.live) ? library.streaming_history.live : []),
+      ...(Array.isArray(currentHistory.series) ? currentHistory.series.flatMap(group =>
+        (Array.isArray(group?.episodes) ? group.episodes : []).map(episode => ({
+          ...episode,
+          providerIdentity: {
+            ...group.providerIdentity,
+            ...episode?.providerIdentity,
+            kind: 'series',
+            seriesId: episode?.providerIdentity?.seriesId || group.providerIdentity?.seriesId || '',
+          },
+        }))
+      ) : []),
+      ...(Array.isArray(currentHistory.episodes) ? currentHistory.episodes : []),
+      ...(Array.isArray(currentHistory.movies) ? currentHistory.movies : []),
+      ...(Array.isArray(currentHistory.live) ? currentHistory.live : []),
     ];
-  const historyRows = [...legacyHistory, ...existingHistory];
+  const historyRows = existingHistory;
   const normalizeHistoryRecord = row => {
     if (!row || typeof row !== 'object') return null;
     const identity = row?.providerIdentity || (row?.providerURL && typeof row.providerURL === 'object' ? row.providerURL : {});
@@ -58,7 +63,9 @@ export function normalizedAccountLibrary(library) {
         itemId,
         kind: ['live', 'channel'].includes(kind) ? 'channel' : (['series', 'episode'].includes(kind) ? 'series' : 'movie'),
         sourceId,
-        seriesId: String(identity.seriesId || row?.seriesId || ''),
+        ...(['series', 'episode'].includes(kind) && (identity.seriesId || row?.seriesId)
+          ? { seriesId: String(identity.seriesId || row?.seriesId) }
+          : {}),
       },
     };
   };
@@ -71,11 +78,22 @@ export function normalizedAccountLibrary(library) {
     const previous = byIdentity.get(key);
     if (!previous || new Date(row.updatedAt || 0) >= new Date(previous.updatedAt || 0)) byIdentity.set(key, row);
   }
-  const streamingHistory = { episodes: [], movies: [], live: [] };
+  const streamingHistory = { series: [], movies: [], live: [] };
   for (const row of [...byIdentity.values()].sort((a, b) => new Date(b.updatedAt || 0) - new Date(a.updatedAt || 0))) {
     const kind = row.providerIdentity.kind;
-    const bucket = kind === 'channel' ? 'live' : (kind === 'series' ? 'episodes' : 'movies');
-    streamingHistory[bucket].push(row);
+    if (kind === 'channel') streamingHistory.live.push(row);
+    else if (kind === 'series') {
+      const seriesId = row.providerIdentity.seriesId || '';
+      let group = streamingHistory.series.find(item => item.providerIdentity.sourceId === row.providerIdentity.sourceId && item.providerIdentity.seriesId === seriesId);
+      if (!group) {
+        group = { providerIdentity: { sourceId: row.providerIdentity.sourceId, kind: 'series', seriesId }, episodes: [] };
+        streamingHistory.series.push(group);
+      }
+      group.episodes.push({
+        ...row,
+        providerIdentity: { itemId: row.providerIdentity.itemId },
+      });
+    } else streamingHistory.movies.push(row);
   }
   return {
     favorites: Array.isArray(library?.favorites) ? withoutProviderUrls(library.favorites) : [],
@@ -84,13 +102,7 @@ export function normalizedAccountLibrary(library) {
       movies: Array.isArray(library?.savedSelections?.movies) ? withoutProviderUrls(library.savedSelections.movies) : [],
       live: Array.isArray(library?.savedSelections?.live) ? withoutProviderUrls(library.savedSelections.live) : [],
     },
-    series_last_watched: Array.isArray(library?.series_last_watched) ? library.series_last_watched.map(normalizeHistoryRecord).filter(Boolean) : [],
     streaming_history: streamingHistory,
-    last_kinds_watched: {
-      episode: normalizeHistoryRecord(library?.last_kinds_watched?.episode ? { ...library.last_kinds_watched.episode, kind: library.last_kinds_watched.episode.kind || 'series' } : null) || null,
-      movie: normalizeHistoryRecord(library?.last_kinds_watched?.movie ? { ...library.last_kinds_watched.movie, kind: library.last_kinds_watched.movie.kind || 'movie' } : null) || null,
-      live: normalizeHistoryRecord(library?.last_kinds_watched?.live ? { ...library.last_kinds_watched.live, kind: library.last_kinds_watched.live.kind || 'channel' } : null) || null,
-    },
   };
 }
 

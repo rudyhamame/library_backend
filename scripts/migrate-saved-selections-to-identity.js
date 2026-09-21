@@ -2,9 +2,7 @@
 // items. Converts:
 //   - profile.library.savedSelections.{series,movies,live}: array of URL
 //     strings -> array of {sourceId, kind, itemId}
-//   - profile.library.streaming_history[] and legacy watched records: moves
-//     itemId/kind/sourceId/seriesId into one providerIdentity object and drops
-//     durable provider URLs.
+//   - playback history is migrated separately by rebuild-library-streaming-history.js.
 // Run once against each database: `node scripts/migrate-saved-selections-to-identity.js`
 import 'dotenv/config';
 import { MongoClient } from 'mongodb';
@@ -39,45 +37,9 @@ function migrateSavedSelectionBucket(entries, bucket, providers) {
   return { items, changed };
 }
 
-// bucketKey is the last_kinds_watched object key ('episode'/'movie'/'live'),
-// which is the source of truth for kind - not any stale identity.kind value,
-// since saveStreamingHistory's own convention is 'series'/'movie'/'channel'.
-const kindForBucketKey = bucketKey => bucketKey === 'episode' ? 'series' : bucketKey === 'live' ? 'channel' : 'movie';
-
-function migrateKindRecord(record, bucketKey) {
-  if (!record) return { record, changed: false };
-  const identity = record.providerIdentity || (record.providerURL && typeof record.providerURL === 'object' ? record.providerURL : {});
-  const normalizedKind = kindForBucketKey(bucketKey);
-  const { providerURL, providerUrl, providerIdentity, itemId, kind, sourceId, seriesId, ...rest } = record;
-  const next = {
-    ...rest,
-    lastWatched: String(record.lastWatched || '00:00:00'),
-    ...(record.sessionId || identity.sessionId ? { sessionId: String(record.sessionId || identity.sessionId) } : {}),
-    providerIdentity: {
-      itemId: String(identity.itemId || itemId || ''),
-      kind: normalizedKind,
-      sourceId: String(identity.sourceId || sourceId || ''),
-      seriesId: String(identity.seriesId || seriesId || ''),
-    },
-  };
-  const changed = Object.prototype.hasOwnProperty.call(record, 'providerURL')
-    || Object.prototype.hasOwnProperty.call(record, 'providerUrl')
-    || ['itemId', 'kind', 'sourceId', 'seriesId'].some(key => Object.prototype.hasOwnProperty.call(record, key))
-    || JSON.stringify(record.providerIdentity || {}) !== JSON.stringify(next.providerIdentity);
-  return {
-    record: next,
-    changed,
-  };
-}
-
-function migrateSeriesRecord(record) {
-  if (!record) return { record, changed: false };
-  return migrateKindRecord(record, 'episode');
-}
-
 async function migrateDatabase(client, databaseName) {
   const collection = client.db(databaseName).collection('identity');
-  let accountsChanged = 0, selectionsChanged = 0, watchedChanged = 0;
+  let accountsChanged = 0, selectionsChanged = 0;
   for (const account of await collection.find({ profiles: { $exists: true } }).toArray()) {
     const providers = Array.isArray(account.providers) ? account.providers : [];
     let accountChanged = false;
@@ -96,37 +58,6 @@ async function migrateDatabase(client, databaseName) {
         library.savedSelections = nextSaved;
       }
 
-      if (Array.isArray(library.series_last_watched)) {
-        library.series_last_watched = library.series_last_watched.map(record => {
-          const { record: next, changed } = migrateSeriesRecord(record);
-          if (changed) { profileChanged = true; watchedChanged++; }
-          return next;
-        });
-      }
-
-      if (library.last_kinds_watched) {
-        for (const key of ['episode', 'movie', 'live']) {
-          const { record: next, changed } = migrateKindRecord(library.last_kinds_watched[key], key);
-          if (changed) { profileChanged = true; watchedChanged++; }
-          library.last_kinds_watched[key] = next;
-        }
-      }
-
-      const historyRows = Array.isArray(library.streaming_history)
-        ? library.streaming_history
-        : ['episodes', 'movies', 'live'].flatMap(bucket => Array.isArray(library.streaming_history?.[bucket]) ? library.streaming_history[bucket] : []);
-      if (historyRows.length) {
-        const nextHistory = { episodes: [], movies: [], live: [] };
-        historyRows.forEach(record => {
-          const kind = record?.providerIdentity?.kind || record?.kind || 'movie';
-          const bucket = ['channel', 'live'].includes(String(kind).toLowerCase()) ? 'live' : (['series', 'episode'].includes(String(kind).toLowerCase()) ? 'episode' : 'movie');
-          const { record: next, changed } = migrateKindRecord(record, bucket);
-          if (changed) { profileChanged = true; watchedChanged++; }
-          nextHistory[bucket === 'live' ? 'live' : (bucket === 'episode' ? 'episodes' : 'movies')].push(next);
-        });
-        library.streaming_history = nextHistory;
-      }
-
       if (profileChanged) accountChanged = true;
       return profile;
     });
@@ -135,7 +66,7 @@ async function migrateDatabase(client, databaseName) {
       accountsChanged++;
     }
   }
-  console.log(`[${databaseName}] accounts changed=${accountsChanged} savedSelections buckets changed=${selectionsChanged} watched records changed=${watchedChanged}`);
+  console.log(`[${databaseName}] accounts changed=${accountsChanged} savedSelections buckets changed=${selectionsChanged}`);
 }
 
 const client = await MongoClient.connect(mongoUri, { serverSelectionTimeoutMS: 10_000 });

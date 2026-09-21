@@ -15,40 +15,29 @@ const historyKey = value => {
   return 'movie';
 };
 export const seriesHistoryKey = (sourceId, seriesId) => `${String(sourceId || '')}:${String(seriesId || '')}`;
-const emptyLastKindsWatched = () => ({ episode: null, movie: null, live: null });
-const emptyStreamingHistory = () => ({ episodes: [], movies: [], live: [] });
+const emptyStreamingHistory = () => ({ series: [], movies: [], live: [] });
 const historyRows = library => [
-  ...(library.streaming_history?.episodes || []),
+  ...(library.streaming_history?.series || []).flatMap(group => (group.episodes || []).map(episode => ({
+    ...episode,
+    providerIdentity: {
+      ...group.providerIdentity,
+      ...episode.providerIdentity,
+      kind: 'series',
+      seriesId: episode.providerIdentity?.seriesId || group.providerIdentity?.seriesId || '',
+    },
+  }))),
   ...(library.streaming_history?.movies || []),
   ...(library.streaming_history?.live || []),
 ];
 const historyBucket = kind => {
   const key = historyKey(kind);
-  return key === 'episode' ? 'episodes' : (key === 'live' ? 'live' : 'movies');
+  return key === 'episode' ? 'series' : (key === 'live' ? 'live' : 'movies');
 };
-const watchedSeriesKey = item => `${String(item?.providerIdentity?.sourceId || '')}:${String(item?.providerIdentity?.seriesId || '')}`;
 const watchedPositionMs = value => {
   const parts = String(value || '').split(':').map(part => Number(part) || 0);
   if (parts.length !== 3) return 0;
   return ((parts[0] * 60 * 60) + (parts[1] * 60) + parts[2]) * 1000;
 };
-const seriesWatchedRecord = update => ({
-  providerIdentity: {
-    sourceId: update.sourceId,
-    kind: 'episode',
-    seriesId: update.seriesId,
-    itemId: update.itemId,
-  },
-  sessionId: update.sessionId,
-  lastWatched: update.lastMoment,
-});
-const seriesRecordHistory = record => record ? ({
-  itemId: record.providerIdentity?.itemId || '',
-  sourceId: record.providerIdentity?.sourceId || '',
-  seriesId: record.providerIdentity?.seriesId || '',
-  endPositionMs: watchedPositionMs(record.lastWatched),
-  lastMoment: record.lastWatched || '00:00:00',
-}) : null;
 // Preserve display/playback metadata captured when playback starts so
 // Continue Watching never degrades to "Movie 123" / "Series 456" merely
 // because a later provider lookup is unavailable. The provider URL itself is
@@ -58,7 +47,7 @@ export const kindRecord = update => ({
     itemId: String(update.itemId || ''),
     kind: update.kind,
     sourceId: String(update.sourceId || ''),
-    seriesId: String(update.seriesId || ''),
+    ...(update.kind === 'series' && update.seriesId ? { seriesId: String(update.seriesId) } : {}),
   },
   title: update.title,
   seriesName: update.seriesName,
@@ -133,20 +122,27 @@ export async function saveStreamingHistory(input = {}) {
     const record = kindRecord(update);
     const identityKey = `${record.providerIdentity.sourceId}:${record.providerIdentity.kind}:${record.providerIdentity.itemId}`;
     const bucket = historyBucket(update.kind);
-    const records = library.streaming_history[bucket];
+    let records;
+    let seriesGroup = null;
+    if (bucket === 'series') {
+      const seriesKey = seriesHistoryKey(update.sourceId, update.seriesId);
+      seriesGroup = library.streaming_history.series.find(item => seriesHistoryKey(item.providerIdentity?.sourceId, item.providerIdentity?.seriesId) === seriesKey);
+      if (!seriesGroup) {
+        seriesGroup = { providerIdentity: { sourceId: update.sourceId, kind: 'series', seriesId: update.seriesId }, episodes: [] };
+        library.streaming_history.series.push(seriesGroup);
+      }
+      records = seriesGroup.episodes;
+    } else records = library.streaming_history[bucket];
     const historyIndex = records.findIndex(item => {
       const identity = item?.providerIdentity || {};
+      if (bucket === 'series') return String(identity.itemId || '') === String(record.providerIdentity.itemId);
       return `${identity.sourceId || ''}:${identity.kind || ''}:${identity.itemId || ''}` === identityKey;
     });
-    if (historyIndex >= 0) records[historyIndex] = record;
-    else records.push(record);
-    library.last_kinds_watched[key] = record;
-    if (key === 'episode' && update.sourceId && update.seriesId) {
-      const record = seriesWatchedRecord(update);
-      const index = library.series_last_watched.findIndex(item => watchedSeriesKey(item) === seriesHistoryKey(update.sourceId, update.seriesId));
-      if (index >= 0) library.series_last_watched[index] = record;
-      else library.series_last_watched.push(record);
-    }
+    const storedRecord = bucket === 'series'
+      ? { ...record, providerIdentity: { itemId: record.providerIdentity.itemId } }
+      : record;
+    if (historyIndex >= 0) records[historyIndex] = storedRecord;
+    else records.push(storedRecord);
     return library;
   });
   return update;
@@ -166,20 +162,17 @@ export async function deleteStreamingSession(ownerId, sessionId) {
   if (!ownerId || !sessionId) return { deleted: 0 };
   let deleted = 0;
   await updateAccountLibrary(ownerId, library => {
-    for (const bucket of ['episodes', 'movies', 'live']) {
+    for (const bucket of ['movies', 'live']) {
       const beforeHistory = library.streaming_history[bucket].length;
       library.streaming_history[bucket] = library.streaming_history[bucket].filter(item => item?.sessionId !== String(sessionId));
       deleted += beforeHistory - library.streaming_history[bucket].length;
     }
-    for (const key of ['episode', 'movie', 'live']) {
-      if (library.last_kinds_watched[key]?.sessionId === String(sessionId)) {
-        library.last_kinds_watched[key] = null;
-        deleted++;
-      }
+    for (const group of library.streaming_history.series) {
+      const beforeHistory = group.episodes.length;
+      group.episodes = group.episodes.filter(item => item?.sessionId !== String(sessionId));
+      deleted += beforeHistory - group.episodes.length;
     }
-    const before = library.series_last_watched.length;
-    library.series_last_watched = library.series_last_watched.filter(item => item?.sessionId !== String(sessionId));
-    deleted += before - library.series_last_watched.length;
+    library.streaming_history.series = library.streaming_history.series.filter(group => group.episodes.length > 0);
     return library;
   });
   return { deleted };
@@ -191,8 +184,6 @@ export async function clearStreamingHistory(ownerId) {
   const deleted = historyRows(before).length;
   await updateAccountLibrary(ownerId, library => {
     library.streaming_history = emptyStreamingHistory();
-    library.last_kinds_watched = emptyLastKindsWatched();
-    library.series_last_watched = [];
     return library;
   });
   return { deleted };
@@ -216,7 +207,7 @@ export async function getStreamingResume(ownerId, input = {}) {
       && historyKey(identity.kind) === key
       && (!seriesId || !identity.seriesId || String(identity.seriesId) === String(seriesId));
   });
-  const item = kindRecordHistory(current || library.last_kinds_watched[key]);
+  const item = kindRecordHistory(current);
   return item && item.sourceId === String(sourceId) && item.itemId === String(itemId) ? item : null;
 }
 
@@ -224,19 +215,29 @@ export async function getSeriesLastWatched(ownerId, sourceId, seriesId) {
   if (!ownerId || !sourceId || !seriesId) return null;
   const library = await getAccountLibrary(ownerId);
   const keyed = historyRows(library)
-    .filter(item => watchedSeriesKey(item) === seriesHistoryKey(sourceId, seriesId))
+    .filter(item => item.providerIdentity?.kind === 'series'
+      && String(item.providerIdentity?.sourceId || '') === String(sourceId)
+      && String(item.providerIdentity?.seriesId || '') === String(seriesId))
     .sort((a, b) => new Date(b.updatedAt || 0) - new Date(a.updatedAt || 0))[0];
-  if (keyed) return seriesRecordHistory(keyed);
-  const legacy = kindRecordHistory(library.last_kinds_watched.episode);
-  if (!legacy || String(legacy.sourceId) !== String(sourceId) || String(legacy.seriesId) !== String(seriesId)) return null;
-  // Preserve an older single-episode record until the next playback write.
-  await updateAccountLibrary(ownerId, next => {
-    if (!next.streaming_history.episodes.some(item => watchedSeriesKey(item) === seriesHistoryKey(sourceId, seriesId))) {
-      next.streaming_history.episodes.push(seriesWatchedRecord(legacy));
-    }
-    return next;
-  });
-  return legacy;
+  if (!keyed) return null;
+  return {
+    itemId: keyed.providerIdentity?.itemId || '',
+    sourceId: keyed.providerIdentity?.sourceId || '',
+    seriesId: keyed.providerIdentity?.seriesId || '',
+    endPositionMs: milliseconds(keyed.endPositionMs),
+    lastMoment: keyed.lastWatched || '00:00:00',
+  };
+}
+
+export async function getSeriesWatchedEpisodes(ownerId, sourceId, seriesId) {
+  if (!ownerId || !sourceId || !seriesId) return [];
+  const library = await getAccountLibrary(ownerId);
+  return historyRows(library)
+    .filter(item => item.providerIdentity?.kind === 'series'
+      && String(item.providerIdentity?.sourceId || '') === String(sourceId)
+      && String(item.providerIdentity?.seriesId || '') === String(seriesId))
+    .sort((a, b) => new Date(b.updatedAt || 0) - new Date(a.updatedAt || 0))
+    .map(item => ({ itemId: item.providerIdentity.itemId, endPositionMs: milliseconds(item.endPositionMs), lastWatched: item.lastWatched || '00:00:00' }));
 }
 
 export async function getStreamingContinueWatching(ownerId) {

@@ -16,7 +16,7 @@ import { evictXtreamCache, getXtreamCatalog, getXtreamCategories, getXtreamSerie
 import { evictM3uCache, getM3uCatalog, getM3uCategories, m3uCacheStats, m3uProviderUrl, validateM3uConnection } from './m3u.js';
 import { MediaCapacityError, MediaJobManager, defaultMediaLimits, memoryPressure } from './media-job-manager.js';
 import { HlsStrategy, PlaybackStrategy, choosePlaybackStrategy, determineHlsStrategy, hlsCodecArgs } from './playback-strategy.js';
-import { clearStreamingHistory, deleteStreamingSession, getSeriesLastWatched, getStreamingContinueWatching, getStreamingHistory, getStreamingResume, saveStreamingHistory } from './streaming-history-store.js';
+import { clearStreamingHistory, deleteStreamingSession, getSeriesWatchedEpisodes, getStreamingContinueWatching, getStreamingHistory, getStreamingResume, saveStreamingHistory } from './streaming-history-store.js';
 import { getFavorites, toggleFavorite } from './favorites-store.js';
 import { accountOwnerId, profileOwnerId } from './account-library-owner.js';
 import { authorizeDeviceSession, autoLoginDeviceSession, castHandoffLink, changeAccountPassword, claimAutomaticPairing, confirmPasswordReset, createDeviceSession, deleteAccount, getAccountBasicInfo, getDeviceSession, getDeviceWeatherLocations, getLinkedDevices, getPairingInfo, getRokuDeviceSessionStatus, getRokuSourcePreferenceByOwner, initializeAccountDatabases, isProfileOnline, isRokuSessionLinked, listAllAccountsBasic, listAllLinkedDevices, loginAccount, loginDeviceSession, recordDeviceHeartbeat, registerAccount, registerBrowserDevice, requestAccountSignupVerification, requestDeviceSignupVerification, requestPasswordReset, resendDeviceSignupVerification, resolveAccountByEmail, resolveDeviceToken, saveDeviceWeatherLocations, selectAccountProfile, setupDeviceSession, unlinkAccountDevice, verifyDeviceSignupCode } from './device-sessions.js';
@@ -2352,12 +2352,14 @@ app.get('/api/roku/series/last-watched', async (req, res) => {
     if (!sourceId || !seriesId) return res.status(400).json({ error: 'sourceId and seriesId are required' });
     // The badge is profile-specific and keyed by provider + series. Starting
     // another series updates its own entry without erasing this one.
-    const watched = await getSeriesLastWatched(requestProfileOwner(req), sourceId, seriesId);
-    const episodeId = watched?.itemId || '';
+    const episodes = await getSeriesWatchedEpisodes(requestProfileOwner(req), sourceId, seriesId);
+    const mostRecent = episodes[0] || null;
+    const episodeId = mostRecent?.itemId || '';
     res.set('Cache-Control', 'no-store');
     res.json({
       episodeId,
-      positionMs: Math.max(0, Number(watched?.endPositionMs) || 0),
+      positionMs: Math.max(0, Number(mostRecent?.endPositionMs) || 0),
+      episodes,
     });
   } catch (error) { res.status(500).json({ error: error.message }); }
 });

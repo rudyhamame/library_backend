@@ -28,7 +28,43 @@ try {
       const key = `${accountId}:${profile.id || ownerId}`;
       if (seenProfiles.has(key)) continue;
       seenProfiles.add(key);
-      await updateAccountLibrary(ownerId, library => library, String(profile.id || ''));
+      const rawLibrary = profile.library || {};
+      const legacyRows = [
+        ...(Array.isArray(rawLibrary.series_last_watched) ? rawLibrary.series_last_watched.map(row => ({ ...row, kind: row?.providerIdentity?.kind || row?.kind || 'series' })) : []),
+        ...Object.entries(rawLibrary.last_kinds_watched || {}).filter(([, row]) => row).map(([bucket, row]) => ({
+          ...row, kind: row?.providerIdentity?.kind || row?.kind || (bucket === 'episode' ? 'series' : bucket === 'live' ? 'channel' : 'movie'),
+        })),
+      ];
+      await updateAccountLibrary(ownerId, library => {
+        for (const row of legacyRows) {
+          const identity = row.providerIdentity || {};
+          const sourceId = String(identity.sourceId || row.sourceId || '');
+          const itemId = String(identity.itemId || row.itemId || '');
+          if (!sourceId || !itemId) continue;
+          const rawKind = String(identity.kind || row.kind || 'movie').toLowerCase();
+          const kind = ['channel', 'live'].includes(rawKind) ? 'channel' : (['series', 'episode'].includes(rawKind) ? 'series' : 'movie');
+          const record = {
+            ...row,
+            providerIdentity: { sourceId, kind, itemId, seriesId: String(identity.seriesId || row.seriesId || '') },
+          };
+          delete record.sourceId; delete record.kind; delete record.itemId; delete record.seriesId; delete record.providerURL; delete record.providerUrl;
+          const target = kind === 'channel' ? library.streaming_history.live : kind === 'series'
+            ? (() => {
+              const seriesId = record.providerIdentity.seriesId;
+              let group = library.streaming_history.series.find(item => item.providerIdentity.sourceId === sourceId && item.providerIdentity.seriesId === seriesId);
+              if (!group) { group = { providerIdentity: { sourceId, kind: 'series', seriesId }, episodes: [] }; library.streaming_history.series.push(group); }
+              return group.episodes;
+            })()
+            : library.streaming_history.movies;
+          const existingIndex = target.findIndex(item => item.providerIdentity?.itemId === itemId);
+          const storedRecord = kind === 'series' ? { ...record, providerIdentity: { itemId } } : record;
+          const existing = existingIndex >= 0 ? target[existingIndex] : null;
+          if (!existing || new Date(storedRecord.updatedAt || 0) >= new Date(existing.updatedAt || 0)) {
+            if (existingIndex >= 0) target[existingIndex] = storedRecord; else target.push(storedRecord);
+          }
+        }
+        return library;
+      }, String(profile.id || ''));
       profilesRebuilt++;
     }
   }
@@ -54,21 +90,27 @@ try {
             lastWatched: String(row.lastWatched || '00:00:00'),
             providerIdentity: { itemId, kind, sourceId, seriesId: String(identity.seriesId || row.seriesId || '') },
           };
-          const bucket = kind === 'channel' ? 'live' : (kind === 'series' ? 'episodes' : 'movies');
-          const records = library.streaming_history[bucket];
+          let records;
+          if (kind === 'channel') records = library.streaming_history.live;
+          else if (kind === 'movie') records = library.streaming_history.movies;
+          else {
+            const seriesId = record.providerIdentity.seriesId;
+            let group = library.streaming_history.series.find(item => item.providerIdentity.sourceId === sourceId && item.providerIdentity.seriesId === seriesId);
+            if (!group) { group = { providerIdentity: { sourceId, kind: 'series', seriesId }, episodes: [] }; library.streaming_history.series.push(group); }
+            records = group.episodes;
+          }
           const key = `${sourceId}:${kind}:${itemId}`;
           const index = records.findIndex(item => {
             const id = item.providerIdentity || {};
+            if (kind === 'series') return String(id.itemId || '') === itemId;
             return `${id.sourceId || ''}:${id.kind || ''}:${id.itemId || ''}` === key;
           });
           const existing = index >= 0 ? records[index] : null;
           if (!existing || new Date(record.updatedAt || 0) >= new Date(existing.updatedAt || 0)) {
-            if (index >= 0) records[index] = record;
-            else records.push(record);
+            const storedRecord = kind === 'series' ? { ...record, providerIdentity: { itemId } } : record;
+            if (index >= 0) records[index] = storedRecord;
+            else records.push(storedRecord);
           }
-          const legacyBucket = kind === 'channel' ? 'live' : (kind === 'series' ? 'episode' : 'movie');
-          const current = library.last_kinds_watched[legacyBucket];
-          if (!current || new Date(record.updatedAt || 0) >= new Date(current.updatedAt || 0)) library.last_kinds_watched[legacyBucket] = record;
           return library;
         });
         legacyRowsImported++;

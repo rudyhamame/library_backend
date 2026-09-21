@@ -30,13 +30,18 @@ async function migrateAccount(db, account, roots) {
       const groupedHistory = library.streaming_history || {};
       const currentHistory = Array.isArray(groupedHistory)
         ? groupedHistory
-        : ['episodes', 'movies', 'live'].flatMap(bucket => Array.isArray(groupedHistory[bucket]) ? groupedHistory[bucket] : []);
+        : [
+          ...(Array.isArray(groupedHistory.series) ? groupedHistory.series.flatMap(group => (group.episodes || []).map(episode => ({
+            ...episode,
+            providerIdentity: { ...group.providerIdentity, ...episode.providerIdentity, kind: 'series' },
+          }))) : []),
+          ...(Array.isArray(groupedHistory.episodes) ? groupedHistory.episodes : []),
+          ...(Array.isArray(groupedHistory.movies) ? groupedHistory.movies : []),
+          ...(Array.isArray(groupedHistory.live) ? groupedHistory.live : []),
+        ];
       const records = currentHistory.length
         ? currentHistory
-        : [
-          ...(Array.isArray(library.series_last_watched) ? library.series_last_watched : []),
-          ...Object.values(library.last_kinds_watched || {}).filter(Boolean),
-        ];
+        : [];
       return records.map(item => ({ ...item, ownerId: profile.ownerId }));
     })),
   ]);

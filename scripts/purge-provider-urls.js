@@ -19,13 +19,9 @@ try {
       'profiles.$[].library.savedSelections.series.$[].providerURL', 'profiles.$[].library.savedSelections.series.$[].providerUrl',
       'profiles.$[].library.savedSelections.movies.$[].providerURL', 'profiles.$[].library.savedSelections.movies.$[].providerUrl',
       'profiles.$[].library.savedSelections.live.$[].providerURL', 'profiles.$[].library.savedSelections.live.$[].providerUrl',
-      'profiles.$[].library.series_last_watched.$[].providerURL', 'profiles.$[].library.series_last_watched.$[].providerUrl',
-      'profiles.$[].library.streaming_history.episodes.$[].providerURL', 'profiles.$[].library.streaming_history.episodes.$[].providerUrl',
+      'profiles.$[].library.streaming_history.series.$[].episodes.$[].providerURL', 'profiles.$[].library.streaming_history.series.$[].episodes.$[].providerUrl',
       'profiles.$[].library.streaming_history.movies.$[].providerURL', 'profiles.$[].library.streaming_history.movies.$[].providerUrl',
       'profiles.$[].library.streaming_history.live.$[].providerURL', 'profiles.$[].library.streaming_history.live.$[].providerUrl',
-      'profiles.$[].library.last_kinds_watched.episode.providerURL', 'profiles.$[].library.last_kinds_watched.episode.providerUrl',
-      'profiles.$[].library.last_kinds_watched.movie.providerURL', 'profiles.$[].library.last_kinds_watched.movie.providerUrl',
-      'profiles.$[].library.last_kinds_watched.live.providerURL', 'profiles.$[].library.last_kinds_watched.live.providerUrl',
       'providers.$[].providerURL', 'providers.$[].providerUrl',
     ]) libraryFields[path] = '';
     const libraryResult = await identities.updateMany({}, { $unset: libraryFields });

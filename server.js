@@ -854,7 +854,9 @@ async function hydrateHistoryFromProviders(items, sources) {
           episodeNumber: providerItem.episodeNumber ?? item.episodeNumber ?? '',
           seriesId: item.seriesId || item.providerIdentity?.seriesId || item.providerURL?.seriesId || resolvedSeriesId,
         };
-      const providerUrl = await sourceProviderUrl(source, kind, itemId, merged.extension).catch(() => merged.providerUrl || '');
+      const providerUrl = await Promise.resolve()
+        .then(() => sourceProviderUrl(source, kind, itemId, merged.extension))
+        .catch(() => merged.providerUrl || '');
       return { ...merged, providerUrl, providerURL: providerUrl };
     } catch (error) {
       console.warn(`[History] provider metadata unavailable for ${kind}:${itemId}: ${error.message}`);

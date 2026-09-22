@@ -208,13 +208,14 @@ export async function getSeriesLastWatched(ownerId, sourceId, seriesId) {
       && String(item.providerIdentity?.sourceId || '') === String(sourceId)
       && String(item.providerIdentity?.seriesId || '') === String(seriesId))
     .sort((a, b) => new Date(b.updatedAt || 0) - new Date(a.updatedAt || 0))[0];
-  if (!keyed) return null;
+  const normalized = kindRecordHistory(keyed);
+  if (!normalized) return null;
   return {
-    itemId: keyed.providerIdentity?.itemId || '',
-    sourceId: keyed.providerIdentity?.sourceId || '',
-    seriesId: keyed.providerIdentity?.seriesId || '',
-    endPositionMs: milliseconds(keyed.endPositionMs),
-    lastMoment: keyed.lastWatched || '00:00:00',
+    itemId: normalized.providerIdentity?.itemId || '',
+    sourceId: normalized.providerIdentity?.sourceId || '',
+    seriesId: normalized.providerIdentity?.seriesId || '',
+    endPositionMs: normalized.endPositionMs,
+    lastMoment: normalized.lastMoment,
   };
 }
 
@@ -226,7 +227,9 @@ export async function getSeriesWatchedEpisodes(ownerId, sourceId, seriesId) {
       && String(item.providerIdentity?.sourceId || '') === String(sourceId)
       && String(item.providerIdentity?.seriesId || '') === String(seriesId))
     .sort((a, b) => new Date(b.updatedAt || 0) - new Date(a.updatedAt || 0))
-    .map(item => ({ itemId: item.providerIdentity.itemId, endPositionMs: milliseconds(item.endPositionMs), lastWatched: item.lastWatched || '00:00:00' }));
+    .map(kindRecordHistory)
+    .filter(Boolean)
+    .map(item => ({ itemId: item.providerIdentity.itemId, endPositionMs: item.endPositionMs, lastWatched: item.lastMoment }));
 }
 
 export async function getStreamingContinueWatching(ownerId) {

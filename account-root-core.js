@@ -1,4 +1,5 @@
 const kinds = ['series', 'movie', 'channel'];
+import { normalizeIdentityBuckets } from './library-identity.js';
 
 const text = value => String(value ?? '');
 
@@ -9,6 +10,10 @@ function withoutMongoId(document = {}) {
 
 function groupByKind(rows = []) {
   return Object.fromEntries(kinds.map(kind => [kind, rows.filter(row => text(row.providerIdentity?.kind || row.kind) === kind).map(withoutMongoId)]));
+}
+
+function identityBuckets(rows = []) {
+  return normalizeIdentityBuckets(rows);
 }
 
 function providerSelection(source) {
@@ -71,8 +76,8 @@ export function buildAccountRoot({
         email: text(profile.partnerEmail),
         profileCode: text(profile.partnerProfileCode),
       },
-      favorites: groupByKind(profileFavorites),
-      savedSelections: profile.library?.savedSelections || {},
+      favorites: identityBuckets(profileFavorites),
+      savedSelections: identityBuckets(profile.library?.savedSelections),
       updatedAt: profile.updatedAt || null,
     };
   });
@@ -98,7 +103,7 @@ export function buildAccountRoot({
       const selection = providerSelection(source);
       return [providerId, selection.enabledItems];
     })),
-    favorites: groupByKind(accountFavorites),
+    favorites: identityBuckets(accountFavorites),
     playback: accountPlayback,
     lastWatched,
     catalogRefs: catalogRefs.map(withoutMongoId),

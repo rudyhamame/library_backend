@@ -1,5 +1,6 @@
 import { MongoClient, ObjectId } from 'mongodb';
 import { accountOwnerId } from './account-library-owner.js';
+import { normalizeIdentityBuckets } from './library-identity.js';
 
 const mongoUri = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017';
 const rokuDb = process.env.MONGODB_DB || 'rh_roku';
@@ -96,12 +97,10 @@ export function normalizedAccountLibrary(library) {
     } else streamingHistory.movies.push(row);
   }
   return {
-    favorites: Array.isArray(library?.favorites) ? withoutProviderUrls(library.favorites) : [],
-    savedSelections: {
-      series: Array.isArray(library?.savedSelections?.series) ? withoutProviderUrls(library.savedSelections.series) : [],
-      movies: Array.isArray(library?.savedSelections?.movies) ? withoutProviderUrls(library.savedSelections.movies) : [],
-      live: Array.isArray(library?.savedSelections?.live) ? withoutProviderUrls(library.savedSelections.live) : [],
-    },
+    // Favorites and saved selections deliberately share one identity-only
+    // contract. Metadata and provider URLs are revived from the live catalog.
+    favorites: normalizeIdentityBuckets(library?.favorites),
+    savedSelections: normalizeIdentityBuckets(library?.savedSelections),
     streaming_history: streamingHistory,
   };
 }

@@ -1,43 +1,33 @@
 import { getAccountLibrary, updateAccountLibrary } from './account-library-data.js';
-
-function matches(row, key) {
-  return row.profileId === key.profileId && row.sourceId === key.sourceId
-    && row.kind === key.kind && row.itemId === key.itemId;
-}
+import { flatIdentityRows, normalizeIdentityBuckets, providerIdentityOf } from './library-identity.js';
 
 export async function getFavorites(ownerId, profileId) {
   if (!ownerId || !profileId) return [];
   const library = await getAccountLibrary(ownerId, profileId);
-  return library.favorites.filter(row => !row.profileId || row.profileId === String(profileId))
-    .sort((a, b) => new Date(b.updatedAt || 0) - new Date(a.updatedAt || 0))
-    .map(({ ownerId: _ownerId, profileId: _profileId, itemId, ...item }) => ({ id: itemId, ...item }));
+  return flatIdentityRows(library.favorites);
 }
 
 export async function toggleFavorite({ ownerId, profileId, id, title, kind, sourceId = '', logo = '', category = '', extension = '', favorite = undefined }) {
   if (!ownerId || !profileId || !id) throw new Error('Account, profile, and item ID are required');
   if (!sourceId || !kind) throw new Error('Provider and item kind are required');
-  const key = { profileId: String(profileId), sourceId: String(sourceId), kind: String(kind), itemId: String(id) };
+  const bucket = kind === 'series' ? 'series' : kind === 'channel' ? 'live' : 'movies';
+  const providerIdentity = providerIdentityOf({ sourceId, kind, id }, bucket);
+  if (!providerIdentity) throw new Error('Provider identity is required');
   let response;
   await updateAccountLibrary(ownerId, library => {
-    const index = library.favorites.findIndex(row => matches(row, key));
-    const existing = index >= 0 ? library.favorites[index] : null;
+    const favorites = normalizeIdentityBuckets(library.favorites);
+    const index = favorites[bucket].findIndex(row => JSON.stringify(row.providerIdentity) === JSON.stringify(providerIdentity));
+    const existing = index >= 0 ? favorites[bucket][index] : null;
     const desiredFavorite = typeof favorite === 'boolean' ? favorite : !existing;
     if (!desiredFavorite) {
-      if (index >= 0) library.favorites.splice(index, 1);
-      response = { id, favorite: false };
+      if (index >= 0) favorites[bucket].splice(index, 1);
+      library.favorites = favorites;
+      response = { id, providerIdentity, favorite: false };
       return library;
     }
-    const item = {
-      ...key,
-      title: String(title || existing?.title || ''),
-      logo: String(logo || existing?.logo || ''),
-      category: String(category || existing?.category || ''),
-      extension: String(extension || existing?.extension || ''),
-      updatedAt: new Date(),
-    };
-    if (index >= 0) library.favorites[index] = item;
-    else library.favorites.push(item);
-    response = { id, title: item.title, kind: key.kind, sourceId: key.sourceId, favorite: true };
+    if (index < 0) favorites[bucket].push({ providerIdentity });
+    library.favorites = favorites;
+    response = { id, providerIdentity, favorite: true };
     return library;
   }, profileId);
   return response;

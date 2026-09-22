@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { accountForLibraryOwner, allAccountDocuments, updateAccountLibrary } from './account-library-data.js';
 import { accountOwnerId } from './account-library-owner.js';
 import { xtreamProviderUrl } from './xtream.js';
+import { normalizeIdentityBuckets } from './library-identity.js';
 
 const savedKinds = ['series', 'movies', 'live'];
 const kindFor = value => ['channel', 'live'].includes(String(value || '').toLowerCase()) ? 'live' : (['movie', 'movies'].includes(String(value || '').toLowerCase()) ? 'movies' : 'series');
@@ -12,26 +13,19 @@ const identityKindFor = bucket => bucket === 'live' ? 'channel' : bucket === 'mo
 // items, and so playback always goes through the current provider. Legacy
 // rows that still hold raw URL strings are handled by
 // scripts/migrate-saved-selections-to-identity.js, not here.
-const normalizeIdentity = (entry, bucket) => {
-  if (entry && typeof entry === 'object' && entry.sourceId != null && entry.itemId != null) {
-    return { sourceId: String(entry.sourceId), kind: String(entry.kind || identityKindFor(bucket)), itemId: String(entry.itemId) };
-  }
-  return null;
-};
-const savedShape = value => Object.fromEntries(savedKinds.map(bucket => [
-  bucket,
-  (Array.isArray(value?.[bucket]) ? value[bucket] : []).map(entry => normalizeIdentity(entry, bucket)).filter(Boolean),
-]));
+const savedShape = value => normalizeIdentityBuckets(value);
 function sourceUrl(source, kind, id, extension = '') { return xtreamProviderUrl(source, kind === 'live' ? 'channel' : (kind === 'movies' ? 'movie' : 'series'), id, extension); }
 function identitiesForSource(source, saved) {
   const result = savedShape(saved);
-  for (const bucket of savedKinds) result[bucket] = result[bucket].filter(identity => identity.sourceId === String(source._id));
+  for (const bucket of savedKinds) result[bucket] = result[bucket].filter(row => row.providerIdentity.sourceId === String(source._id));
   return result;
 }
-function itemFromIdentity(identity, source) {
+function itemFromIdentity(row, source) {
+  const identity = row.providerIdentity;
   const kind = identity.kind === 'channel' ? 'channel' : identity.kind === 'movie' ? 'movie' : 'series';
   const bucket = kind === 'channel' ? 'live' : kind === 'movie' ? 'movies' : 'series';
-  return { key: `${kind}:${identity.itemId}`, id: identity.itemId, kind, providerUrl: sourceUrl(source, bucket, identity.itemId), sourceId: identity.sourceId, title: identity.itemId };
+  const id = identity.seriesId || identity.itemId;
+  return { key: `${kind}:${id}`, id, kind, providerUrl: sourceUrl(source, bucket, id), sourceId: identity.sourceId, title: id };
 }
 
 export function selectionFor(source, ownerId, accountOwner) {
@@ -136,7 +130,9 @@ export async function updateXtreamSelection(id, selection, accountOwner, profile
   for (const item of Array.isArray(selection?.enabledItems) ? selection.enabledItems : []) {
     const bucket = kindFor(item.kind);
     const itemId = String(item.id || item.itemId || '');
-    if (itemId) next[bucket].push({ sourceId, kind: identityKindFor(bucket), itemId });
+    if (itemId) next[bucket].push({ providerIdentity: bucket === 'series'
+      ? { sourceId, kind: 'series', seriesId: itemId }
+      : { itemId, kind: identityKindFor(bucket), sourceId } });
   }
   await updateAccountLibrary(profileOwner, library => { library.savedSelections = next; return library; });
   return publicXtreamSource({ ...located.source, selections: { [String(profileOwner)]: next } }, profileOwner, accountOwner);

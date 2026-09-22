@@ -872,9 +872,9 @@ async function getLibrarySelectedItems(ownerId = null, requestedKind = '', accou
   const groups = await Promise.all(sources.map(async source => {
     const saved = selectionFor(source, ownerId, accountOwner).savedSelections || {};
     const idsByKind = {
-      series: new Set((Array.isArray(saved.series) ? saved.series : []).map(identity => String(identity.itemId))),
-      movie: new Set((Array.isArray(saved.movies) ? saved.movies : []).map(identity => String(identity.itemId))),
-      channel: new Set((Array.isArray(saved.live) ? saved.live : []).map(identity => String(identity.itemId))),
+      series: new Set((Array.isArray(saved.series) ? saved.series : []).map(row => String(row.providerIdentity?.seriesId || ''))),
+      movie: new Set((Array.isArray(saved.movies) ? saved.movies : []).map(row => String(row.providerIdentity?.itemId || ''))),
+      channel: new Set((Array.isArray(saved.live) ? saved.live : []).map(row => String(row.providerIdentity?.itemId || ''))),
     };
     const rows = [];
     for (const kind of kinds) {
@@ -2138,18 +2138,18 @@ app.get('/api/roku/bootstrap', async (req, res) => {
         : { ...item, sourceId: selectedSourceId }))
       .filter(Boolean)
       .slice(0, welcomeRailLimit);
-    const providerFavorites = favorites.filter(favorite => String(favorite.sourceId || '') === selectedSourceId);
+    const providerFavorites = favorites.filter(favorite => String(favorite.providerIdentity?.sourceId || favorite.sourceId || '') === selectedSourceId);
     const favoriteLive = new Map(liveCatalog.series.concat(liveCatalog.movie, liveCatalog.channel)
       .map(item => [`${item.kind}:${item.id}`, item]));
     const hydratedFavorites = providerFavorites.map(favorite => {
-      const match = favoriteLive.get(`${favorite.kind}:${favorite.id}`);
-      return rokuDiscoveryItem({
-        ...favorite,
-        sourceId: favorite.sourceId || match?.sourceId || selectedSourceId,
-        logo: favorite.logo || match?.logo || '',
-        category: (favorite.category && favorite.category !== 'Other' ? favorite.category : match?.category) || favorite.category || 'Other',
-        extension: favorite.extension || match?.extension || 'mp4',
-      });
+      const identity = favorite.providerIdentity || favorite;
+      const kind = identity.kind === 'channel' ? 'channel' : identity.kind === 'movie' ? 'movie' : 'series';
+      const id = identity.seriesId || identity.itemId || favorite.id;
+      const match = favoriteLive.get(`${kind}:${id}`);
+      // A favorite is revived only from the current provider catalog. Stored
+      // rows intentionally do not supply title/logo/category/URL metadata.
+      if (!match) return null;
+      return rokuDiscoveryItem({ ...match, providerIdentity: identity });
     }).filter(Boolean).slice(0, 30);
     res.set('Cache-Control', 'no-store');
     res.json({

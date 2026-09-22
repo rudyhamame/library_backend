@@ -903,6 +903,31 @@ async function getRokuSelectedItems(kind, ownerId = null, accountOwner = ownerId
     .map(item => ({ ...item, category: item.category || 'Other', rokuCategory: item.rokuCategory || rokuText(item.category || 'Other') }));
 }
 
+// Library rows contain identities only. Rehydrate favorites from the current
+// provider catalog before exposing them to a client, so titles, artwork,
+// extensions, and the provider URL can never become stale stored metadata.
+async function hydrateFavoriteItems(favorites, sources) {
+  const catalogCache = new Map();
+  const catalogFor = async (source, kind) => {
+    const key = `${source._id}:${kind}`;
+    if (!catalogCache.has(key)) catalogCache.set(key, getSourceCatalog(source, kind).catch(() => []));
+    return catalogCache.get(key);
+  };
+  const hydrated = [];
+  for (const favorite of Array.isArray(favorites) ? favorites : []) {
+    const identity = favorite.providerIdentity || favorite;
+    const kind = identity.kind === 'channel' ? 'channel' : identity.kind === 'movie' ? 'movie' : 'series';
+    const id = String(identity.seriesId || identity.itemId || favorite.id || '');
+    const source = (sources || []).find(candidate => String(candidate._id) === String(identity.sourceId));
+    if (!source || !id) continue;
+    const row = (await catalogFor(source, kind)).find(item => String(resolveProviderMediaId(item, item.kind)) === id);
+    if (!row) continue;
+    const item = selectedXtreamItem(source, row);
+    hydrated.push({ ...item, providerIdentity: identity, providerURL: item.providerUrl || '' });
+  }
+  return hydrated;
+}
+
 function directXtreamItem(item) {
   const extension = String(item.extension || '').toLowerCase();
   const playbackUrl = rokuXtreamPlaybackPath(item.sourceId, item.kind, item.id, extension);
@@ -2620,7 +2645,8 @@ app.get('/api/favorites', async (req, res) => {
   try {
     const ownerId = requestAccountOwner(req), profileId = requestProfile(req);
     if (!ownerId || !profileId) return res.status(401).json({ error: 'Profile authentication required' });
-    res.set('Cache-Control', 'no-store'); res.json({ items: await getFavorites(ownerId, profileId) });
+    const [favorites, sources] = await Promise.all([getFavorites(ownerId, profileId), getAllXtreamSources(ownerId)]);
+    res.set('Cache-Control', 'no-store'); res.json({ items: await hydrateFavoriteItems(favorites, sources) });
   }
   catch (error) { res.status(500).json({ error: error.message }); }
 });

@@ -1,6 +1,11 @@
 const buckets = ['series', 'movies', 'live'];
 
-const bucketKind = bucket => bucket === 'series' ? 'series' : bucket === 'live' ? 'channel' : 'movie';
+const bucketKind = bucket => {
+  const value = String(bucket || '').toLowerCase();
+  if (value === 'series' || value === 'episode') return 'series';
+  if (value === 'live' || value === 'channel') return 'channel';
+  return 'movie';
+};
 
 function providerIdentityOf(value, bucket = '') {
   if (!value || typeof value !== 'object') return null;

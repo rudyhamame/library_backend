@@ -24,8 +24,11 @@ function entriesFor(value, bucket) {
 export function normalizeIdentityBuckets(value) {
   const result = Object.fromEntries(buckets.map(bucket => [bucket, []]));
   const seen = new Set();
-  for (const bucket of buckets) {
-    for (const entry of entriesFor(value, bucket)) {
+  const groups = Array.isArray(value)
+    ? buckets.map(bucket => [bucket, value.filter(entry => bucketKind(String(entry?.providerIdentity?.kind || entry?.kind || '')) === bucketKind(bucket))])
+    : buckets.map(bucket => [bucket, entriesFor(value, bucket)]);
+  for (const [bucket, entries] of groups) {
+    for (const entry of entries) {
       const providerIdentity = providerIdentityOf(entry, bucket);
       if (!providerIdentity) continue;
       const id = providerIdentity.seriesId || providerIdentity.itemId;

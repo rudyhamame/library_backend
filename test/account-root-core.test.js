@@ -27,7 +27,9 @@ test('builds one canonical account tree with profile-specific favorites', () => 
   assert.equal(root.account.passwordHash, undefined);
   assert.deepEqual(root.providers[0].selection.enabledItems.movie.map(item => item.id), ['movie-1']);
   assert.deepEqual(root.providers[0].selection.enabledItems.series.map(item => item.id), ['series-1']);
-  assert.equal(root.profiles[0].favorites.movie[0].itemId, 'movie-1');
+  assert.deepEqual(root.profiles[0].favorites.movies[0].providerIdentity, {
+    itemId: 'movie-1', kind: 'movie', sourceId: 'provider-1',
+  });
   assert.equal(root.catalogRefs[0].count, 100000);
   assert.equal(root.catalogRefs[0].collection, 'provider_catalog_items');
   assert.equal(root.lastWatched.movie[0].itemId, 'movie-1');

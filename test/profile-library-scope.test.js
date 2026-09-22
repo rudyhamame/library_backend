@@ -76,13 +76,13 @@ test('Roku Welcome content is selected by profile and constrained to its provide
   const scene = await readFile(new URL('../../roku/components/HomeScreenCatalog.brs', import.meta.url), 'utf8');
   assert.match(server, /getRokuSourcePreferenceByOwner\(ownerId\)/);
   assert.match(server, /const profileSources = flattenSelection\(sources, ownerId, accountOwner\)/);
-  assert.match(server, /const providerFavorites = favorites\.filter\(favorite => String\(favorite\.sourceId \|\| ''\) === selectedSourceId\)/);
+  assert.match(server, /const providerFavorites = favorites\.filter\(favorite => String\(favorite\.providerIdentity\?\.sourceId \|\| favorite\.sourceId \|\| ''\) === selectedSourceId\)/);
   assert.match(server, /providerScope \|\| ''\) === 'roku'/);
   assert.match(sessions, /getProfileRokuSourcePreferenceByOwner\(ownerId\)/);
   assert.match(scene, /continue-watching\?providerScope=roku/);
   assert.match(server, /sourceId = pickRokuSourceId\(await getRokuSourcePreferenceByOwner\(ownerId\), sources\)/);
   assert.match(favorites, /updateAccountLibrary\(ownerId, library =>/);
-  assert.match(favorites, /library\.favorites\.findIndex\(row => matches\(row, key\)\)/);
+  assert.match(favorites, /normalizeIdentityBuckets\(library\.favorites\)/);
   assert.match(favorites, /if \(!sourceId \|\| !kind\) throw new Error/);
   assert.match(favorites, /const desiredFavorite = typeof favorite === 'boolean' \? favorite : !existing/);
   assert.match(scene, /favorite: desiredFavorite/);

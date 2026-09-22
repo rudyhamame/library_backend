@@ -50,22 +50,7 @@ export const kindRecord = update => {
   };
   if (update.kind === 'channel') return { providerIdentity };
   if (update.kind === 'movie') return { lastWatched: update.lastMoment, providerIdentity };
-  return {
-    providerIdentity,
-    title: update.title,
-    seriesName: update.seriesName,
-    extension: update.extension,
-    poster: update.poster,
-    category: update.category,
-    seasonNumber: update.seasonNumber,
-    episodeNumber: update.episodeNumber,
-    endPositionMs: update.endPositionMs,
-    mediaDurationMs: update.mediaDurationMs,
-    completed: update.completed === true,
-    sessionId: update.sessionId,
-    updatedAt: update.updatedAt,
-    lastWatched: update.lastMoment,
-  };
+  return { lastWatched: update.lastMoment, providerIdentity };
 };
 const kindRecordHistory = record => {
   if (!record) return null;

@@ -2577,6 +2577,9 @@ app.put('/api/streaming-history/:sessionId', async (req, res) => {
     if (!sessionId) return res.status(400).json({ error: 'Streaming session ID is required' });
     res.set('Cache-Control', 'no-store');
     const update = { ...req.query, ...req.body };
+    if (typeof update.providerIdentity === 'string') {
+      try { update.providerIdentity = JSON.parse(update.providerIdentity); } catch { update.providerIdentity = null; }
+    }
     for (const field of ['startPosition', 'endPosition', 'mediaDuration', 'streamingDuration']) {
       const secondsField = `${field}Seconds`;
       const millisecondsField = `${field}Ms`;

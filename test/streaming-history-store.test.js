@@ -24,12 +24,8 @@ test('streaming history stores provider identity in one nested object and never 
     mediaDurationMs: 7_200_000,
   });
   assert.deepEqual(record, {
-    providerIdentity: { itemId: 'movie-1', kind: 'movie', sourceId: 'provider-1', seriesId: '' },
-    title: 'Real provider title', seriesName: '', extension: 'mkv',
-    poster: 'https://example.invalid/poster.jpg', category: 'Drama',
-    seasonNumber: '', episodeNumber: '', endPositionMs: 1_320_000,
-    mediaDurationMs: 7_200_000, completed: false, sessionId: 'session-1',
-    updatedAt: '2026-09-19T00:00:00.000Z', lastWatched: '00:22:00',
+    lastWatched: '00:22:00',
+    providerIdentity: { itemId: 'movie-1', kind: 'movie', sourceId: 'provider-1' },
   });
   assert.equal('providerURL' in record, false);
   assert.equal('providerUrl' in record, false);

@@ -29,3 +29,18 @@ test('Android General User has no Roku pairing or casting surface', async () => 
   assert.match(activity, /if\(!isRokuUserMode\(\)\)\{[\s\S]*showChangePasswordDialog\(\)[\s\S]*showDeleteAccountDialog\(\)/);
   assert.match(await readFile(new URL('../server.js', import.meta.url), 'utf8'), /Partner accounts are available only for General users/);
 });
+
+test('Roku browser QR inherits the active rh_roku account and profile', async () => {
+  const sessions = await readFile(new URL('../device-sessions.js', import.meta.url), 'utf8');
+  const frontend = await readFile(new URL('../../library_frontend/src/App.vue', import.meta.url), 'utf8');
+  const roku = await readFile(new URL('../../roku/components/HomeScreen.brs', import.meta.url), 'utf8');
+  assert.match(sessions, /session\.profileId = authorization\.profileId \|\| null/);
+  assert.match(sessions, /session\.realm = 'roku'/);
+  assert.match(sessions, /browserQrImageUrl/);
+  assert.match(sessions, /issueToken\(session, 'browser'\)/);
+  assert.match(frontend, /device-session\/claim/);
+  assert.match(frontend, /browserRealm\.value = tokenRealm\(claim\.token\)/);
+  assert.match(frontend, /window\.history\.replaceState\(\{ appPage: "settings" \}, "", "\/settings"\)/);
+  assert.match(roku, /payload\.browserQrImageUrl/);
+  assert.doesNotMatch(roku, /iptv\.mctoshs\.ca%2Fsettings/);
+});

@@ -845,6 +845,7 @@ async function hydrateHistoryFromProviders(items, sources) {
         ...item,
         title: providerItem.title || item.title || '',
         seriesName: providerItem.seriesName || item.seriesName || '',
+        seriesTitle: providerItem.seriesName || item.seriesTitle || item.seriesName || '',
         poster: providerItem.logo || providerItem.thumbnail || item.poster || '',
         thumbnail: providerItem.logo || providerItem.thumbnail || item.thumbnail || '',
         extension: providerItem.extension || item.extension || '',

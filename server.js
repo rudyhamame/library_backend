@@ -1247,6 +1247,8 @@ app.post('/api/roku/heartbeat', async (req, res) => {
       lanIp: req.body?.lanIp || req.body?.lanip || '',
       ecpAppId: req.body?.ecpAppId || req.body?.ecpappid || '',
       sourceId: req.body?.sourceId || req.body?.sourceid || '',
+      kind: req.body?.kind || '',
+      itemId: req.body?.itemId || req.body?.itemid || '',
     });
     res.json({ ok: true });
   } catch (error) { res.status(500).json({ error: error.message }); }

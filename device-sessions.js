@@ -717,7 +717,7 @@ export async function getLinkedDevices(accountId, profileId = '') {
   void selectedProfileId;
   const rows = await (await profiles()).find(
     { accountId: new ObjectId(accountId), kind: { $nin: ['browser', 'android'] } },
-    { projection: { deviceId: 1, profileId: 1, linkedAt: 1, updatedAt: 1, lastSeenAt: 1, lastStreamingSeenAt: 1, lastClientIp: 1, lanIp: 1, ecpAppId: 1, kind: 1, label: 1 } },
+    { projection: { deviceId: 1, profileId: 1, linkedAt: 1, updatedAt: 1, lastSeenAt: 1, lastStreamingSeenAt: 1, streamingSourceId: 1, streamingKind: 1, streamingItemId: 1, lastClientIp: 1, lanIp: 1, ecpAppId: 1, kind: 1, label: 1 } },
   ).sort({ linkedAt: 1 }).toArray();
   return rows.map(device => ({
     id: String(device._id),
@@ -731,6 +731,9 @@ export async function getLinkedDevices(accountId, profileId = '') {
     ecpAppId: device.ecpAppId || '',
     running: Boolean(device.lastSeenAt && Date.now() - new Date(device.lastSeenAt).getTime() <= runningWindowMs),
     streaming: Boolean(device.lastStreamingSeenAt && Date.now() - new Date(device.lastStreamingSeenAt).getTime() <= streamingWindowMs),
+    streamingSourceId: device.streamingSourceId || '',
+    streamingKind: device.streamingKind || '',
+    streamingItemId: device.streamingItemId || '',
     label: `Roku ${String(device.deviceId || '').replace(/^roku-/, '').slice(-8).toUpperCase()}`,
   }));
 }
@@ -799,11 +802,13 @@ export async function recordDeviceHeartbeat(deviceId, streaming = false, clientI
   const lanIp = String(extra.lanIp || '').trim();
   const ecpAppId = String(extra.ecpAppId || '').trim();
   const sourceId = String(extra.sourceId || '').trim();
-  const previous = heartbeatCache.get(normalized) || { at: 0, streaming: false, ip: '', lanIp: '', ecpAppId: '', sourceId: '' };
+  const kind = String(extra.kind || '').trim();
+  const itemId = String(extra.itemId || '').trim();
+  const previous = heartbeatCache.get(normalized) || { at: 0, streaming: false, ip: '', lanIp: '', ecpAppId: '', sourceId: '', kind: '', itemId: '' };
   if (now - previous.at < heartbeatIntervalMs && previous.streaming === Boolean(streaming)
       && previous.ip === ip && previous.lanIp === lanIp && previous.ecpAppId === ecpAppId
-      && previous.sourceId === sourceId) return;
-  heartbeatCache.set(normalized, { at: now, streaming: Boolean(streaming), ip, lanIp, ecpAppId, sourceId });
+      && previous.sourceId === sourceId && previous.kind === kind && previous.itemId === itemId) return;
+  heartbeatCache.set(normalized, { at: now, streaming: Boolean(streaming), ip, lanIp, ecpAppId, sourceId, kind, itemId });
   try {
     const update = { $set: { lastSeenAt: new Date(now) } };
     if (ip) update.$set.lastClientIp = ip;
@@ -811,9 +816,14 @@ export async function recordDeviceHeartbeat(deviceId, streaming = false, clientI
     if (ecpAppId) update.$set.ecpAppId = ecpAppId;
     if (streaming) {
       update.$set.lastStreamingSeenAt = new Date(now);
+      update.$unset = update.$unset || {};
       if (sourceId) update.$set.streamingSourceId = sourceId;
       else update.$unset = { streamingSourceId: '' };
-    } else update.$unset = { lastStreamingSeenAt: '', streamingSourceId: '' };
+      if (kind) update.$set.streamingKind = kind;
+      if (itemId) update.$set.streamingItemId = itemId;
+      if (!kind) update.$unset.streamingKind = '';
+      if (!itemId) update.$unset.streamingItemId = '';
+    } else update.$unset = { lastStreamingSeenAt: '', streamingSourceId: '', streamingKind: '', streamingItemId: '' };
     await (await profiles()).updateOne({ deviceId: normalized }, update);
   } catch {
     heartbeatCache.delete(normalized);
@@ -826,7 +836,7 @@ export async function listAllLinkedDevices() {
     (await profiles()).find({}, {
       projection: {
         deviceId: 1, accountId: 1, profileId: 1, linkedAt: 1, updatedAt: 1,
-        lastSeenAt: 1, lastStreamingSeenAt: 1, streamingSourceId: 1, lastClientIp: 1, lanIp: 1, ecpAppId: 1, kind: 1, label: 1,
+        lastSeenAt: 1, lastStreamingSeenAt: 1, streamingSourceId: 1, streamingKind: 1, streamingItemId: 1, lastClientIp: 1, lanIp: 1, ecpAppId: 1, kind: 1, label: 1,
       },
     }).sort({ lastSeenAt: -1 }).toArray(),
     (await accounts('roku')).find({}, { projection: { email: 1, rokuSourceId: 1, ownerId: 1 } }).toArray(),
@@ -848,6 +858,8 @@ export async function listAllLinkedDevices() {
       // only as a legacy fallback for devices not yet assigned a profile.
       rokuSourceId: selectedProfile?.rokuSourceId || account?.rokuSourceId || '',
       streamingProviderId: row.streamingSourceId || '',
+      streamingKind: row.streamingKind || '',
+      streamingItemId: row.streamingItemId || '',
       profileId: row.profileId || '',
       profileName: selectedProfile?.name || '',
       profileOwnerId: selectedProfile?.ownerId || (selectedProfile?.isDefault ? accountOwnerId(row.accountId) : ''),

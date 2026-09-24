@@ -19,7 +19,7 @@ import { HlsStrategy, PlaybackStrategy, choosePlaybackStrategy, determineHlsStra
 import { clearStreamingHistory, deleteStreamingSession, getSeriesWatchedEpisodes, getStreamingContinueWatching, getStreamingHistory, getStreamingResume, saveStreamingHistory } from './streaming-history-store.js';
 import { getFavorites, toggleFavorite } from './favorites-store.js';
 import { accountOwnerId, profileOwnerId } from './account-library-owner.js';
-import { authorizeDeviceSession, autoLoginDeviceSession, castHandoffLink, changeAccountPassword, claimAutomaticPairing, confirmPasswordReset, createDeviceSession, deleteAccount, getAccountBasicInfo, getDeviceSession, getDeviceWeatherLocations, getLinkedDevices, getPairingInfo, getRokuDeviceSessionStatus, getRokuSourcePreferenceByOwner, initializeAccountDatabases, isProfileOnline, isRokuSessionLinked, listAllAccountsBasic, listAllLinkedDevices, loginAccount, loginDeviceSession, recordDeviceHeartbeat, registerAccount, registerBrowserDevice, requestAccountSignupVerification, requestDeviceSignupVerification, requestPasswordReset, resendDeviceSignupVerification, resolveAccountByEmail, resolveDeviceToken, saveDeviceWeatherLocations, selectAccountProfile, setupDeviceSession, unlinkAccountDevice, verifyDeviceSignupCode } from './device-sessions.js';
+import { authorizeDeviceSession, autoLoginDeviceSession, castHandoffLink, changeAccountPassword, claimAutomaticPairing, confirmPasswordReset, createDeviceSession, deleteAccount, getAccountBasicInfo, getDeviceSession, getDeviceWeatherLocations, getLinkedDevices, getPairingInfo, getRokuDeviceSessionStatus, getRokuSourcePreferenceByOwner, initializeAccountDatabases, isProfileOnline, isRokuSessionLinked, listAllAccountsBasic, listAllLinkedDevices, loginAccount, loginDeviceSession, recordDeviceHeartbeat, registerAccount, registerBrowserDevice, requestAccountSignupVerification, requestDeviceSignupVerification, requestPasswordReset, resendAccountSignupVerification, resendDeviceSignupVerification, resolveAccountByEmail, resolveDeviceToken, saveDeviceWeatherLocations, selectAccountProfile, setupDeviceSession, unlinkAccountDevice, verifyDeviceSignupCode } from './device-sessions.js';
 import { createAccountProfile, deleteAccountProfile, getAccountProfile, getAccountProfiles, getProfileByCode, getProfilePartnerCode, getProfilePartnerEmail, setProfilePartnerEmail, setProfileRokuSourcePreference, updateAccountProfile } from './account-profile-store.js';
 import { enforceLibraryOnly } from './library-route-policy.js';
 import { checkPlaylistSources } from './playlist-health.js';
@@ -1479,6 +1479,14 @@ app.post('/api/account/signup/request-verification', async (req, res) => {
   try {
     const realm = req.body?.realm === 'roku' ? 'roku' : 'general';
     const result = await requestAccountSignupVerification(req.body?.email, realm);
+    if (result.error) return res.status(400).json(result);
+    res.json(result);
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+app.post('/api/account/signup/resend-verification', async (req, res) => {
+  try {
+    const realm = req.body?.realm === 'roku' ? 'roku' : 'general';
+    const result = await resendAccountSignupVerification(req.body?.email, realm);
     if (result.error) return res.status(400).json(result);
     res.json(result);
   } catch (error) { res.status(500).json({ error: error.message }); }

@@ -28,6 +28,7 @@ const heartbeatCache = new Map();
 const heartbeatIntervalMs = 10_000;
 const runningWindowMs = 30_000;
 const streamingWindowMs = 30_000;
+const verificationResendDelaysMs = [0, 60_000, 150_000, 300_000, 900_000, 1_800_000];
 
 async function profiles() {
   if (!profilesPromise) profilesPromise = linkedDeviceStore().catch(error => { profilesPromise = undefined; throw error; });
@@ -111,10 +112,58 @@ async function saveUnverifiedAccount(email, changes, realm = 'roku') {
     code: changes.code ?? existing?.code ?? '',
     createdAt: existing?.createdAt || new Date(),
     updatedAt: changes.updatedAt || new Date(),
+    verificationSendCount: changes.verificationSendCount ?? existing?.verificationSendCount ?? 0,
+    verificationLastSentAt: changes.verificationLastSentAt ?? existing?.verificationLastSentAt ?? null,
+    verificationNextSendAt: changes.verificationNextSendAt ?? existing?.verificationNextSendAt ?? null,
+    verificationScheduleIndex: changes.verificationScheduleIndex ?? existing?.verificationScheduleIndex ?? 0,
   };
   if (index >= 0) entries[index] = next; else entries.push(next);
   await collection.updateOne({ _id: unverifiedAccountsId }, { $set: { unverified_accounts: entries, updatedAt: new Date() }, $setOnInsert: { createdAt: new Date() } }, { upsert: true });
   return next;
+}
+
+function verificationSendState(pending, now = Date.now()) {
+  const nextSendAt = pending?.verificationNextSendAt ? new Date(pending.verificationNextSendAt).getTime() : 0;
+  const retryAfterMs = Math.max(0, nextSendAt - now);
+  return {
+    verificationSendCount: Number(pending?.verificationSendCount) || 0,
+    verificationLastSentAt: pending?.verificationLastSentAt || null,
+    verificationNextSendAt: nextSendAt ? new Date(nextSendAt).toISOString() : null,
+    verificationRetryAfterMs: retryAfterMs,
+    verificationResendAvailable: retryAfterMs === 0,
+  };
+}
+
+async function sendPendingSignupVerification(email, realm, sendEmail) {
+  const normalizedEmail = normalizeEmail(email);
+  const pending = await findUnverifiedAccount(normalizedEmail, realm);
+  if (!pending || pending.email !== normalizedEmail) return { error: 'Verification session not found. Request a new code.' };
+  const now = Date.now();
+  const state = verificationSendState(pending, now);
+  if (!state.verificationResendAvailable) {
+    return { verificationRequired: true, verificationAlreadyPending: true, ...state };
+  }
+  const scheduleIndex = Number(pending.verificationScheduleIndex) || 0;
+  const nextCode = String(randomInt(100000, 1000000));
+  const nextScheduleIndex = (scheduleIndex + 1) % verificationResendDelaysMs.length;
+  const nextSendAt = new Date(now + verificationResendDelaysMs[nextScheduleIndex]);
+  await saveUnverifiedAccount(normalizedEmail, {
+    code: nextCode,
+    updatedAt: new Date(now),
+    verificationSendCount: (Number(pending.verificationSendCount) || 0) + 1,
+    verificationLastSentAt: new Date(now),
+    verificationNextSendAt: nextSendAt,
+    verificationScheduleIndex: nextScheduleIndex,
+  }, realm);
+  try {
+    await sendEmail(normalizedEmail, nextCode);
+  } catch (error) {
+    await saveUnverifiedAccount(normalizedEmail, { code: pending.code, updatedAt: new Date(), verificationNextSendAt: new Date(now) }, realm);
+    console.error('[signup verification] email send failed:', error.message);
+    return { error: 'Verification email could not be sent. Please try again.' };
+  }
+  const sent = await findUnverifiedAccount(normalizedEmail, realm);
+  return { verificationRequired: true, verificationResent: true, ...verificationSendState(sent) };
 }
 
 async function deleteUnverifiedAccount(email, realm = 'roku') {
@@ -503,36 +552,28 @@ export async function requestDeviceSignupVerification(code, email, password, fir
       // Keep the current signup attempt authoritative if the viewer backed
       // out and started again with the same email.
       context.session.signupPasswordHash = validPassword(password) ? hashPassword(password) : context.session.signupPasswordHash || '';
-      return { verificationRequired: true, verificationPending: true };
+      return { verificationRequired: true, verificationAlreadyPending: true, ...verificationSendState(pending) };
     }
   }
   const signupCode = String(randomInt(100000, 1000000));
   context.session.signupPasswordHash = validPassword(password) ? hashPassword(password) : '';
-  await saveUnverifiedAccount(normalizedEmail, { code: signupCode, updatedAt: new Date() });
+  const sentAt = Date.now();
+  await saveUnverifiedAccount(normalizedEmail, { code: signupCode, updatedAt: new Date(sentAt), verificationSendCount: 1, verificationLastSentAt: new Date(sentAt), verificationNextSendAt: new Date(sentAt + verificationResendDelaysMs[1]), verificationScheduleIndex: 1 });
   try { await sendSignupVerificationEmail(normalizedEmail, signupCode); }
   catch (error) {
     await saveUnverifiedAccount(normalizedEmail, { updatedAt: new Date() });
     console.error('[signup verification] email send failed:', error.message);
     return { error: 'Verification email could not be sent. Please try again.' };
   }
-  return { verificationRequired: true, verificationSent: true };
+  const sent = await findUnverifiedAccount(normalizedEmail);
+  return { verificationRequired: true, verificationSent: true, ...verificationSendState(sent) };
 }
 
 export async function resendDeviceSignupVerification(code, email) {
   const context = await getSignupSession(code, email);
   if (context.error) return context;
   const { normalizedEmail } = context;
-  const pending = await findUnverifiedAccount(normalizedEmail);
-  if (!pending || pending.email !== normalizedEmail) return { error: 'Verification session not found. Request a new code.' };
-  const signupCode = String(randomInt(100000, 1000000));
-  await saveUnverifiedAccount(normalizedEmail, { code: signupCode, updatedAt: new Date() });
-  try { await sendSignupVerificationEmail(normalizedEmail, signupCode, true); }
-  catch (error) {
-    await saveUnverifiedAccount(normalizedEmail, { updatedAt: new Date() });
-    console.error('[signup verification] email send failed:', error.message);
-    return { error: 'Verification email could not be sent. Please try again.' };
-  }
-  return { verificationResent: true };
+  return sendPendingSignupVerification(normalizedEmail, 'roku', (address, signupCode) => sendSignupVerificationEmail(address, signupCode, true));
 }
 
 async function consumePairing(code, email, password, setup, firstName = '', lastName = '', verificationCode = '', verificationBypassed = false) {
@@ -676,15 +717,29 @@ export async function requestAccountSignupVerification(email, realm = 'general')
     return {
       verificationRequired: true,
       verificationId: pending._id,
-      verificationSent: false,
       verificationAlreadyPending: true,
+      verificationSent: false,
+      ...verificationSendState(pending),
     };
   }
   const code = String(randomInt(100000, 1000000));
-  await saveUnverifiedAccount(normalizedEmail, { code, updatedAt: new Date() }, realm);
+  const sentAt = Date.now();
+  await saveUnverifiedAccount(normalizedEmail, { code, updatedAt: new Date(sentAt), verificationSendCount: 1, verificationLastSentAt: new Date(sentAt), verificationNextSendAt: new Date(sentAt + verificationResendDelaysMs[1]), verificationScheduleIndex: 1 }, realm);
   try { await sendSignupVerificationEmail(normalizedEmail, code); }
   catch (error) { await deleteUnverifiedAccount(normalizedEmail, realm); console.error('[signup verification] email send failed:', error.message); return { error: 'Verification email could not be sent. Please try again.' }; }
-  return { verificationRequired: true, verificationId: metaRecordId('signup-verification', normalizedEmail), verificationSent: true };
+  const sent = await findUnverifiedAccount(normalizedEmail, realm);
+  return { verificationRequired: true, verificationId: metaRecordId('signup-verification', normalizedEmail), verificationSent: true, ...verificationSendState(sent) };
+}
+
+export async function resendAccountSignupVerification(email, realm = 'general') {
+  const normalizedEmail = normalizeEmail(email);
+  if (!validEmail(normalizedEmail)) return { error: 'Enter a valid email address' };
+  const collection = await accounts(realm);
+  if (await collection.findOne({ email: normalizedEmail }, { projection: { _id: 1 } })) return { error: 'An account with this email already exists. Sign in instead.' };
+  const result = await sendPendingSignupVerification(normalizedEmail, realm, (address, code) => sendSignupVerificationEmail(address, code, true));
+  const pending = await findUnverifiedAccount(normalizedEmail, realm);
+  if (!result.error && pending) result.verificationId = pending._id;
+  return result;
 }
 
 export async function getRokuDeviceSessionStatus(code) {

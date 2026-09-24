@@ -211,7 +211,11 @@ export async function getXtreamSeriesEpisodes(source, seriesId) {
       });
     }
   }
-  return { title: String(data?.info?.name || `Series ${seriesId}`), episodes };
+  return {
+    title: String(data?.info?.name || `Series ${seriesId}`),
+    rating: String(data?.info?.rating || ''),
+    episodes,
+  };
 }
 
 export function xtreamPlaybackPath(sourceId, kind, id, extension = '') {

@@ -4380,6 +4380,9 @@ async function buildXtreamSeriesPayload({ limit, selected: suppliedSelected, acc
             source: 'xtream', kind: 'episode', contentKind: 'episode',
             title, rokuTitle: rokuText(title), rokuTextKind: /[A-Za-z]/.test(title) ? 'latin' : 'arabic',
             seriesTitle: details.title, rokuSeriesTitle: rokuText(details.title),
+            seriesRating: String(details.rating || seriesItem.rating || ''),
+            seriesSeasonCount: new Set(details.episodes.map((entry) => String(entry.seasonNumber || entry.seasonTitle || 'Season 1'))).size,
+            seriesEpisodeCount: details.episodes.length,
             seasonTitle: episode.seasonTitle, rokuSeasonTitle: rokuText(episode.seasonTitle),
             seasonSort: episode.seasonNumber, episodeNumber: episode.episodeNumber,
             duration: displayDuration(episode.duration), thumbnail: episode.thumbnail,
@@ -4427,12 +4430,24 @@ app.get('/api/roku/series', async (req, res) => {
       const catalog = String(req.query.saved || '') === '1'
         ? await getRokuServerSavedItems(requestOwner(req), 'series', requestAccountOwner(req))
         : await getRokuServerCatalog(requestOwner(req), 'series', req.query.category, requestAccountOwner(req));
-      const items = catalog.items.map(item => ({
-        id: `series-search:${item.sourceId}:${item.id}`,
-        title: item.title, rokuTitle: rokuText(item.title), category: item.category,
-        rokuCategory: rokuText(item.category), sourceId: String(item.sourceId), seriesId: item.id,
-        thumbnail: item.logo, added: item.added, contentKind: 'series-search',
-        originalFormat: String(item.extension || 'mp4').replace(/[^a-z0-9]/gi, '').toUpperCase(),
+      // Series rows are served from the provider catalog snapshot. Enrich
+      // them only from the cached episode snapshot as well; preview focus
+      // must not turn into a provider get_series_info request.
+      const items = await Promise.all(catalog.items.map(async item => {
+        const cachedDetails = await getProviderSeriesEpisodes(catalog.source.ownerId, catalog.source._id, item.id);
+        const cachedEpisodes = Array.isArray(cachedDetails?.episodes) ? cachedDetails.episodes : [];
+        const seasons = new Set(cachedEpisodes.map(episode => String(episode.seasonNumber || episode.seasonTitle || 'Season 1')));
+        return {
+          id: `series-search:${item.sourceId}:${item.id}`,
+          title: item.title, rokuTitle: rokuText(item.title), category: item.category,
+          rokuCategory: rokuText(item.category), sourceId: String(item.sourceId), seriesId: item.id,
+          thumbnail: item.logo, added: item.added, contentKind: 'series-search',
+          rating: String(cachedDetails?.rating || item.rating || ''),
+          seriesRating: String(cachedDetails?.rating || item.rating || ''),
+          seriesSeasonCount: cachedEpisodes.length ? seasons.size : 0,
+          seriesEpisodeCount: cachedEpisodes.length,
+          originalFormat: String(item.extension || 'mp4').replace(/[^a-z0-9]/gi, '').toUpperCase(),
+        };
       }));
       return res.json({ items, page: 0, total: items.length, hasMore: false, savedKeys: rokuSourceSavedKeys(catalog.source) });
     }

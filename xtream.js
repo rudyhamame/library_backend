@@ -76,11 +76,12 @@ async function request(source, params, transform = value => value, options = {})
   const key = `${source._id}:${JSON.stringify(params)}`;
   const now = Date.now();
   evictXtreamCache(now);
-  // A series-info response may carry hundreds of episodes and images. Keeping
-  // every expanded series in the five-minute cache is what grows the Render
-  // heap until Node is terminated. Catalog lists and details are intentionally
-  // not retained here so the backend does not store the provider catalog.
-  const cacheable = !['get_series_info', 'get_vod_info', 'get_series', 'get_vod_streams', 'get_live_streams', 'get_series_categories', 'get_vod_categories', 'get_live_categories'].includes(params?.action);
+  // Keep expanded series details in the short-lived in-memory cache. The
+  // Series page needs the provider rating and episode/season totals, but
+  // focus changes must never issue a new get_series_info request each time.
+  // Catalog lists remain uncached here and are still handled by their normal
+  // catalog-loading path.
+  const cacheable = !['get_vod_info', 'get_series', 'get_vod_streams', 'get_live_streams', 'get_series_categories', 'get_vod_categories', 'get_live_categories'].includes(params?.action);
   const cached = cache.get(key);
   if (cacheable && cached?.expires > now) return cached.data;
   if (inFlight.has(key)) return inFlight.get(key);

@@ -4430,11 +4430,11 @@ app.get('/api/roku/series', async (req, res) => {
       const catalog = String(req.query.saved || '') === '1'
         ? await getRokuServerSavedItems(requestOwner(req), 'series', requestAccountOwner(req))
         : await getRokuServerCatalog(requestOwner(req), 'series', req.query.category, requestAccountOwner(req));
-      // Series rows are served from the provider catalog snapshot. Enrich
-      // them only from the cached episode snapshot as well; preview focus
-      // must not turn into a provider get_series_info request.
+      // Warm/read the backend's short-lived series-info cache once per title.
+      // After this request, preview focus reads the returned fields locally and
+      // does not issue another provider get_series_info request.
       const items = await Promise.all(catalog.items.map(async item => {
-        const cachedDetails = await getProviderSeriesEpisodes(catalog.source.ownerId, catalog.source._id, item.id);
+        const cachedDetails = await getIndexedXtreamSeriesEpisodes(catalog.source, item.id).catch(() => null);
         const cachedEpisodes = Array.isArray(cachedDetails?.episodes) ? cachedDetails.episodes : [];
         const seasons = new Set(cachedEpisodes.map(episode => String(episode.seasonNumber || episode.seasonTitle || 'Season 1')));
         return {

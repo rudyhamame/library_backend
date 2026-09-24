@@ -1249,6 +1249,11 @@ app.post('/api/roku/heartbeat', async (req, res) => {
       sourceId: req.body?.sourceId || req.body?.sourceid || '',
       kind: req.body?.kind || '',
       itemId: req.body?.itemId || req.body?.itemid || '',
+      title: req.body?.title || '',
+      durationSeconds: req.body?.durationSeconds || req.body?.durationseconds || 0,
+      positionSeconds: req.body?.positionSeconds || req.body?.positionseconds || 0,
+      seasonNumber: req.body?.seasonNumber || req.body?.seasonnumber || '',
+      episodeNumber: req.body?.episodeNumber || req.body?.episodenumber || '',
     });
     res.json({ ok: true });
   } catch (error) { res.status(500).json({ error: error.message }); }

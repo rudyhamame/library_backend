@@ -717,7 +717,7 @@ export async function getLinkedDevices(accountId, profileId = '') {
   void selectedProfileId;
   const rows = await (await profiles()).find(
     { accountId: new ObjectId(accountId), kind: { $nin: ['browser', 'android'] } },
-    { projection: { deviceId: 1, profileId: 1, linkedAt: 1, updatedAt: 1, lastSeenAt: 1, lastStreamingSeenAt: 1, streamingSourceId: 1, streamingKind: 1, streamingItemId: 1, lastClientIp: 1, lanIp: 1, ecpAppId: 1, kind: 1, label: 1 } },
+    { projection: { deviceId: 1, profileId: 1, linkedAt: 1, updatedAt: 1, lastSeenAt: 1, lastStreamingSeenAt: 1, streamingSourceId: 1, streamingKind: 1, streamingItemId: 1, streamingTitle: 1, streamingDurationSeconds: 1, streamingPositionSeconds: 1, streamingSeasonNumber: 1, streamingEpisodeNumber: 1, lastClientIp: 1, lanIp: 1, ecpAppId: 1, kind: 1, label: 1 } },
   ).sort({ linkedAt: 1 }).toArray();
   return rows.map(device => ({
     id: String(device._id),
@@ -734,6 +734,11 @@ export async function getLinkedDevices(accountId, profileId = '') {
     streamingSourceId: device.streamingSourceId || '',
     streamingKind: device.streamingKind || '',
     streamingItemId: device.streamingItemId || '',
+    streamingTitle: device.streamingTitle || '',
+    streamingDurationSeconds: Number(device.streamingDurationSeconds) || 0,
+    streamingPositionSeconds: Number(device.streamingPositionSeconds) || 0,
+    streamingSeasonNumber: device.streamingSeasonNumber || '',
+    streamingEpisodeNumber: device.streamingEpisodeNumber || '',
     label: `Roku ${String(device.deviceId || '').replace(/^roku-/, '').slice(-8).toUpperCase()}`,
   }));
 }
@@ -804,11 +809,18 @@ export async function recordDeviceHeartbeat(deviceId, streaming = false, clientI
   const sourceId = String(extra.sourceId || '').trim();
   const kind = String(extra.kind || '').trim();
   const itemId = String(extra.itemId || '').trim();
-  const previous = heartbeatCache.get(normalized) || { at: 0, streaming: false, ip: '', lanIp: '', ecpAppId: '', sourceId: '', kind: '', itemId: '' };
+  const title = String(extra.title || '').trim();
+  const durationSeconds = Math.max(0, Math.round(Number(extra.durationSeconds) || 0));
+  const positionSeconds = Math.max(0, Math.round(Number(extra.positionSeconds) || 0));
+  const seasonNumber = String(extra.seasonNumber || '').trim();
+  const episodeNumber = String(extra.episodeNumber || '').trim();
+  const previous = heartbeatCache.get(normalized) || { at: 0, streaming: false, ip: '', lanIp: '', ecpAppId: '', sourceId: '', kind: '', itemId: '', title: '', durationSeconds: 0, positionSeconds: 0, seasonNumber: '', episodeNumber: '' };
   if (now - previous.at < heartbeatIntervalMs && previous.streaming === Boolean(streaming)
       && previous.ip === ip && previous.lanIp === lanIp && previous.ecpAppId === ecpAppId
-      && previous.sourceId === sourceId && previous.kind === kind && previous.itemId === itemId) return;
-  heartbeatCache.set(normalized, { at: now, streaming: Boolean(streaming), ip, lanIp, ecpAppId, sourceId, kind, itemId });
+      && previous.sourceId === sourceId && previous.kind === kind && previous.itemId === itemId
+      && previous.title === title && previous.durationSeconds === durationSeconds && previous.positionSeconds === positionSeconds
+      && previous.seasonNumber === seasonNumber && previous.episodeNumber === episodeNumber) return;
+  heartbeatCache.set(normalized, { at: now, streaming: Boolean(streaming), ip, lanIp, ecpAppId, sourceId, kind, itemId, title, durationSeconds, positionSeconds, seasonNumber, episodeNumber });
   try {
     const update = { $set: { lastSeenAt: new Date(now) } };
     if (ip) update.$set.lastClientIp = ip;
@@ -821,9 +833,14 @@ export async function recordDeviceHeartbeat(deviceId, streaming = false, clientI
       else update.$unset = { streamingSourceId: '' };
       if (kind) update.$set.streamingKind = kind;
       if (itemId) update.$set.streamingItemId = itemId;
+      if (title) update.$set.streamingTitle = title;
+      if (durationSeconds) update.$set.streamingDurationSeconds = durationSeconds;
+      if (positionSeconds >= 0) update.$set.streamingPositionSeconds = positionSeconds;
+      if (seasonNumber) update.$set.streamingSeasonNumber = seasonNumber;
+      if (episodeNumber) update.$set.streamingEpisodeNumber = episodeNumber;
       if (!kind) update.$unset.streamingKind = '';
       if (!itemId) update.$unset.streamingItemId = '';
-    } else update.$unset = { lastStreamingSeenAt: '', streamingSourceId: '', streamingKind: '', streamingItemId: '' };
+    } else update.$unset = { lastStreamingSeenAt: '', streamingSourceId: '', streamingKind: '', streamingItemId: '', streamingTitle: '', streamingDurationSeconds: '', streamingPositionSeconds: '', streamingSeasonNumber: '', streamingEpisodeNumber: '' };
     await (await profiles()).updateOne({ deviceId: normalized }, update);
   } catch {
     heartbeatCache.delete(normalized);
@@ -836,7 +853,7 @@ export async function listAllLinkedDevices() {
     (await profiles()).find({}, {
       projection: {
         deviceId: 1, accountId: 1, profileId: 1, linkedAt: 1, updatedAt: 1,
-        lastSeenAt: 1, lastStreamingSeenAt: 1, streamingSourceId: 1, streamingKind: 1, streamingItemId: 1, lastClientIp: 1, lanIp: 1, ecpAppId: 1, kind: 1, label: 1,
+        lastSeenAt: 1, lastStreamingSeenAt: 1, streamingSourceId: 1, streamingKind: 1, streamingItemId: 1, streamingTitle: 1, streamingDurationSeconds: 1, streamingPositionSeconds: 1, streamingSeasonNumber: 1, streamingEpisodeNumber: 1, lastClientIp: 1, lanIp: 1, ecpAppId: 1, kind: 1, label: 1,
       },
     }).sort({ lastSeenAt: -1 }).toArray(),
     (await accounts('roku')).find({}, { projection: { email: 1, rokuSourceId: 1, ownerId: 1 } }).toArray(),
@@ -860,6 +877,11 @@ export async function listAllLinkedDevices() {
       streamingProviderId: row.streamingSourceId || '',
       streamingKind: row.streamingKind || '',
       streamingItemId: row.streamingItemId || '',
+      streamingTitle: row.streamingTitle || '',
+      streamingDurationSeconds: Number(row.streamingDurationSeconds) || 0,
+      streamingPositionSeconds: Number(row.streamingPositionSeconds) || 0,
+      streamingSeasonNumber: row.streamingSeasonNumber || '',
+      streamingEpisodeNumber: row.streamingEpisodeNumber || '',
       profileId: row.profileId || '',
       profileName: selectedProfile?.name || '',
       profileOwnerId: selectedProfile?.ownerId || (selectedProfile?.isDefault ? accountOwnerId(row.accountId) : ''),

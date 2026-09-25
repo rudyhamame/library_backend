@@ -19,9 +19,18 @@ export function determineHlsStrategy(sourceMetadata = {}, clientCapabilities = {
 
 // qualityPreset (optional): {height, videoBitrate, maxrate, bufsize} - forces a
 // real re-encode at that resolution/bitrate instead of the default CRF pass.
-export function hlsCodecArgs(decision, qualityPreset = null) {
+export function hlsHwDeviceArgs({ enabled = false } = {}) {
+  if (!enabled) return [];
+  return ['-vaapi_device', process.env.HLS_VAAPI_DEVICE || '/dev/dri/renderD128'];
+}
+
+export function hlsCodecArgs(decision, qualityPreset = null, { hardware = false } = {}) {
   const args = decision.videoMode === 'copy'
     ? ['-c:v', 'copy']
+    : hardware
+      ? ['-c:v', 'h264_vaapi', '-qp', '20', '-profile:v', 'high', '-level', '4.1', '-flags', '+cgop',
+        '-force_key_frames', 'expr:gte(t,n_forced*2)',
+        '-vf', qualityPreset ? `scale=-2:${qualityPreset.height},format=nv12,hwupload` : 'format=nv12,hwupload']
     : qualityPreset
       ? ['-c:v', 'libx264', '-preset', 'veryfast', '-vf', `scale=-2:${qualityPreset.height}`,
           '-b:v', qualityPreset.videoBitrate, '-maxrate', qualityPreset.maxrate, '-bufsize', qualityPreset.bufsize,

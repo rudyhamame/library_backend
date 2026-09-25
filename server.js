@@ -15,7 +15,7 @@ import { createXtreamSource, deleteXtreamSource, flattenSelection, getAllXtreamS
 import { evictXtreamCache, getXtreamCatalog, getXtreamCategories, getXtreamSeriesEpisodes, validateXtreamConnection, xtreamCacheStats, xtreamProviderUrl } from './xtream.js';
 import { evictM3uCache, getM3uCatalog, getM3uCategories, m3uCacheStats, m3uProviderUrl, validateM3uConnection } from './m3u.js';
 import { MediaCapacityError, MediaJobManager, defaultMediaLimits, memoryPressure } from './media-job-manager.js';
-import { HlsStrategy, PlaybackStrategy, choosePlaybackStrategy, determineHlsStrategy, hlsCodecArgs } from './playback-strategy.js';
+import { HlsStrategy, PlaybackStrategy, choosePlaybackStrategy, determineHlsStrategy, hlsCodecArgs, hlsHwDeviceArgs } from './playback-strategy.js';
 import { clearStreamingHistory, deleteStreamingSession, getSeriesWatchedEpisodes, getStreamingContinueWatching, getStreamingHistory, getStreamingResume, saveStreamingHistory } from './streaming-history-store.js';
 import { getFavorites, toggleFavorite } from './favorites-store.js';
 import { accountOwnerId, profileOwnerId } from './account-library-owner.js';
@@ -4123,14 +4123,15 @@ async function getOrStartRokuHls(source, kind, id, extension, requestedStart = 0
     const directory = path.join(rokuHlsRoot, key);
     await fs.mkdir(directory, { recursive: true });
     const manifest = path.join(directory, 'master.m3u8');
-    const args = ['-hide_banner', '-loglevel', 'error'];
+    const hardwareTranscode = decision.videoMode === 'transcode';
+    const args = ['-hide_banner', '-loglevel', 'error', ...hlsHwDeviceArgs({ enabled: hardwareTranscode })];
     if (startSeconds > 0) args.push('-ss', String(startSeconds));
     args.push(
     // Keep a live, rolling manifest. Do not mark it VOD or EVENT: VOD made Roku
     // freeze the first short manifest, while EVENT retains an unbounded history.
     // Keep ffmpeg near playback speed so it cannot run far ahead of Roku.
                   '-re', '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '5', '-i', inputUrl,
-    '-map', '0:v:0?', '-map', '0:a:0?', ...hlsCodecArgs(decision, qualityPreset), '-sn', '-dn',
+    '-map', '0:v:0?', '-map', '0:a:0?', ...hlsCodecArgs(decision, qualityPreset, { hardware: hardwareTranscode }), '-sn', '-dn',
                   '-f', 'hls', '-hls_time', '2', '-hls_list_size', '30', '-hls_delete_threshold', '6',
                   '-hls_flags', 'independent_segments+temp_file+delete_segments',
     '-hls_segment_filename', path.join(directory, 'segment-%06d.ts'), manifest,

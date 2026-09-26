@@ -42,8 +42,9 @@ async function accounts(realm = 'roku') {
   const normalizedRealm = normalizeAccountRealm(realm);
   let promise = accountsPromises.get(normalizedRealm);
   if (!promise) {
-    promise = new MongoClient(mongoUri, { serverSelectionTimeoutMS: 5000, maxPoolSize: 10, maxIdleTimeMS: 30_000 }).connect()
-      .then(async client => {
+    const client = new MongoClient(mongoUri, { serverSelectionTimeoutMS: 5000, maxPoolSize: 10, maxIdleTimeMS: 30_000 });
+    promise = client.connect()
+      .then(async () => {
         const dbName = normalizedRealm === 'general' ? generalDatabaseName : databaseName;
         const collection = client.db(dbName).collection('identity');
         const options = { unique: true };
@@ -51,7 +52,7 @@ async function accounts(realm = 'roku') {
         await collection.createIndex({ email: 1 }, options);
         return collection;
       })
-      .catch(error => { accountsPromises.delete(normalizedRealm); throw error; });
+      .catch(error => { accountsPromises.delete(normalizedRealm); client.close().catch(() => {}); throw error; });
     accountsPromises.set(normalizedRealm, promise);
   }
   return promise;
@@ -61,8 +62,9 @@ async function verifiedEmails(realm = 'roku') {
   const normalizedRealm = normalizeAccountRealm(realm);
   let promise = verifiedEmailPromises.get(normalizedRealm);
   if (!promise) {
-    promise = new MongoClient(mongoUri, { serverSelectionTimeoutMS: 5000, maxPoolSize: 10, maxIdleTimeMS: 30_000 }).connect()
-      .then(async client => {
+    const client = new MongoClient(mongoUri, { serverSelectionTimeoutMS: 5000, maxPoolSize: 10, maxIdleTimeMS: 30_000 });
+    promise = client.connect()
+      .then(async () => {
         const dbName = normalizedRealm === 'general' ? generalDatabaseName : databaseName;
         const collection = client.db(dbName).collection('meta');
         const options = { unique: true };
@@ -71,7 +73,7 @@ async function verifiedEmails(realm = 'roku') {
         await collection.createIndex({ type: 1, email: 1 }, options);
         return collection;
       })
-      .catch(error => { verifiedEmailPromises.delete(normalizedRealm); throw error; });
+      .catch(error => { verifiedEmailPromises.delete(normalizedRealm); client.close().catch(() => {}); throw error; });
     verifiedEmailPromises.set(normalizedRealm, promise);
   }
   return promise;
@@ -81,12 +83,13 @@ async function signupVerificationStore(realm = 'roku') {
   const normalizedRealm = normalizeAccountRealm(realm);
   let promise = signupVerificationPromises.get(normalizedRealm);
   if (!promise) {
-    promise = new MongoClient(mongoUri, { serverSelectionTimeoutMS: 5000, maxPoolSize: 10, maxIdleTimeMS: 30_000 }).connect()
-      .then(async client => {
+    const client = new MongoClient(mongoUri, { serverSelectionTimeoutMS: 5000, maxPoolSize: 10, maxIdleTimeMS: 30_000 });
+    promise = client.connect()
+      .then(async () => {
         const dbName = normalizedRealm === 'general' ? generalDatabaseName : databaseName;
         return client.db(dbName).collection('meta');
       })
-      .catch(error => { signupVerificationPromises.delete(normalizedRealm); throw error; });
+      .catch(error => { signupVerificationPromises.delete(normalizedRealm); client.close().catch(() => {}); throw error; });
     signupVerificationPromises.set(normalizedRealm, promise);
   }
   return promise;

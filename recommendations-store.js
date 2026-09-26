@@ -7,8 +7,9 @@ let collectionPromise;
 
 async function collection() {
   if (!collectionPromise) {
-    collectionPromise = new MongoClient(mongoUri, { serverSelectionTimeoutMS: 5000, maxPoolSize: 10, maxIdleTimeMS: 30_000 }).connect()
-      .then(async client => {
+    const client = new MongoClient(mongoUri, { serverSelectionTimeoutMS: 5000, maxPoolSize: 10, maxIdleTimeMS: 30_000 });
+    collectionPromise = client.connect()
+      .then(async () => {
         const value = client.db(databaseName).collection(collectionName);
         await Promise.all([
           value.createIndex({ key: 1 }, { unique: true }),
@@ -17,7 +18,7 @@ async function collection() {
         ]);
         return value;
       })
-      .catch(error => { collectionPromise = undefined; throw error; });
+      .catch(error => { collectionPromise = undefined; client.close().catch(() => {}); throw error; });
   }
   return collectionPromise;
 }

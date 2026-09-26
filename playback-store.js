@@ -15,7 +15,7 @@ async function playbackCollection() {
       await collection.createIndex({ ownerId: 1, itemId: 1 }, { unique: true });
       await collection.createIndex({ ownerId: 1, updatedAt: -1 });
       return collection;
-    })().catch((error) => { collectionPromise = undefined; throw error; });
+    })().catch((error) => { collectionPromise = undefined; client?.close().catch(() => {}); throw error; });
   }
   return collectionPromise;
 }

@@ -1366,6 +1366,7 @@ app.post('/api/roku/cast', async (req, res) => {
         extension,
         providerUrl,
         ...display,
+        ...(kind === 'series' ? { seriesId: String(req.body?.seriesId || '').trim() } : {}),
         durationSeconds: Number(req.body?.durationSeconds) || 0,
       },
       exp: Date.now() + CAST_TTL_MS,

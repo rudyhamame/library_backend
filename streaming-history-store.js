@@ -108,6 +108,14 @@ export async function saveStreamingHistory(input = {}) {
   if (key === 'episode' && episodeNumber != null && episodeNumber !== '') update.episodeNumber = Number.parseInt(episodeNumber, 10) || 0;
   if (completed === true || String(completed).toLowerCase() === 'true') update.completed = true;
   await updateAccountLibrary(ownerId, library => {
+    // An episode saved without its series id (older hand-offs) joins the series
+    // group that already holds that episode instead of a blank-series group.
+    if (update.kind === 'series' && !update.seriesId) {
+      const known = (library.streaming_history?.series || []).find(group => group.providerIdentity?.seriesId
+        && String(group.providerIdentity?.sourceId) === update.sourceId
+        && (group.episodes || []).some(episode => String(episode.providerIdentity?.itemId) === update.itemId));
+      if (known) update.seriesId = String(known.providerIdentity.seriesId);
+    }
     const record = kindRecord(update);
     const identityKey = `${record.providerIdentity.sourceId}:${record.providerIdentity.kind}:${record.providerIdentity.itemId}`;
     const bucket = historyBucket(update.kind);

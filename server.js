@@ -2579,6 +2579,22 @@ app.get('/api/streaming-history/continue-watching', async (req, res) => {
     if (!ownerId) return res.status(401).json({ error: 'Authentication required' });
     const accountOwner = requestAccountOwner(req);
     let items = await getStreamingContinueWatching(ownerId);
+    // Android's Welcome rail has three slots: one recent episode, movie, and
+    // live channel. Select those here so the client never receives the full
+    // history list and has to hide extra entries after rendering it.
+    if (String(req.query.rail || '') === 'android') {
+      const selectedSourceId = String(req.query.sourceId || '').trim();
+      if (selectedSourceId) items = items.filter(item => String(item.sourceId || '') === selectedSourceId);
+      const newestByKind = new Map();
+      for (const item of items) {
+        const rawKind = String(item.kind || '').toLowerCase();
+        const kind = ['series', 'episode'].includes(rawKind)
+          ? 'episode'
+          : (['channel', 'live'].includes(rawKind) ? 'channel' : 'movie');
+        if (!newestByKind.has(kind)) newestByKind.set(kind, item);
+      }
+      items = [...newestByKind.values()].slice(0, 3);
+    }
     const sources = await getAllXtreamSources(accountOwner);
     // Roku's Welcome page is both profile- and provider-specific. Other
     // clients retain their existing cross-provider history unless they opt in.

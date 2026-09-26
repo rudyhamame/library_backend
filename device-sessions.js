@@ -42,7 +42,7 @@ async function accounts(realm = 'roku') {
   const normalizedRealm = normalizeAccountRealm(realm);
   let promise = accountsPromises.get(normalizedRealm);
   if (!promise) {
-    promise = new MongoClient(mongoUri, { serverSelectionTimeoutMS: 5000 }).connect()
+    promise = new MongoClient(mongoUri, { serverSelectionTimeoutMS: 5000, maxPoolSize: 10, maxIdleTimeMS: 30_000 }).connect()
       .then(async client => {
         const dbName = normalizedRealm === 'general' ? generalDatabaseName : databaseName;
         const collection = client.db(dbName).collection('identity');
@@ -61,7 +61,7 @@ async function verifiedEmails(realm = 'roku') {
   const normalizedRealm = normalizeAccountRealm(realm);
   let promise = verifiedEmailPromises.get(normalizedRealm);
   if (!promise) {
-    promise = new MongoClient(mongoUri, { serverSelectionTimeoutMS: 5000 }).connect()
+    promise = new MongoClient(mongoUri, { serverSelectionTimeoutMS: 5000, maxPoolSize: 10, maxIdleTimeMS: 30_000 }).connect()
       .then(async client => {
         const dbName = normalizedRealm === 'general' ? generalDatabaseName : databaseName;
         const collection = client.db(dbName).collection('meta');
@@ -81,7 +81,7 @@ async function signupVerificationStore(realm = 'roku') {
   const normalizedRealm = normalizeAccountRealm(realm);
   let promise = signupVerificationPromises.get(normalizedRealm);
   if (!promise) {
-    promise = new MongoClient(mongoUri, { serverSelectionTimeoutMS: 5000 }).connect()
+    promise = new MongoClient(mongoUri, { serverSelectionTimeoutMS: 5000, maxPoolSize: 10, maxIdleTimeMS: 30_000 }).connect()
       .then(async client => {
         const dbName = normalizedRealm === 'general' ? generalDatabaseName : databaseName;
         return client.db(dbName).collection('meta');

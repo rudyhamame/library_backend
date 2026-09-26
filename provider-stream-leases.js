@@ -9,7 +9,7 @@ const holderId = randomUUID();
 let collectionPromise;
 
 async function leaseCollection() {
-  if (!collectionPromise) collectionPromise = new MongoClient(mongoUri, { serverSelectionTimeoutMS: 5000 }).connect().then(client => client.db(databaseName).collection(collectionName)).catch(error => { collectionPromise = undefined; throw error; });
+  if (!collectionPromise) collectionPromise = new MongoClient(mongoUri, { serverSelectionTimeoutMS: 5000, maxPoolSize: 10, maxIdleTimeMS: 30_000 }).connect().then(client => client.db(databaseName).collection(collectionName)).catch(error => { collectionPromise = undefined; throw error; });
   return collectionPromise;
 }
 

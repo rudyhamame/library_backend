@@ -48,9 +48,10 @@ export const kindRecord = update => {
     sourceId: String(update.sourceId || ''),
     ...(update.kind === 'series' && update.seriesId ? { seriesId: String(update.seriesId) } : {}),
   };
-  if (update.kind === 'channel') return { providerIdentity };
-  if (update.kind === 'movie') return { lastWatched: update.lastMoment, providerIdentity };
-  return { lastWatched: update.lastMoment, providerIdentity };
+  const record = { updatedAt: update.updatedAt, providerIdentity };
+  if (update.kind === 'channel') return record;
+  if (update.kind === 'movie') return { ...record, lastWatched: update.lastMoment };
+  return { ...record, lastWatched: update.lastMoment };
 };
 const kindRecordHistory = record => {
   if (!record) return null;

@@ -6,7 +6,7 @@ const generalDb = process.env.MONGODB_GENERAL_DB || 'rh_general';
 let clientPromise;
 
 async function collections() {
-  if (!clientPromise) clientPromise = new MongoClient(mongoUri, { serverSelectionTimeoutMS: 5000 }).connect().catch(error => { clientPromise = undefined; throw error; });
+  if (!clientPromise) clientPromise = new MongoClient(mongoUri, { serverSelectionTimeoutMS: 5000, maxPoolSize: 10, maxIdleTimeMS: 30_000 }).connect().catch(error => { clientPromise = undefined; throw error; });
   const client = await clientPromise;
   return [client.db(rokuDb).collection('identity'), client.db(generalDb).collection('identity')];
 }

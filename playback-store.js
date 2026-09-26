@@ -9,7 +9,7 @@ let client;
 async function playbackCollection() {
   if (!collectionPromise) {
     collectionPromise = (async () => {
-      client = new MongoClient(mongoUri, { serverSelectionTimeoutMS: 5000 });
+      client = new MongoClient(mongoUri, { serverSelectionTimeoutMS: 5000, maxPoolSize: 10, maxIdleTimeMS: 30_000 });
       await client.connect();
       const collection = client.db(databaseName).collection(collectionName);
       await collection.createIndex({ ownerId: 1, itemId: 1 }, { unique: true });

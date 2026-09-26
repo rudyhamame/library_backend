@@ -10,7 +10,7 @@ const avatars = new Set(['lime', 'teal', 'amber', 'violet', 'rose', 'blue']);
 let clientPromise;
 
 async function databaseClient() {
-  if (!clientPromise) clientPromise = new MongoClient(mongoUri, { serverSelectionTimeoutMS: 5000 }).connect().catch(error => { clientPromise = undefined; throw error; });
+  if (!clientPromise) clientPromise = new MongoClient(mongoUri, { serverSelectionTimeoutMS: 5000, maxPoolSize: 10, maxIdleTimeMS: 30_000 }).connect().catch(error => { clientPromise = undefined; throw error; });
   return clientPromise;
 }
 

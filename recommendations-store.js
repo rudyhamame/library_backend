@@ -7,7 +7,7 @@ let collectionPromise;
 
 async function collection() {
   if (!collectionPromise) {
-    collectionPromise = new MongoClient(mongoUri, { serverSelectionTimeoutMS: 5000 }).connect()
+    collectionPromise = new MongoClient(mongoUri, { serverSelectionTimeoutMS: 5000, maxPoolSize: 10, maxIdleTimeMS: 30_000 }).connect()
       .then(async client => {
         const value = client.db(databaseName).collection(collectionName);
         await Promise.all([

@@ -26,7 +26,7 @@ let clientPromise;
 const collectionsCache = new Map();
 
 async function mongoClient() {
-  if (!clientPromise) clientPromise = new MongoClient(mongoUri, { serverSelectionTimeoutMS: 5000 }).connect()
+  if (!clientPromise) clientPromise = new MongoClient(mongoUri, { serverSelectionTimeoutMS: 5000, maxPoolSize: 10, maxIdleTimeMS: 30_000 }).connect()
     .catch(error => { clientPromise = undefined; throw error; });
   return clientPromise;
 }

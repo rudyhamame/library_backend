@@ -8,7 +8,7 @@ const generalDb = process.env.MONGODB_GENERAL_DB || 'rh_general';
 let clientPromise;
 
 async function accountCollections() {
-  if (!clientPromise) clientPromise = new MongoClient(mongoUri, { serverSelectionTimeoutMS: 5000 }).connect().catch(error => { clientPromise = undefined; throw error; });
+  if (!clientPromise) clientPromise = new MongoClient(mongoUri, { serverSelectionTimeoutMS: 5000, maxPoolSize: 10, maxIdleTimeMS: 30_000 }).connect().catch(error => { clientPromise = undefined; throw error; });
   const client = await clientPromise;
   return [client.db(rokuDb).collection('identity'), client.db(generalDb).collection('identity')];
 }
@@ -58,6 +58,7 @@ export function normalizedAccountLibrary(library) {
     const normalizedKind = ['live', 'channel'].includes(kind) ? 'channel' : (['series', 'episode'].includes(kind) ? 'series' : 'movie');
     const { itemId: _itemId, kind: _kind, sourceId: _sourceId, seriesId: _seriesId, providerIdentity: _providerIdentity, providerURL: _providerURL, providerUrl: _providerUrl, ...metadata } = row;
     return {
+      ...(row?.updatedAt != null ? { updatedAt: row.updatedAt } : {}),
       ...(normalizedKind === 'movie' ? { lastWatched: String(row?.lastWatched || '00:00:00') } : {}),
       ...(normalizedKind === 'series' ? { lastWatched: String(row?.lastWatched || '00:00:00') } : {}),
       providerIdentity: {

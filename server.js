@@ -16,7 +16,7 @@ import { evictXtreamCache, getXtreamCatalog, getXtreamCategories, getXtreamSerie
 import { evictM3uCache, getM3uCatalog, getM3uCategories, m3uCacheStats, m3uProviderUrl, validateM3uConnection } from './m3u.js';
 import { MediaCapacityError, MediaJobManager, defaultMediaLimits, memoryPressure } from './media-job-manager.js';
 import { HlsStrategy, PlaybackStrategy, choosePlaybackStrategy, determineHlsStrategy, hlsCodecArgs, hlsHwDeviceArgs } from './playback-strategy.js';
-import { clearStreamingHistory, deleteStreamingSession, getSeriesWatchedEpisodes, getStreamingContinueWatching, getStreamingHistory, getStreamingResume, saveStreamingHistory } from './streaming-history-store.js';
+import { clearStreamingHistory, deleteStreamingHistoryItem, deleteStreamingSession, getSeriesWatchedEpisodes, getStreamingContinueWatching, getStreamingHistory, getStreamingResume, saveStreamingHistory } from './streaming-history-store.js';
 import { getFavorites, toggleFavorite } from './favorites-store.js';
 import { accountOwnerId, profileOwnerId } from './account-library-owner.js';
 import { authorizeDeviceSession, autoLoginDeviceSession, castHandoffLink, changeAccountPassword, claimAutomaticPairing, confirmPasswordReset, createDeviceSession, deleteAccount, getAccountBasicInfo, getDeviceSession, getDeviceWeatherLocations, getLinkedDevices, getPairingInfo, getRokuDeviceSessionStatus, getRokuSourcePreferenceByOwner, initializeAccountDatabases, isProfileOnline, isRokuSessionLinked, listAllAccountsBasic, listAllLinkedDevices, loginAccount, loginDeviceSession, recordDeviceHeartbeat, registerAccount, registerBrowserDevice, requestAccountSignupVerification, requestDeviceSignupVerification, requestPasswordReset, resendAccountSignupVerification, resendDeviceSignupVerification, resolveAccountByEmail, resolveDeviceToken, saveDeviceWeatherLocations, selectAccountProfile, setupDeviceSession, unlinkAccountDevice, verifyDeviceSignupCode } from './device-sessions.js';
@@ -2704,6 +2704,25 @@ app.put('/api/streaming-history/:sessionId', async (req, res) => {
     const status = /Provider identity requires|Profile owner and streaming session ID are required/.test(error.message) ? 400 : 500;
     res.status(status).json({ error: error.message });
   }
+});
+
+app.delete('/api/streaming-history/item', async (req, res) => {
+  try {
+    const ownerId = requestProfileOwner(req);
+    if (!ownerId) return res.status(401).json({ error: 'Authentication required' });
+    const identity = {
+      sourceId: String(req.query.sourceId || '').trim(),
+      seriesId: String(req.query.seriesId || '').trim(),
+      itemId: String(req.query.itemId || '').trim(),
+      kind: String(req.query.kind || '').trim(),
+    };
+    if (!identity.sourceId || !identity.seriesId || !identity.itemId || !['episode', 'series'].includes(identity.kind)) {
+      return res.status(400).json({ error: 'Episode provider identity is required' });
+    }
+    res.set('Cache-Control', 'no-store');
+    res.json(await deleteStreamingHistoryItem(ownerId, identity));
+  }
+  catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 app.delete('/api/streaming-history/:sessionId', async (req, res) => {

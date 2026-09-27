@@ -177,6 +177,40 @@ export async function deleteStreamingSession(ownerId, sessionId) {
   return { deleted };
 }
 
+// Episodes are stored inside their parent series group and intentionally do
+// not retain a session ID. Remove one watched episode by its provider identity
+// so a Roku remote action cannot accidentally target the parent series.
+export function removeStreamingHistoryItemFromLibrary(library, identity = {}) {
+  const sourceId = String(identity.sourceId || '');
+  const itemId = String(identity.itemId || '');
+  const seriesId = String(identity.seriesId || '');
+  const kind = historyKey(identity.kind);
+  if (!sourceId || !itemId || kind !== 'episode') return 0;
+  let deleted = 0;
+  const groups = library?.streaming_history?.series || [];
+  for (const group of groups) {
+    const groupIdentity = group?.providerIdentity || {};
+    if (String(groupIdentity.sourceId || '') !== sourceId) continue;
+    if (seriesId && String(groupIdentity.seriesId || '') !== seriesId) continue;
+    const episodes = Array.isArray(group.episodes) ? group.episodes : [];
+    const kept = episodes.filter(episode => String(episode?.providerIdentity?.itemId || '') !== itemId);
+    deleted += episodes.length - kept.length;
+    group.episodes = kept;
+  }
+  library.streaming_history.series = groups.filter(group => (group.episodes || []).length > 0);
+  return deleted;
+}
+
+export async function deleteStreamingHistoryItem(ownerId, identity = {}) {
+  if (!ownerId) return { deleted: 0 };
+  let deleted = 0;
+  await updateAccountLibrary(ownerId, library => {
+    deleted = removeStreamingHistoryItemFromLibrary(library, identity);
+    return library;
+  });
+  return { deleted };
+}
+
 export async function clearStreamingHistory(ownerId) {
   if (!ownerId) return { deleted: 0 };
   const before = await getAccountLibrary(ownerId);

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { isContinueWatchingItem, kindRecord, seriesHistoryKey } from '../streaming-history-store.js';
+import { isContinueWatchingItem, kindRecord, removeStreamingHistoryItemFromLibrary, seriesHistoryKey } from '../streaming-history-store.js';
 
 test('streaming history stores provider identity in one nested object and never stores provider URLs', () => {
   const record = kindRecord({
@@ -68,4 +68,25 @@ test('Continue Watching accepts pivot-era providerURL-only episode and movie rec
 test('last watched episode state is keyed independently for every provider series', () => {
   assert.notEqual(seriesHistoryKey('provider-1', 'series-1'), seriesHistoryKey('provider-1', 'series-2'));
   assert.notEqual(seriesHistoryKey('provider-1', 'series-1'), seriesHistoryKey('provider-2', 'series-1'));
+});
+
+test('removing a watched episode deletes only that provider episode, not its favorite series', () => {
+  const library = { streaming_history: { series: [
+    { providerIdentity: { sourceId: 'provider-1', kind: 'series', seriesId: 'series-1' }, episodes: [
+      { providerIdentity: { itemId: 'episode-1' } },
+      { providerIdentity: { itemId: 'episode-2' } },
+    ] },
+    { providerIdentity: { sourceId: 'provider-1', kind: 'series', seriesId: 'series-2' }, episodes: [
+      { providerIdentity: { itemId: 'episode-1' } },
+    ] },
+    { providerIdentity: { sourceId: 'provider-2', kind: 'series', seriesId: 'series-1' }, episodes: [
+      { providerIdentity: { itemId: 'episode-1' } },
+    ] },
+  ] } };
+  assert.equal(removeStreamingHistoryItemFromLibrary(library, {
+    sourceId: 'provider-1', seriesId: 'series-1', itemId: 'episode-1', kind: 'episode',
+  }), 1);
+  assert.deepEqual(library.streaming_history.series.map(group => group.episodes.map(row => row.providerIdentity.itemId)), [
+    ['episode-2'], ['episode-1'], ['episode-1'],
+  ]);
 });

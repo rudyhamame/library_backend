@@ -1300,8 +1300,8 @@ const CAST_CONTROL_TTL_MS = 15 * 1000;
 function pruneCastControlQueue() { const now = Date.now(); for (const [id, e] of castControlQueue) if (e.exp < now) castControlQueue.delete(id); }
 
 async function releaseAndroidProviderForRoku(sourceId) {
-  const host = String(process.env.ANDROID_STREAM_BACKEND_HOST || 'rh-stream-web').trim();
-  const port = String(process.env.ANDROID_STREAM_BACKEND_PORT || '8788').trim();
+  const host = String(process.env.ANDROID_STREAM_BACKEND_HOST || 'rh-stream-android').trim();
+  const port = String(process.env.ANDROID_STREAM_BACKEND_PORT || '8786').trim();
   const response = await fetch(`http://${host}:${port}/internal/streams/android-handoff`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },

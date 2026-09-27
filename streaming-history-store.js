@@ -50,8 +50,9 @@ export const kindRecord = update => {
   };
   const record = { updatedAt: update.updatedAt, providerIdentity };
   if (update.kind === 'channel') return record;
-  if (update.kind === 'movie') return { ...record, lastWatched: update.lastMoment };
-  return { ...record, lastWatched: update.lastMoment };
+  // Duration + completed let Continue Watching drop finished VOD.
+  const vod = { ...record, lastWatched: update.lastMoment, ...(update.mediaDurationMs > 0 ? { mediaDurationMs: update.mediaDurationMs } : {}), ...(update.completed ? { completed: true } : {}) };
+  return vod;
 };
 const kindRecordHistory = record => {
   if (!record) return null;

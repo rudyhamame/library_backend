@@ -59,6 +59,8 @@ export function normalizedAccountLibrary(library) {
     const { itemId: _itemId, kind: _kind, sourceId: _sourceId, seriesId: _seriesId, providerIdentity: _providerIdentity, providerURL: _providerURL, providerUrl: _providerUrl, ...metadata } = row;
     return {
       ...(row?.updatedAt != null ? { updatedAt: row.updatedAt } : {}),
+      ...(normalizedKind !== 'channel' && row?.mediaDurationMs > 0 ? { mediaDurationMs: Number(row.mediaDurationMs) } : {}),
+      ...(normalizedKind !== 'channel' && row?.completed === true ? { completed: true } : {}),
       ...(normalizedKind === 'movie' ? { lastWatched: String(row?.lastWatched || '00:00:00') } : {}),
       ...(normalizedKind === 'series' ? { lastWatched: String(row?.lastWatched || '00:00:00') } : {}),
       providerIdentity: {

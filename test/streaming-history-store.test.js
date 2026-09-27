@@ -24,7 +24,9 @@ test('streaming history stores provider identity in one nested object and never 
     mediaDurationMs: 7_200_000,
   });
   assert.deepEqual(record, {
+    updatedAt: '2026-09-19T00:00:00.000Z',
     lastWatched: '00:22:00',
+    mediaDurationMs: 7_200_000,
     providerIdentity: { itemId: 'movie-1', kind: 'movie', sourceId: 'provider-1' },
   });
   assert.equal('providerURL' in record, false);

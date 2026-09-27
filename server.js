@@ -1270,7 +1270,11 @@ app.post('/api/account/heartbeat', async (req, res) => {
     if (!deviceId) return res.status(400).json({ error: 'deviceId is required' });
     const kind = req.body?.kind === 'android' ? 'android' : 'browser';
     await registerBrowserDevice(authorization.accountId, authorization.profileId || '', deviceId, String(req.body?.label || ''), kind);
-    await recordDeviceHeartbeat(deviceId, req.body?.streaming === true, clientAddress(req));
+    await recordDeviceHeartbeat(deviceId, req.body?.streaming === true, clientAddress(req), {
+      sourceId: req.body?.sourceId || '', kind: req.body?.playbackKind || req.body?.mediaKind || '',
+      itemId: req.body?.itemId || '', title: req.body?.title || '',
+      durationSeconds: req.body?.durationSeconds || 0, positionSeconds: req.body?.positionSeconds || 0,
+    });
     res.json({ ok: true });
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
@@ -1886,6 +1890,9 @@ app.get('/internal/devices', async (req, res) => {
         profileOwnerId: device.profileOwnerId,
         providerId: device.rokuSourceId,
         streamingProviderId: device.streamingProviderId,
+        streamingKind: device.streamingKind,
+        streamingItemId: device.streamingItemId,
+        streamingTitle: device.streamingTitle,
         providerName,
         lastSeenAt: device.lastSeenAt,
         lastStreamingSeenAt: device.lastStreamingSeenAt,

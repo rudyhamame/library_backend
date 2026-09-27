@@ -25,6 +25,7 @@ import { enforceLibraryOnly } from './library-route-policy.js';
 import { checkPlaylistSources } from './playlist-health.js';
 import { backdropVideoFile, ensureBackdropRoot, getRecommendationBackdrop, listBackdrops } from './recommendation-backdrop.js';
 import { getAndroidStartupSnapshot, saveAndroidStartupSnapshot } from './android-startup-store.js';
+import { registerAndroidBetaTester } from './android-beta-testers-store.js';
 import { providerPlaybackUrlIsUsable, resolveProviderMediaId, resolveProviderTitle } from './provider-playback-fields.js';
 import { acquireProviderStreamLease } from './provider-stream-leases.js';
 import { deleteProviderCatalog, findProviderSeriesForEpisode, getProviderCatalogCategories, getProviderCatalogItem, getProviderCatalogItems, getProviderCatalogItemsByIds, getProviderCatalogItemsForCategory, getProviderCatalogLanguagePrefixes, getProviderCatalogMeta, getProviderCatalogRails, getProviderSeriesEpisodes, listProviderCatalogMeta, queryProviderCatalogItems, recordProviderCatalogDuration, replaceProviderCatalog, replaceProviderCatalogCategories, replaceProviderSeriesEpisodes } from './provider-catalog-store.js';
@@ -1017,6 +1018,29 @@ function rokuXtreamPlaybackPath(sourceId, kind, id, extension = '') {
 
 app.use(cors());
 app.use(express.json({ limit: '2mb' })); // profile pictures + WWP host avatar are ~1MB data URIs
+
+app.post('/api/android-beta-testers', async (req, res) => {
+  try {
+    if (req.body?.consent !== true) return res.status(400).json({ error: 'Please confirm you want to receive a beta invitation.' });
+    const result = await registerAndroidBetaTester(req.body?.email, req.body?.source === 'roku-qr' ? 'roku-qr' : 'download-page');
+    if (result.error) return res.status(400).json(result);
+    res.status(201).json({ ok: true });
+  } catch (error) {
+    console.error('[android beta testers] signup failed:', error.message);
+    res.status(503).json({ error: 'We could not save your request. Please try again.' });
+  }
+});
+
+app.get('/api/account/email', async (req, res) => {
+  try {
+    const accountId = requestAccount(req);
+    if (!accountId) return res.status(401).json({ error: 'Sign in to load your account email.' });
+    const account = await getAccountBasicInfo(accountId, requestAccountRealm(req));
+    if (!account) return res.status(404).json({ error: 'Account not found.' });
+    res.set('Cache-Control', 'no-store');
+    res.json({ email: account.email || '' });
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
 
 // Verify the actual Roku credential, not merely process availability. This
 // keeps the Library backend indicator from showing green when the saved token

@@ -1769,7 +1769,12 @@ app.get('/api/partner/invite', async (req, res) => {
     const invite = partnerInvites.get(ownerId) || null;
     if (invite && invite.expiresAt < Date.now()) partnerInvites.delete(ownerId);
     res.set('Cache-Control', 'no-store');
-    res.json({ revision, invite: invite && invite.expiresAt >= Date.now() ? invite : null });
+    const currentInvite = invite && invite.expiresAt >= Date.now() ? invite : null;
+    if (currentInvite && String(req.query.client || '').toLowerCase() === 'browser') {
+      const { providerURL: _providerURL, providerUrl: _providerUrl, ...safeInvite } = currentInvite;
+      return res.json({ revision, invite: safeInvite });
+    }
+    res.json({ revision, invite: currentInvite });
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 app.post('/api/account/password', async (req, res) => {

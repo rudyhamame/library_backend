@@ -352,10 +352,9 @@ export async function createDeviceSession(deviceId, deviceToken = '') {
     browserPairUrlObject.searchParams.set('pair', session.code);
     result.pairUrl = browserPairUrlObject.toString();
     result.browserQrImageUrl = `https://quickchart.io/qr?size=190&text=${encodeURIComponent(result.pairUrl)}`;
-    const downloadAppUrl = new URL(frontendUrl);
+    const downloadAppUrl = new URL(process.env.ANDROID_DOWNLOAD_PAGE_URL || 'https://iptv.mctoshs.ca/download-app');
     downloadAppUrl.search = '';
     downloadAppUrl.hash = '';
-    downloadAppUrl.pathname = `${downloadAppUrl.pathname.replace(/\/$/, '')}/download-app`;
     downloadAppUrl.searchParams.set('pair', session.code);
     downloadAppUrl.searchParams.set('source', 'roku-qr');
     result.downloadAppQrImageUrl = `https://quickchart.io/qr?size=190&text=${encodeURIComponent(downloadAppUrl.toString())}`;

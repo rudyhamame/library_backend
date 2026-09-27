@@ -28,10 +28,15 @@ export function normalizeTesterEmail(value) {
 export async function registerAndroidBetaTester(email, source = 'download-page') {
   const normalizedEmail = normalizeTesterEmail(email);
   if (!normalizedEmail) return { error: 'Enter a valid email address.' };
-  const result = await (await collection()).updateOne(
-    { email: normalizedEmail },
-    { $setOnInsert: { email: normalizedEmail, source, createdAt: new Date(), status: 'pending-invitation' } },
-    { upsert: true },
-  );
-  return { ok: true, created: result.upsertedCount === 1 };
+  try {
+    const result = await (await collection()).updateOne(
+      { email: normalizedEmail },
+      { $setOnInsert: { email: normalizedEmail, source, createdAt: new Date(), consentAt: new Date(), status: 'pending-invitation' } },
+      { upsert: true },
+    );
+    return { ok: true, created: result.upsertedCount === 1 };
+  } catch (error) {
+    if (error?.code === 11000) return { ok: true, created: false };
+    throw error;
+  }
 }

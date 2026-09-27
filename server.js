@@ -929,6 +929,18 @@ async function hydrateFavoriteItems(favorites, sources) {
   return hydrated;
 }
 
+function browserSafeHistoryItems(items) {
+  const strip = value => {
+    if (Array.isArray(value)) return value.map(strip);
+    if (!value || typeof value !== 'object') return value;
+    const keepProviderUrl = String(value.kind || '').toLowerCase() === 'channel';
+    return Object.fromEntries(Object.entries(value)
+      .filter(([key]) => keepProviderUrl || !['providerURL', 'providerUrl'].includes(key))
+      .map(([key, child]) => [key, strip(child)]));
+  };
+  return strip(items);
+}
+
 function directXtreamItem(item) {
   const extension = String(item.extension || '').toLowerCase();
   const playbackUrl = rokuXtreamPlaybackPath(item.sourceId, item.kind, item.id, extension);
@@ -2091,6 +2103,10 @@ app.get('/api/xtream/series/:sourceId/:id', async (req, res) => {
     // Unknown durations are resolved through the dedicated media-duration API.
     const details = await hydrateSeriesDurations(source, await getIndexedXtreamSeriesEpisodes(source, req.params.id));
     res.set('Cache-Control', 'no-store');
+    if (String(req.query.client || '').toLowerCase() === 'browser') {
+      const episodes = (details.episodes || []).map(({ providerUrl: _providerUrl, providerURL: _providerURL, ...episode }) => episode);
+      return res.json({ ...details, episodes });
+    }
     res.json(details);
   } catch (error) { res.status(502).json({ error: error.message }); }
 });
@@ -2575,7 +2591,7 @@ app.get('/api/streaming-history', async (req, res) => {
     }
     items = await attachProviderUrls(items, sources);
     items = await hydrateHistoryFromProviders(items, sources);
-    res.json({ items });
+    res.json({ items: String(req.query.client || '').toLowerCase() === 'browser' ? browserSafeHistoryItems(items) : items });
   }
   catch (error) { res.status(500).json({ error: error.message }); }
 });
@@ -2614,7 +2630,7 @@ app.get('/api/streaming-history/continue-watching', async (req, res) => {
     items = await attachProviderUrls(items, sources);
     items = await hydrateHistoryFromProviders(items, sources);
     res.set('Cache-Control', 'no-store');
-    res.json({ items });
+    res.json({ items: String(req.query.client || '').toLowerCase() === 'browser' ? browserSafeHistoryItems(items) : items });
   }
   catch (error) { res.status(500).json({ error: error.message }); }
 });
@@ -2686,7 +2702,9 @@ app.get('/api/favorites', async (req, res) => {
     const ownerId = requestAccountOwner(req), profileId = requestProfile(req);
     if (!ownerId || !profileId) return res.status(401).json({ error: 'Profile authentication required' });
     const [favorites, sources] = await Promise.all([getFavorites(ownerId, profileId), getAllXtreamSources(ownerId)]);
-    res.set('Cache-Control', 'no-store'); res.json({ items: await hydrateFavoriteItems(favorites, sources) });
+    res.set('Cache-Control', 'no-store');
+    const items = await hydrateFavoriteItems(favorites, sources);
+    res.json({ items: String(req.query.client || '').toLowerCase() === 'browser' ? browserSafeHistoryItems(items) : items });
   }
   catch (error) { res.status(500).json({ error: error.message }); }
 });
@@ -3743,7 +3761,9 @@ app.get('/api/xtream/catalog', async (req, res) => {
       const languages = [...new Set(live.items.map(item => titleLanguageCode(item)).filter(Boolean))].sort();
       return res.json({
         source: publicXtreamSource(source, ownerId, accountOwner), languages,
-        categories: live.categories, items: pageItems,
+        categories: live.categories, items: String(req.query.client || '').toLowerCase() === 'browser' && kind !== 'channel'
+          ? pageItems.map(({ providerUrl: _providerUrl, providerURL: _providerURL, ...item }) => item)
+          : pageItems,
         pagination: { page: requestedPage, pageSize, pageCount, total: matches.length }, origin: 'provider',
       });
     }
@@ -3777,7 +3797,12 @@ app.get('/api/xtream/catalog', async (req, res) => {
       stale: result.stale, syncedAt: result.syncedAt,
       items: await Promise.all(result.items.map(async item => {
         const complete = await completeCatalogItem(source, kind, item, categoryNameById);
-        return { ...complete, languageCode: titleLanguageCode(complete), titleLanguage: titleLanguageCode(complete), enabled: enabled.has(complete.key) };
+        const shaped = { ...complete, languageCode: titleLanguageCode(complete), titleLanguage: titleLanguageCode(complete), enabled: enabled.has(complete.key) };
+        if (String(req.query.client || '').toLowerCase() === 'browser' && kind !== 'channel') {
+          delete shaped.providerUrl;
+          delete shaped.providerURL;
+        }
+        return shaped;
       })),
       pagination: { page: result.page, pageSize: result.limit, pageCount: result.pageCount, total: result.total },
     });

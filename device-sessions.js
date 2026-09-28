@@ -823,6 +823,7 @@ export async function getLinkedDevices(accountId, profileId = '') {
     kind: 'roku',
     linkedAt: device.linkedAt || device.updatedAt || null,
     lastSeenAt: device.lastSeenAt || null,
+    lastStreamingSeenAt: device.lastStreamingSeenAt || null,
     lastClientIp: device.lastClientIp || '',
     lanIp: device.lanIp || device.lastClientIp || '',
     ecpAppId: device.ecpAppId || '',

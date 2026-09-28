@@ -152,7 +152,11 @@ async function streamerPlaybackStrategy(sourceId, kind, id) {
       && String(stream.client || '').toLowerCase() === 'roku')
     .sort((left, right) => Date.parse(right.lastAccessAt || right.startedAt || 0) - Date.parse(left.lastAccessAt || left.startedAt || 0));
   const active = matches[0];
-  if (!active) return { playbackStrategy: '', videoMode: '', audioMode: '' };
+  // Normal Roku live playback and preview use the provider's HLS manifest
+  // directly. There is no FFmpeg job to report unless a bounded compatibility
+  // fallback is active, so absence of a job means native Direct HLS for a
+  // channel (VOD still reports no strategy until its player creates one).
+  if (!active) return { playbackStrategy: kind === 'channel' ? 'DIRECT_HLS' : '', videoMode: '', audioMode: '' };
   return {
     playbackStrategy: String(active.strategy || ''),
     videoMode: String(active.videoMode || ''),

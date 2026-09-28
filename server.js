@@ -1343,20 +1343,6 @@ const castControlQueue = new Map(); // deviceId -> { action, value, exp }
 const CAST_CONTROL_TTL_MS = 15 * 1000;
 function pruneCastControlQueue() { const now = Date.now(); for (const [id, e] of castControlQueue) if (e.exp < now) castControlQueue.delete(id); }
 
-async function releaseAndroidProviderForRoku(sourceId) {
-  const host = String(process.env.ANDROID_STREAM_BACKEND_HOST || 'rh-stream-android').trim();
-  const port = String(process.env.ANDROID_STREAM_BACKEND_PORT || '8786').trim();
-  const response = await fetch(`http://${host}:${port}/internal/streams/android-handoff`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ sourceId }),
-    signal: AbortSignal.timeout(12_000),
-  });
-  if (!response.ok) throw new Error(`Android streamer rejected handoff (HTTP ${response.status})`);
-  const result = await response.json();
-  console.log(`[Roku cast] released Android provider jobs source=${sourceId} stopped=${Number(result?.stopped) || 0}`);
-}
-
 function canonicalCastDisplay(kind, suppliedTitle) {
   const title = String(suppliedTitle || '').trim();
   if (kind !== 'series') return { title };
@@ -1395,10 +1381,6 @@ app.post('/api/roku/cast', async (req, res) => {
     if (!targetDevice) {
       return res.status(404).json({ error: 'That Roku is not linked to this account' });
     }
-    // Finish every Android FFmpeg job holding this source before publishing
-    // the one-time cast. This ordering prevents Roku from redeeming while a
-    // stale phone job still owns the provider's single connection slot.
-    await releaseAndroidProviderForRoku(sourceId);
     pruneCastQueue();
     const castCode = randomBytes(9).toString('base64url');
     castQueue.set(deviceId, {

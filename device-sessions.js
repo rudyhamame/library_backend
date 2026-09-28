@@ -264,12 +264,34 @@ async function linkAccountDevice(accountCollection, accountId, session) {
   if (!replaced.matchedCount) await accountCollection.updateOne({ _id: accountId }, { $push: { devices: device }, $set: { updatedAt: now } });
 }
 
-async function accountHasOtherRokuDevice(accountCollection, accountId, deviceId) {
-  const account = await accountCollection.findOne({ _id: accountId }, { projection: { devices: 1 } });
-  return (account?.devices || []).some(device => String(device.deviceId || '').startsWith('roku-') && String(device.deviceId) !== String(deviceId));
-}
+const singleRokuPerAccountError = 'This RH account is permanently linked to another Roku device.';
 
-const singleRokuPerAccountError = 'This RH account is already linked to another Roku device. Unlink it before linking this Roku.';
+async function accountHasOtherRokuDevice(accountCollection, accountId, deviceId) {
+  let account = await accountCollection.findOne({ _id: accountId }, { projection: { devices: 1, rokuDeviceId: 1 } });
+  if (!account) return false;
+  const rokuDevices = (account.devices || []).filter(device => String(device.deviceId || '').startsWith('roku-'));
+  let boundId = String(account.rokuDeviceId || '');
+  if (!boundId && rokuDevices.length) {
+    rokuDevices.sort((a, b) => {
+      const date = value => new Date(value?.linkedAt || value?.createdAt || 0).getTime();
+      return date(a) - date(b) || String(a.deviceId).localeCompare(String(b.deviceId));
+    });
+    boundId = String(rokuDevices[0].deviceId);
+    await accountCollection.updateOne(
+      { _id: accountId, $or: [{ rokuDeviceId: { $exists: false } }, { rokuDeviceId: null }, { rokuDeviceId: '' }] },
+      { $set: { rokuDeviceId: boundId, updatedAt: new Date() } },
+    );
+    account = await accountCollection.findOne({ _id: accountId }, { projection: { devices: 1, rokuDeviceId: 1 } });
+    boundId = String(account?.rokuDeviceId || boundId);
+  }
+  if (boundId) {
+    await accountCollection.updateOne(
+      { _id: accountId },
+      { $pull: { devices: { $and: [{ deviceId: /^roku-/ }, { deviceId: { $ne: boundId } }] } }, $set: { updatedAt: new Date() } },
+    );
+  }
+  return Boolean(boundId && boundId !== String(deviceId));
+}
 
 const resetCodes = new Map();
 const resetCodeTtlMs = 15 * 60 * 1000;

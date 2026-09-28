@@ -67,12 +67,23 @@ async function updateOne(filter, update, options = {}) {
     const current = existing.find(entry => String(entry.account._id) === String(target.id));
     if (current) return updateOne({ accountId: target.id, deviceId }, update);
     const device = { ...deviceFields(update.$setOnInsert), ...deviceFields(update.$set), deviceId };
+    const insertFilter = { _id: target.id, 'devices.deviceId': { $ne: deviceId } };
+    const isRoku = deviceId.startsWith('roku-');
+    if (isRoku) insertFilter.devices = { $not: { $elemMatch: { deviceId: /^roku-/ } } };
     const result = await target.collection.updateOne(
-      { _id: target.id, 'devices.deviceId': { $ne: deviceId } },
+      insertFilter,
       { $push: { devices: device }, $set: { updatedAt: new Date() } },
     );
     if (result.modifiedCount) return result;
-    return updateOne({ accountId: target.id, deviceId }, update);
+    const sameDevice = await locatedRows({ accountId: target.id, deviceId });
+    if (sameDevice.length) return updateOne({ accountId: target.id, deviceId }, update);
+    if (isRoku) {
+      const account = await target.collection.findOne({ _id: target.id }, { projection: { devices: 1 } });
+      if ((account?.devices || []).some(item => String(item.deviceId || '').startsWith('roku-'))) {
+        return { matchedCount: 0, modifiedCount: 0, rokuDeviceLimitReached: true };
+      }
+    }
+    return result;
   }
   const [entry] = await locatedRows(filter);
   if (!entry) return { matchedCount: 0, modifiedCount: 0 };

@@ -264,6 +264,13 @@ async function linkAccountDevice(accountCollection, accountId, session) {
   if (!replaced.matchedCount) await accountCollection.updateOne({ _id: accountId }, { $push: { devices: device }, $set: { updatedAt: now } });
 }
 
+async function accountHasOtherRokuDevice(accountCollection, accountId, deviceId) {
+  const account = await accountCollection.findOne({ _id: accountId }, { projection: { devices: 1 } });
+  return (account?.devices || []).some(device => String(device.deviceId || '').startsWith('roku-') && String(device.deviceId) !== String(deviceId));
+}
+
+const singleRokuPerAccountError = 'This RH account is already linked to another Roku device. Unlink it before linking this Roku.';
+
 const resetCodes = new Map();
 const resetCodeTtlMs = 15 * 60 * 1000;
 const signupVerifications = new Map();
@@ -524,14 +531,16 @@ async function approveSignupSession(code, accountId) {
   const accountCollection = await accounts('roku');
   const deviceOwnerId = ownerIdFor(session.deviceId);
   await consolidateAccountLibrary(accountId);
+  if (await accountHasOtherRokuDevice(accountCollection, accountId, session.deviceId)) return { error: singleRokuPerAccountError };
   session.accountId = String(accountId);
   session.profileId = null;
   session.ownerId = accountOwnerId(accountId);
-  await deviceCollection.updateOne(
+  const linked = await deviceCollection.updateOne(
     { deviceId: session.deviceId },
     { $setOnInsert: { ownerId: deviceOwnerId, deviceId: session.deviceId, createdAt: new Date() }, $set: { accountId, profileId: null, linkedAt: new Date(), updatedAt: new Date() } },
     { upsert: true },
   );
+  if (linked.rokuDeviceLimitReached) return { error: singleRokuPerAccountError };
   await linkAccountDevice(accountCollection, accountId, session);
   session.approvedAt = Date.now();
   return issueToken(session, 'roku');
@@ -640,6 +649,7 @@ async function consumePairing(code, email, password, setup, firstName = '', last
     }
     if (!account || !verifyPassword(password, accountPasswordHash(account))) return { error: 'Incorrect email or password' };
   }
+  if (await accountHasOtherRokuDevice(accountCollection, account._id, session.deviceId)) return { error: singleRokuPerAccountError };
   session.accountId = String(account._id);
   const canonicalOwner = await consolidateAccountLibrary(account._id);
   let selectedProfile = null;
@@ -648,11 +658,12 @@ async function consumePairing(code, email, password, setup, firstName = '', last
   }
   session.profileId = selectedProfile?.id || null;
   session.ownerId = selectedProfile?.isDefault ? canonicalOwner : selectedProfile?.ownerId || canonicalOwner;
-  await deviceCollection.updateOne(
+  const linked = await deviceCollection.updateOne(
     { deviceId: session.deviceId },
     { $setOnInsert: { ownerId: deviceOwnerId, deviceId: session.deviceId, createdAt: new Date() }, $set: { accountId: account._id, profileId: session.profileId, linkedAt: new Date(), updatedAt: new Date() } },
     { upsert: true },
   );
+  if (linked.rokuDeviceLimitReached) return { error: singleRokuPerAccountError };
   await linkAccountDevice(accountCollection, account._id, session);
   session.approvedAt = Date.now();
   return { token: issueToken(session, 'browser'), deviceId: session.deviceId };

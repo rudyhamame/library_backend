@@ -1170,7 +1170,7 @@ app.post('/api/device-session/claim', async (req, res) => {
 app.post('/api/device-session/authorize', async (req, res) => {
   try {
     const result = await authorizeDeviceSession(req.body?.code, req.get('x-device-token'));
-    if (result.error) return res.status(result.error.includes('expired') ? 404 : result.error.includes('different') ? 409 : 401).json(result);
+    if (result.error) return res.status(result.error.includes('expired') ? 404 : result.error.includes('different') || result.error.includes('already linked to another Roku device') ? 409 : 401).json(result);
     res.json(result);
   } catch (error) { res.status(500).json({ error: error.message }); }
 });

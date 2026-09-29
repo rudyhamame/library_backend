@@ -265,13 +265,40 @@ async function linkAccountDevice(accountCollection, accountId, session) {
   if (!replaced.matchedCount) await accountCollection.updateOne({ _id: accountId }, { $push: { devices: device }, $set: { updatedAt: now } });
 }
 
-const singleRokuPerAccountError = 'This RH account is permanently linked to another Roku device.';
+const singleRokuPerAccountError = 'This Roku device is not linked to this RH account.';
 
 async function accountHasOtherRokuDevice(accountCollection, accountId, deviceId) {
   const account = await accountCollection.findOne({ _id: accountId }, { projection: { rokuDeviceId: 1 } });
-  // The ID is written when the Roku creates the account. Device-list entries
-  // are mutable presence records and must never establish or change ownership.
   return String(account?.rokuDeviceId || '') !== String(deviceId);
+}
+
+async function replaceAccountRokuDevice(accountCollection, deviceCollection, accountId, deviceId) {
+  const account = await accountCollection.findOne({ _id: accountId }, { projection: { rokuDeviceId: 1, devices: 1 } });
+  if (!account) return { error: 'RH account not found' };
+  const previousIds = new Set([
+    account.rokuDeviceId,
+    ...(Array.isArray(account.devices) ? account.devices
+      .filter(row => row?.kind === 'roku' || String(row?.deviceId || '').startsWith('roku-'))
+      .map(row => row.deviceId) : []),
+  ].map(value => String(value || '')).filter(value => value && value !== String(deviceId)));
+  const filter = { _id: accountId, rokuDeviceId: account.rokuDeviceId !== undefined ? account.rokuDeviceId : { $exists: false } };
+  const replaced = await accountCollection.updateOne(filter, {
+    $set: { rokuDeviceId: String(deviceId), updatedAt: new Date() },
+    $pull: { devices: { $or: [{ kind: 'roku' }, { deviceId: /^roku-/ }] } },
+  });
+  if (!replaced.matchedCount) {
+    const current = await accountCollection.findOne({ _id: accountId }, { projection: { rokuDeviceId: 1 } });
+    if (String(current?.rokuDeviceId || '') !== String(deviceId)) {
+      return { error: 'Another Roku is being linked to this account. Please sign in again.' };
+    }
+  }
+  for (const previousId of previousIds) {
+    await deviceCollection.updateOne(
+      { accountId, deviceId: previousId },
+      { $unset: { accountId: '', accountOwnerId: '', profileId: '' }, $set: { updatedAt: new Date() } },
+    );
+  }
+  return { ok: true };
 }
 
 const resetCodes = new Map();
@@ -534,7 +561,8 @@ async function approveSignupSession(code, accountId) {
   const accountCollection = await accounts('roku');
   const deviceOwnerId = ownerIdFor(session.deviceId);
   await consolidateAccountLibrary(accountId);
-  if (await accountHasOtherRokuDevice(accountCollection, accountId, session.deviceId)) return { error: singleRokuPerAccountError };
+  const replacement = await replaceAccountRokuDevice(accountCollection, deviceCollection, accountId, session.deviceId);
+  if (replacement.error) return replacement;
   session.accountId = String(accountId);
   session.profileId = null;
   session.ownerId = accountOwnerId(accountId);
@@ -652,7 +680,8 @@ async function consumePairing(code, email, password, setup, firstName = '', last
     }
     if (!account || !verifyPassword(password, accountPasswordHash(account))) return { error: 'Incorrect email or password' };
   }
-  if (await accountHasOtherRokuDevice(accountCollection, account._id, session.deviceId)) return { error: singleRokuPerAccountError };
+  const replacement = await replaceAccountRokuDevice(accountCollection, deviceCollection, account._id, session.deviceId);
+  if (replacement.error) return replacement;
   session.accountId = String(account._id);
   const canonicalOwner = await consolidateAccountLibrary(account._id);
   let selectedProfile = null;

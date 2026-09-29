@@ -1023,6 +1023,19 @@ function rokuXtreamPlaybackPath(sourceId, kind, id, extension = '') {
 app.use(cors());
 app.use(express.json({ limit: '2mb' })); // profile pictures + WWP host avatar are ~1MB data URIs
 
+// A signed Roku token can outlive a device unlink. Check the account's current
+// linked-device row before any content route accepts that token.
+app.use(async (req, res, next) => {
+  if (req.path.startsWith('/api/roku/device-session')) return next();
+  const token = String(req.get('x-device-token') || req.query.deviceToken || '');
+  const session = resolveDeviceToken(token);
+  if (session?.type !== 'roku') return next();
+  try {
+    if (!await isRokuSessionLinked(session)) return res.status(401).json({ error: 'Roku device is no longer linked' });
+    next();
+  } catch (error) { next(error); }
+});
+
 app.post('/api/android-beta-testers', async (req, res) => {
   try {
     if (req.body?.consent !== true) return res.status(400).json({ error: 'Please confirm you want to receive a beta invitation.' });

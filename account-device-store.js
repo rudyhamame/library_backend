@@ -58,6 +58,11 @@ async function updateOne(filter, update, options = {}) {
     const deviceId = String(filter.deviceId || update.$setOnInsert?.deviceId || '');
     if (!deviceId) throw new Error('Device ID is required');
     const target = await locateAccount(accountId);
+    const isRoku = deviceId.startsWith('roku-');
+    if (isRoku) {
+      const account = await target.collection.findOne({ _id: target.id }, { projection: { rokuDeviceId: 1 } });
+      if (String(account?.rokuDeviceId || '') !== deviceId) return { matchedCount: 0, modifiedCount: 0, rokuDeviceLimitReached: true };
+    }
     const existing = await locatedRows({ deviceId });
     for (const entry of existing) {
       if (String(entry.account._id) !== String(target.id)) {
@@ -67,15 +72,14 @@ async function updateOne(filter, update, options = {}) {
     const current = existing.find(entry => String(entry.account._id) === String(target.id));
     if (current) return updateOne({ accountId: target.id, deviceId }, update);
     const device = { ...deviceFields(update.$setOnInsert), ...deviceFields(update.$set), deviceId };
-    const isRoku = deviceId.startsWith('roku-');
     const insertFilter = { _id: target.id, 'devices.deviceId': { $ne: deviceId } };
     if (isRoku) {
       insertFilter.devices = { $not: { $elemMatch: { deviceId: /^roku-/ } } };
-      insertFilter.$or = [{ rokuDeviceId: deviceId }, { rokuDeviceId: { $exists: false } }, { rokuDeviceId: null }, { rokuDeviceId: '' }];
+      insertFilter.rokuDeviceId = deviceId;
     }
     const result = await target.collection.updateOne(
       insertFilter,
-      { $push: { devices: device }, $set: { updatedAt: new Date(), ...(isRoku ? { rokuDeviceId: deviceId } : {}) } },
+      { $push: { devices: device }, $set: { updatedAt: new Date() } },
     );
     if (result.modifiedCount) return result;
     const sameDevice = await locatedRows({ accountId: target.id, deviceId });

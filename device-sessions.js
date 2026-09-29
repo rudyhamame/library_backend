@@ -247,11 +247,12 @@ function validPassword(password) { return typeof password === 'string' && passwo
 function normalizeEmail(email) { return String(email || '').trim().toLowerCase(); }
 function validEmail(email) { return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) && email.length <= 254; }
 
-function identityAccountDocument({ email, passwordHash, realm = 'roku', createdAt = new Date(), updatedAt = new Date() }) {
+function identityAccountDocument({ email, passwordHash, realm = 'roku', rokuDeviceId = '', createdAt = new Date(), updatedAt = new Date() }) {
   return {
     email, passwordHash, createdAt, updatedAt,
     providers: [], profiles: [], devices: [],
     realm: normalizeAccountRealm(realm),
+    ...(rokuDeviceId ? { rokuDeviceId: String(rokuDeviceId) } : {}),
   };
 }
 
@@ -267,30 +268,10 @@ async function linkAccountDevice(accountCollection, accountId, session) {
 const singleRokuPerAccountError = 'This RH account is permanently linked to another Roku device.';
 
 async function accountHasOtherRokuDevice(accountCollection, accountId, deviceId) {
-  let account = await accountCollection.findOne({ _id: accountId }, { projection: { devices: 1, rokuDeviceId: 1 } });
-  if (!account) return false;
-  const rokuDevices = (account.devices || []).filter(device => String(device.deviceId || '').startsWith('roku-'));
-  let boundId = String(account.rokuDeviceId || '');
-  if (!boundId && rokuDevices.length) {
-    rokuDevices.sort((a, b) => {
-      const date = value => new Date(value?.linkedAt || value?.createdAt || 0).getTime();
-      return date(a) - date(b) || String(a.deviceId).localeCompare(String(b.deviceId));
-    });
-    boundId = String(rokuDevices[0].deviceId);
-    await accountCollection.updateOne(
-      { _id: accountId, $or: [{ rokuDeviceId: { $exists: false } }, { rokuDeviceId: null }, { rokuDeviceId: '' }] },
-      { $set: { rokuDeviceId: boundId, updatedAt: new Date() } },
-    );
-    account = await accountCollection.findOne({ _id: accountId }, { projection: { devices: 1, rokuDeviceId: 1 } });
-    boundId = String(account?.rokuDeviceId || boundId);
-  }
-  if (boundId) {
-    await accountCollection.updateOne(
-      { _id: accountId },
-      { $pull: { devices: { $and: [{ deviceId: /^roku-/ }, { deviceId: { $ne: boundId } }] } }, $set: { updatedAt: new Date() } },
-    );
-  }
-  return Boolean(boundId && boundId !== String(deviceId));
+  const account = await accountCollection.findOne({ _id: accountId }, { projection: { rokuDeviceId: 1 } });
+  // The ID is written when the Roku creates the account. Device-list entries
+  // are mutable presence records and must never establish or change ownership.
+  return String(account?.rokuDeviceId || '') !== String(deviceId);
 }
 
 const resetCodes = new Map();
@@ -350,7 +331,7 @@ export async function createDeviceSession(deviceId, deviceToken = '') {
   // QR can connect Android to the Roku's existing account; it can never sign
   // the Roku in or create an account away from the TV.
   const authorization = resolveDeviceToken(deviceToken);
-  if (authorization?.type === 'roku' && normalizeAccountRealm(authorization.realm) === 'roku' && authorization.deviceId === normalizedDeviceId && ObjectId.isValid(authorization.accountId)) {
+  if (authorization?.type === 'roku' && normalizeAccountRealm(authorization.realm) === 'roku' && authorization.deviceId === normalizedDeviceId && ObjectId.isValid(authorization.accountId) && await isRokuSessionLinked(authorization)) {
     const profile = await (await profiles()).findOne({ deviceId: normalizedDeviceId, accountId: new ObjectId(authorization.accountId) }, { projection: { accountId: 1 } });
     if (profile?.accountId) {
       session.accountId = String(profile.accountId);
@@ -654,7 +635,7 @@ async function consumePairing(code, email, password, setup, firstName = '', last
     }
     let created;
     try {
-      created = await accountCollection.insertOne(identityAccountDocument({ email: normalizedEmail, passwordHash: session.signupPasswordHash || hashPassword(password) }));
+      created = await accountCollection.insertOne(identityAccountDocument({ email: normalizedEmail, passwordHash: session.signupPasswordHash || hashPassword(password), rokuDeviceId: session.deviceId }));
     } catch (error) {
       if (error?.code === 11000) return { error: 'An account with this email already exists. Sign in instead.' };
       throw error;
@@ -666,7 +647,7 @@ async function consumePairing(code, email, password, setup, firstName = '', last
     // A profile created by the earlier device-password implementation can be
     // adopted on its first successful sign-in without losing its library.
     if (!account && profile?.email === normalizedEmail && verifyPassword(password, profile.passwordHash)) {
-      const created = await accountCollection.insertOne(identityAccountDocument({ email: normalizedEmail, passwordHash: profile.passwordHash, createdAt: profile.createdAt || new Date() }));
+      const created = await accountCollection.insertOne(identityAccountDocument({ email: normalizedEmail, passwordHash: profile.passwordHash, rokuDeviceId: session.deviceId, createdAt: profile.createdAt || new Date() }));
       account = { _id: created.insertedId };
     }
     if (!account || !verifyPassword(password, accountPasswordHash(account))) return { error: 'Incorrect email or password' };
@@ -1008,6 +989,8 @@ export async function unlinkAccountDevice(accountId, deviceId, profileId = '') {
 
 export async function isRokuSessionLinked(session) {
   if (session?.type !== 'roku' || !session?.ownerId || !session?.deviceId || !ObjectId.isValid(session?.accountId)) return false;
+  const account = await (await accounts('roku')).findOne({ _id: new ObjectId(session.accountId) }, { projection: { rokuDeviceId: 1 } });
+  if (String(account?.rokuDeviceId || '') !== String(session.deviceId)) return false;
   // The profile is a sub-selection carried on the device row, not an auth gate.
   // A device still linked to this account stays authorized even when the
   // token's profile pointer differs from the row's last-selected profile
@@ -1097,6 +1080,7 @@ export async function deleteAccount(accountId, currentPassword, realm = 'roku') 
 export async function castHandoffLink(deviceId, accountId, profileId) {
   if (!deviceId || !ObjectId.isValid(accountId)) return { error: 'Invalid cast target' };
   const account = new ObjectId(accountId);
+  if (await accountHasOtherRokuDevice(await accounts('roku'), account, deviceId)) return { error: singleRokuPerAccountError };
   const selectedProfile = profileId
     ? await getAccountProfile(account, profileId)
     : null;

@@ -85,10 +85,9 @@ test('Roku Welcome content is selected by profile and constrained to its provide
   assert.match(favorites, /normalizeIdentityBuckets\(library\.favorites\)/);
   assert.match(favorites, /if \(!sourceId \|\| !kind\) throw new Error/);
   assert.match(favorites, /const desiredFavorite = typeof favorite === 'boolean' \? favorite : !existing/);
-  assert.match(scene, /favorite: desiredFavorite/);
+  assert.doesNotMatch(scene, /favorite|rhFavorite/i);
   const navigation = await readFile(new URL('../../roku/components/HomeScreenNavigation.brs', import.meta.url), 'utf8');
   assert.match(navigation, /railItemAt\(m\.welcomeDiscoveryRails, welcomeRailPosition\(\)\)/);
-  assert.match(scene, /nearestWelcomeRailPosition\(discovery, focusPosition\)/);
   assert.match(server, /getFavorites\(accountOwner, requestProfile\(req\)\)/);
 });
 

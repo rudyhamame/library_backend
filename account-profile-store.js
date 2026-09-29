@@ -1,11 +1,12 @@
 import { randomBytes, randomUUID, scryptSync, timingSafeEqual } from 'node:crypto';
 import { MongoClient, ObjectId } from 'mongodb';
 import { accountOwnerId, profileOwnerId } from './account-library-owner.js';
+import { uploadProfileImage, isCloudinaryProfileUrl } from './cloudinary-upload.js';
 
 const mongoUri = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017';
 const databaseName = process.env.MONGODB_DB || 'rh_roku';
 const generalDatabaseName = process.env.MONGODB_GENERAL_DB || 'rh_general';
-const maxProfiles = Math.max(2, Math.min(8, Number.parseInt(process.env.MAX_ACCOUNT_PROFILES || '5', 10) || 5));
+export const MAX_ACCOUNT_PROFILES = Number.POSITIVE_INFINITY;
 const avatars = new Set(['lime', 'teal', 'amber', 'violet', 'rose', 'blue']);
 let clientPromise;
 
@@ -58,6 +59,21 @@ function publicProfile(profile) {
     hasPin: Boolean(profile.pinHash), isDefault: profile.isDefault === true,
     position: Number(profile.position) || 0,
   };
+}
+
+async function resolveAvatarImage(rawInput, publicId) {
+  const value = String(rawInput || '');
+  if (!value) return { url: '' };
+  if (isCloudinaryProfileUrl(value)) return { url: value };
+  if (value.length > 1_400_000 || !/^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/.test(value)) {
+    return { error: 'Upload a valid profile image' };
+  }
+  try {
+    return { url: await uploadProfileImage(value, publicId) };
+  } catch {
+    // ponytail: no retry/queue on Cloudinary hiccups, add if uploads start failing in practice.
+    return { error: 'Could not save the profile image, please try again' };
+  }
 }
 
 function profileCodeLetter(name) {
@@ -164,15 +180,15 @@ export async function setProfilePartnerEmail(accountId, profileId, email, profil
 export async function createAccountProfile(accountId, input = {}) {
   const record = await accountRecord(accountId);
   const rows = await backfillMissingCodes(record);
-  if (rows.length >= maxProfiles) return { error: `An account can have up to ${maxProfiles} profiles` };
   const name = normalizeProfileName(input.name);
   if (!name) return { error: 'Enter a profile name' };
-  const avatarImage = String(input.avatarImage || '');
   const pin = String(input.pin || '');
   if (pin && !validProfilePin(pin)) return { error: 'Profile PIN must be exactly 4 digits' };
-  if (avatarImage.length > 1_400_000 || (avatarImage && !/^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/.test(avatarImage))) return { error: 'Upload a valid profile image' };
   if (rows.some(row => row.name.toLowerCase() === name.toLowerCase())) return { error: 'Choose a different profile name' };
   const id = randomUUID();
+  const avatarResult = await resolveAvatarImage(input.avatarImage, `${accountId}-${id}`);
+  if (avatarResult.error) return { error: avatarResult.error };
+  const avatarImage = avatarResult.url;
   const profile = {
     id, ownerId: profileOwnerId(accountId, id), name,
     code: nextProfileCode(rows, name),
@@ -187,7 +203,7 @@ export async function createAccountProfile(accountId, input = {}) {
     createdAt: new Date(), updatedAt: new Date(),
   };
   const result = await record.collection.updateOne(
-    { _id: record.id, [`profiles.${maxProfiles - 1}`]: { $exists: false }, 'profiles.name': { $ne: name } },
+    { _id: record.id, 'profiles.name': { $ne: name } },
     { $push: { profiles: profile }, $set: { updatedAt: new Date() } },
   );
   if (!result.modifiedCount) return { error: 'Profile list changed. Please try again' };
@@ -202,8 +218,12 @@ export async function updateAccountProfile(accountId, profileId, input = {}) {
   if (!name) return { error: 'Enter a profile name' };
   if (profilesOf(record.account).some(row => row.id !== profile.id && row.name.toLowerCase() === name.toLowerCase())) return { error: 'Choose a different profile name' };
   const avatar = avatars.has(input.avatar) ? input.avatar : profile.avatar || 'lime';
-  const avatarImage = input.avatarImage === undefined ? (profile.avatarImage || '') : String(input.avatarImage || '');
-  if (avatarImage.length > 1_400_000 || (avatarImage && !/^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/.test(avatarImage))) return { error: 'Upload a valid profile image' };
+  let avatarImage = profile.avatarImage || '';
+  if (input.avatarImage !== undefined) {
+    const avatarResult = await resolveAvatarImage(input.avatarImage, `${accountId}-${profile.id}`);
+    if (avatarResult.error) return { error: avatarResult.error };
+    avatarImage = avatarResult.url;
+  }
   const pinChanged = input.pin !== undefined;
   const pin = pinChanged ? String(input.pin || '') : '';
   if (pinChanged && pin && !validProfilePin(pin)) return { error: 'Profile PIN must be exactly 4 digits' };
@@ -214,6 +234,9 @@ export async function updateAccountProfile(accountId, profileId, input = {}) {
   return { profile: publicProfile({ ...profile, name, avatar, avatarImage, pinHash: pinChanged ? pinHash || '' : profile.pinHash }) };
 }
 
+// ponytail: deleting a profile leaves its Cloudinary image behind (storage-only
+// leak, no PII beyond the picture itself); add cloudinary.uploader.destroy() here
+// if that volume ever matters.
 export async function deleteAccountProfile(accountId, profileId) {
   const profile = await getAccountProfile(accountId, profileId);
   if (!profile) return { error: 'Profile not found' };
@@ -249,5 +272,3 @@ export async function deleteAccountProfilesAndData(accountId) {
   await Promise.all(names.map(name => record.database.collection(name).deleteMany({ ownerId: { $in: ownerIds } })));
   return { ownerIds };
 }
-
-export { maxProfiles as MAX_ACCOUNT_PROFILES };

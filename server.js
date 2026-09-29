@@ -21,6 +21,7 @@ import { getFavorites, toggleFavorite } from './favorites-store.js';
 import { accountOwnerId, profileOwnerId } from './account-library-owner.js';
 import { authorizeDeviceSession, autoLoginDeviceSession, castHandoffLink, changeAccountPassword, claimAutomaticPairing, confirmPasswordReset, createDeviceSession, deleteAccount, getAccountBasicInfo, getDeviceSession, getDeviceWeatherLocations, getLinkedDevices, getPairingInfo, getRokuDeviceSessionStatus, getRokuSourcePreferenceByOwner, initializeAccountDatabases, isProfileOnline, isRokuSessionLinked, listAllAccountsBasic, listAllLinkedDevices, loginAccount, loginDeviceSession, recordDeviceHeartbeat, registerAccount, registerBrowserDevice, requestAccountSignupVerification, requestDeviceSignupVerification, requestPasswordReset, resendAccountSignupVerification, resendDeviceSignupVerification, resolveAccountByEmail, resolveDeviceToken, saveDeviceWeatherLocations, selectAccountProfile, setupDeviceSession, unlinkAccountDevice, verifyDeviceSignupCode } from './device-sessions.js';
 import { createAccountProfile, deleteAccountProfile, getAccountProfile, getAccountProfiles, getProfileByCode, getProfilePartnerCode, getProfilePartnerEmail, setProfilePartnerEmail, setProfileRokuSourcePreference, updateAccountProfile } from './account-profile-store.js';
+import { isCloudinaryProfileUrl } from './cloudinary-upload.js';
 import { enforceLibraryOnly } from './library-route-policy.js';
 import { checkPlaylistSources } from './playlist-health.js';
 import { backdropVideoFile, ensureBackdropRoot, getRecommendationBackdrop, listBackdrops } from './recommendation-backdrop.js';
@@ -1559,7 +1560,10 @@ app.get('/api/account/profiles/:profileId/avatar', async (req, res) => {
     const accountId = requestAccount(req);
     if (!accountId) return res.status(401).json({ error: 'Sign in to view profile images' });
     const profile = await getAccountProfile(accountId, req.params.profileId);
-    const match = String(profile?.avatarImage || '').match(/^data:image\/(jpeg|png|webp);base64,([A-Za-z0-9+/=]+)$/);
+    const avatarImage = String(profile?.avatarImage || '');
+    // Roku's Image node needs a plain URL it can GET; Cloudinary already is one.
+    if (isCloudinaryProfileUrl(avatarImage)) return res.redirect(302, avatarImage);
+    const match = avatarImage.match(/^data:image\/(jpeg|png|webp);base64,([A-Za-z0-9+/=]+)$/);
     if (!match) return res.sendStatus(404);
     res.set('Content-Type', `image/${match[1]}`);
     res.set('Cache-Control', 'private, no-store');
@@ -1758,7 +1762,7 @@ app.post('/api/partner/invite', async (req, res) => {
       wwpSessionId,
       hostOwnerId: ownerId,
       hostName: hostProfile?.name || hostAccount?.name || hostAccount?.email || 'Your partner',
-      hostAvatar: /^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/.test(String(hostProfile?.avatarImage || req.body?.hostAvatar || '')) ? String(hostProfile?.avatarImage || req.body?.hostAvatar).slice(0, 1_500_000) : '',
+      hostAvatar: (value => isCloudinaryProfileUrl(value) || /^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/.test(value) ? value.slice(0, 1_500_000) : '')(String(hostProfile?.avatarImage || req.body?.hostAvatar || '')),
       title: String(title || '').slice(0, 200),
       sourceId: String(sourceId),
       kind,

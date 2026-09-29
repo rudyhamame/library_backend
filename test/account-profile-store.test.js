@@ -1,6 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { MAX_ACCOUNT_PROFILES, hashProfilePin, normalizeProfileName, verifyProfilePin } from '../account-profile-store.js';
+import { isCloudinaryProfileUrl } from '../cloudinary-upload.js';
+
+test('only a real Cloudinary profile-image URL is treated as already uploaded', () => {
+  assert.equal(isCloudinaryProfileUrl('https://res.cloudinary.com/dtoxkii3q/image/upload/v123/rh-stream/profiles/abc.jpg'), true);
+  assert.equal(isCloudinaryProfileUrl('data:image/jpeg;base64,abcd'), false);
+  assert.equal(isCloudinaryProfileUrl('https://evil.example/res.cloudinary.com/x'), false);
+  assert.equal(isCloudinaryProfileUrl(''), false);
+});
 
 test('profile names are normalized and bounded', () => {
   assert.equal(normalizeProfileName('  Family   Room  '), 'Family Room');
@@ -9,9 +17,8 @@ test('profile names are normalized and bounded', () => {
   assert.equal(normalizeProfileName('   '), '');
 });
 
-test('profile limits remain suitable for a chooser grid', () => {
-  assert.ok(MAX_ACCOUNT_PROFILES >= 2);
-  assert.ok(MAX_ACCOUNT_PROFILES <= 8);
+test('profiles have no configured account-wide count limit', () => {
+  assert.equal(MAX_ACCOUNT_PROFILES, Number.POSITIVE_INFINITY);
 });
 
 test('profile PINs are salted, hashed, and require exactly four digits', () => {

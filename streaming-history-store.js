@@ -38,9 +38,8 @@ const watchedPositionMs = value => {
   if (parts.length !== 3) return 0;
   return ((parts[0] * 60 * 60) + (parts[1] * 60) + parts[2]) * 1000;
 };
-// Movies and live channels intentionally store only the fields needed by
-// their history contracts. Series episodes retain playback/display metadata.
-// Provider URLs are always generated transiently when history is read.
+// Keep the latest playback state for each provider item. Provider URLs and
+// catalog metadata are always generated transiently when history is read.
 export const kindRecord = update => {
   const providerIdentity = {
     itemId: String(update.itemId || ''),
@@ -48,11 +47,21 @@ export const kindRecord = update => {
     sourceId: String(update.sourceId || ''),
     ...(update.kind === 'series' && update.seriesId ? { seriesId: String(update.seriesId) } : {}),
   };
-  const record = { updatedAt: update.updatedAt, providerIdentity };
-  if (update.kind === 'channel') return record;
-  // Duration + completed let Continue Watching drop finished VOD.
-  const vod = { ...record, lastWatched: update.lastMoment, ...(update.mediaDurationMs > 0 ? { mediaDurationMs: update.mediaDurationMs } : {}), ...(update.completed ? { completed: true } : {}) };
-  return vod;
+  return {
+    updatedAt: update.updatedAt,
+    providerIdentity,
+    sessionId: update.sessionId,
+    startedAt: update.startedAt,
+    ...(update.endedAt ? { endedAt: update.endedAt } : {}),
+    startPositionMs: milliseconds(update.startPositionMs),
+    endPositionMs: milliseconds(update.endPositionMs),
+    streamingDurationMs: milliseconds(update.streamingDurationMs),
+    ...(update.kind === 'channel' ? {} : {
+      lastWatched: update.lastMoment,
+      ...(update.mediaDurationMs > 0 ? { mediaDurationMs: update.mediaDurationMs } : {}),
+      ...(update.completed ? { completed: true } : {}),
+    }),
+  };
 };
 const kindRecordHistory = record => {
   if (!record) return null;
@@ -118,12 +127,27 @@ export async function saveStreamingHistory(input = {}) {
         && (group.episodes || []).some(episode => String(episode.providerIdentity?.itemId) === update.itemId));
       if (known) update.seriesId = String(known.providerIdentity.seriesId);
     }
+    const previous = historyRows(library).find(item => {
+      const identity = item.providerIdentity || {};
+      return String(identity.sourceId || '') === update.sourceId
+        && String(identity.itemId || '') === update.itemId
+        && historyKey(identity.kind) === key;
+    });
+    // Optimistic retries may complete out of order. A delayed older update
+    // must not put an earlier frame back on top of the latest watch.
+    if (previous && new Date(previous.updatedAt || 0) > update.updatedAt) return null;
     const record = kindRecord(update);
-    const identityKey = `${record.providerIdentity.sourceId}:${record.providerIdentity.kind}:${record.providerIdentity.itemId}`;
     const bucket = historyBucket(update.kind);
     let records;
     let seriesGroup = null;
     if (bucket === 'series') {
+      // An episode can arrive with a corrected series ID later. Remove its
+      // old copy from every series group before inserting the latest watch.
+      for (const group of library.streaming_history.series) {
+        if (String(group.providerIdentity?.sourceId || '') !== update.sourceId) continue;
+        group.episodes = group.episodes.filter(item => String(item.providerIdentity?.itemId || '') !== update.itemId);
+      }
+      library.streaming_history.series = library.streaming_history.series.filter(group => group.episodes.length > 0);
       const seriesKey = seriesHistoryKey(update.sourceId, update.seriesId);
       seriesGroup = library.streaming_history.series.find(item => seriesHistoryKey(item.providerIdentity?.sourceId, item.providerIdentity?.seriesId) === seriesKey);
       if (!seriesGroup) {
@@ -131,17 +155,16 @@ export async function saveStreamingHistory(input = {}) {
         library.streaming_history.series.push(seriesGroup);
       }
       records = seriesGroup.episodes;
-    } else records = library.streaming_history[bucket];
-    const historyIndex = records.findIndex(item => {
-      const identity = item?.providerIdentity || {};
-      if (bucket === 'series') return String(identity.itemId || '') === String(record.providerIdentity.itemId);
-      return `${identity.sourceId || ''}:${identity.kind || ''}:${identity.itemId || ''}` === identityKey;
-    });
+    } else {
+      records = library.streaming_history[bucket];
+      records = records.filter(item => String(item.providerIdentity?.sourceId || '') !== update.sourceId
+        || String(item.providerIdentity?.itemId || '') !== update.itemId);
+      library.streaming_history[bucket] = records;
+    }
     const storedRecord = bucket === 'series'
       ? { ...record, providerIdentity: { itemId: record.providerIdentity.itemId } }
       : record;
-    if (historyIndex >= 0) records[historyIndex] = storedRecord;
-    else records.push(storedRecord);
+    records.push(storedRecord);
     return library;
   });
   return update;
@@ -177,9 +200,8 @@ export async function deleteStreamingSession(ownerId, sessionId) {
   return { deleted };
 }
 
-// Episodes are stored inside their parent series group and intentionally do
-// not retain a session ID. Remove one watched episode by its provider identity
-// so a Roku remote action cannot accidentally target the parent series.
+// Remove one watched episode by its provider identity so a Roku remote action
+// cannot accidentally target the parent series.
 export function removeStreamingHistoryItemFromLibrary(library, identity = {}) {
   const sourceId = String(identity.sourceId || '');
   const itemId = String(identity.itemId || '');

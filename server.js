@@ -1023,6 +1023,16 @@ function rokuXtreamPlaybackPath(sourceId, kind, id, extension = '') {
 
 app.use(cors());
 app.use(express.json({ limit: '2mb' })); // profile pictures + WWP host avatar are ~1MB data URIs
+app.use('/api/streaming-history/item', (req, res, next) => {
+  const started = Date.now();
+  res.on('finish', () => console.info('[History] item request', {
+    method: req.method, status: res.statusCode, kind: String(req.query.kind || req.body?.kind || ''),
+    sourceId: String(req.query.sourceId || req.body?.sourceId || ''),
+    itemId: String(req.query.itemId || req.body?.itemId || ''),
+    authenticated: Boolean(requestProfileOwner(req)), elapsedMs: Date.now() - started,
+  }));
+  next();
+});
 
 // A signed Roku token can outlive a device unlink. Check the account's current
 // linked-device row before any content route accepts that token.
@@ -2715,10 +2725,10 @@ async function deleteStreamingHistoryItemRequest(req, res) {
     const ownerId = requestProfileOwner(req);
     if (!ownerId) return res.status(401).json({ error: 'Authentication required' });
     const identity = {
-      sourceId: String(req.query.sourceId || '').trim(),
-      seriesId: String(req.query.seriesId || '').trim(),
-      itemId: String(req.query.itemId || '').trim(),
-      kind: String(req.query.kind || '').trim(),
+      sourceId: String(req.body?.sourceId ?? req.query.sourceId ?? '').trim(),
+      seriesId: String(req.body?.seriesId ?? req.query.seriesId ?? '').trim(),
+      itemId: String(req.body?.itemId ?? req.query.itemId ?? '').trim(),
+      kind: String(req.body?.kind ?? req.query.kind ?? '').trim(),
     };
     if (!identity.sourceId || !identity.itemId || !['episode', 'series', 'series-search', 'movie', 'channel', 'live'].includes(identity.kind)) {
       return res.status(400).json({ error: 'Provider identity is required' });

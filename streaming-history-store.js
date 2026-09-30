@@ -200,13 +200,19 @@ export async function deleteStreamingSession(ownerId, sessionId) {
   return { deleted };
 }
 
-// Remove one watched episode by its provider identity so a Roku remote action
-// cannot accidentally target the parent series.
+// Episodes remove one episode; an explicit series-search row removes its group.
 export function removeStreamingHistoryItemFromLibrary(library, identity = {}) {
   const sourceId = String(identity.sourceId || '');
   const itemId = String(identity.itemId || '');
   const seriesId = String(identity.seriesId || '');
   const kind = historyKey(identity.kind);
+  if (identity.kind === 'series-search' && sourceId && seriesId) {
+    const groups = library?.streaming_history?.series || [];
+    const matches = group => String(group?.providerIdentity?.sourceId || '') === sourceId && String(group?.providerIdentity?.seriesId || '') === seriesId;
+    const deleted = groups.filter(matches).reduce((sum, group) => sum + (group.episodes || []).length, 0);
+    library.streaming_history.series = groups.filter(group => !matches(group));
+    return deleted;
+  }
   if (!sourceId || !itemId || !['episode', 'movie', 'live'].includes(kind)) return 0;
   if (kind === 'episode') {
     let deleted = 0;
@@ -240,7 +246,10 @@ export async function deleteStreamingHistoryItem(ownerId, identity = {}) {
     deleted = removeStreamingHistoryItemFromLibrary(library, identity);
     return library;
   });
-  return { deleted };
+  const persisted = await getAccountLibrary(ownerId);
+  const remaining = removeStreamingHistoryItemFromLibrary(structuredClone(persisted), identity);
+  if (remaining > 0) throw new Error('History deletion did not persist');
+  return { deleted, confirmed: true };
 }
 
 export async function clearStreamingHistory(ownerId) {

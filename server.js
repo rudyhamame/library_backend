@@ -2720,7 +2720,7 @@ app.delete('/api/streaming-history/item', async (req, res) => {
       itemId: String(req.query.itemId || '').trim(),
       kind: String(req.query.kind || '').trim(),
     };
-    if (!identity.sourceId || !identity.itemId || !['episode', 'series', 'movie', 'channel', 'live'].includes(identity.kind)) {
+    if (!identity.sourceId || !identity.itemId || !['episode', 'series', 'series-search', 'movie', 'channel', 'live'].includes(identity.kind)) {
       return res.status(400).json({ error: 'Provider identity is required' });
     }
     res.set('Cache-Control', 'no-store');
@@ -2871,7 +2871,7 @@ async function toggleRokuLibraryRequest(req, res) {
       didMutate = removal.removed > 0;
     }
     if (didMutate) bumpLibraryRevision(ownerId);
-    res.json({ saved: desiredSaved, key, sourceId: String(source._id) });
+    res.json({ saved: desiredSaved, confirmed: true, key, sourceId: String(source._id) });
   } catch (error) { res.status(500).json({ error: error.message }); }
 }
 app.get('/api/roku/library/toggle', toggleRokuLibraryRequest);

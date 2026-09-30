@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { accountForLibraryOwner, allAccountDocuments, updateAccountLibrary } from './account-library-data.js';
+import { accountForLibraryOwner, allAccountDocuments, getAccountLibrary, updateAccountLibrary } from './account-library-data.js';
 import { accountOwnerId, profileOwnerId } from './account-library-owner.js';
 import { xtreamProviderUrl } from './xtream.js';
 import { normalizeIdentityBuckets } from './library-identity.js';
@@ -127,19 +127,21 @@ export async function updateXtreamSelection(id, selection, accountOwner, profile
   if (!accountOwner || !profileOwner) return null;
   const located = await locateSource(id, accountOwner);
   if (!located) return null;
-  const account = (await accountForLibraryOwner(profileOwner)).account;
-  const profile = (account.profiles || []).find(row => String(row.ownerId) === String(profileOwner) || String(row.id) === String(profileOwner));
-  const next = savedShape(profile?.library?.savedSelections);
   const sourceId = String(located.source._id);
-  for (const kind of savedKinds) next[kind] = next[kind].filter(identity => identity.sourceId !== sourceId);
-  for (const item of Array.isArray(selection?.enabledItems) ? selection.enabledItems : []) {
-    const bucket = kindFor(item.kind);
-    const itemId = String(item.id || item.itemId || '');
-    if (itemId) next[bucket].push({ providerIdentity: bucket === 'series'
-      ? { sourceId, kind: 'series', seriesId: itemId }
-      : { itemId, kind: identityKindFor(bucket), sourceId } });
-  }
-  await updateAccountLibrary(profileOwner, library => { library.savedSelections = next; return library; });
+  const result = await updateAccountLibrary(profileOwner, library => {
+    const next = savedShape(library.savedSelections);
+    for (const kind of savedKinds) next[kind] = next[kind].filter(row => row.providerIdentity.sourceId !== sourceId);
+    for (const item of Array.isArray(selection?.enabledItems) ? selection.enabledItems : []) {
+      const bucket = kindFor(item.kind);
+      const itemId = String(item.id || item.itemId || '');
+      if (itemId) next[bucket].push({ providerIdentity: bucket === 'series'
+        ? { sourceId, kind: 'series', seriesId: itemId }
+        : { itemId, kind: identityKindFor(bucket), sourceId } });
+    }
+    library.savedSelections = next;
+    return library;
+  });
+  const next = result.library.savedSelections;
   return publicXtreamSource({ ...located.source, selections: { [String(profileOwner)]: next } }, profileOwner, accountOwner);
 }
 
@@ -163,7 +165,8 @@ export async function removeSavedXtreamItem(sourceId, kind, itemId, accountOwner
     library.savedSelections = saved;
     return library;
   });
-  const remaining = savedShape(result.library.savedSelections)[bucket].some(row => {
+  const persisted = await getAccountLibrary(profileOwner);
+  const remaining = savedShape(persisted.savedSelections)[bucket].some(row => {
     const identity = row.providerIdentity;
     return identity.sourceId === String(sourceId) && String(identity.seriesId || identity.itemId) === normalizedId;
   });

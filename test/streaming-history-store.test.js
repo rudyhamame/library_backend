@@ -95,3 +95,22 @@ test('removing a watched episode deletes only that provider episode, not its fav
     ['episode-2'], ['episode-1'], ['episode-1'],
   ]);
 });
+
+test('Watched movie and live deletion preserves other providers and unrelated records', () => {
+  for (const [kind, bucket] of [['movie', 'movies'], ['channel', 'live']]) {
+    const row = (sourceId, itemId) => ({ providerIdentity: { sourceId, itemId, kind } });
+    const library = { streaming_history: { series: [], movies: [], live: [] } };
+    library.streaming_history[bucket] = [row('provider-1', '161123'), row('provider-2', '161123'), row('provider-1', 'keep')];
+    const identity = { sourceId: 'provider-1', itemId: '161123', kind };
+    assert.equal(removeStreamingHistoryItemFromLibrary(library, identity), 1);
+    assert.equal(removeStreamingHistoryItemFromLibrary(library, identity), 0);
+    assert.deepEqual(library.streaming_history[bucket].map(x => x.providerIdentity), [row('provider-2', '161123').providerIdentity, row('provider-1', 'keep').providerIdentity]);
+  }
+});
+
+test('a Watched series row removes its episodes only within the selected provider', () => {
+  const group = (sourceId, seriesId) => ({ providerIdentity: { sourceId, seriesId, kind: 'series' }, episodes: [{ providerIdentity: { itemId: 'e1' } }, { providerIdentity: { itemId: 'e2' } }] });
+  const library = { streaming_history: { movies: [], live: [], series: [group('p1', 's1'), group('p2', 's1'), group('p1', 's2')] } };
+  assert.equal(removeStreamingHistoryItemFromLibrary(library, { kind: 'series-search', sourceId: 'p1', seriesId: 's1', itemId: 'series-search:p1:s1' }), 2);
+  assert.deepEqual(library.streaming_history.series.map(x => [x.providerIdentity.sourceId, x.providerIdentity.seriesId]), [['p2', 's1'], ['p1', 's2']]);
+});

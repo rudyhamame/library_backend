@@ -1552,7 +1552,7 @@ app.get('/api/account/profile', async (req, res) => {
     const profile = await getAccountProfile(accountId, profileId);
     if (!profile) return res.status(404).json({ error: 'Profile not found' });
     res.set('Cache-Control', 'no-store');
-    res.json({ item: { id: profile.id, name: profile.name, hasPin: Boolean(profile.pinHash) } });
+    res.json({ item: { id: profile.id, name: profile.name, hasPin: Boolean(profile.pinHash), isDefault: profile.isDefault === true } });
   } catch (error) { res.status(Number(error?.status) || 500).json({ error: error.message }); }
 });
 app.get('/api/account/profiles/:profileId/avatar', async (req, res) => {

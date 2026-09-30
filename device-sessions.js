@@ -381,11 +381,8 @@ export async function createDeviceSession(deviceId, deviceToken = '') {
     result.appPairUrl = appPairUrl;
     result.qrImageUrl = `https://quickchart.io/qr?size=190&text=${encodeURIComponent(appPairUrl)}`;
     // Separate QR for the browser auto-login card in Roku Settings: a plain
-    // web URL (not an app intent) that opens the pairing page directly.
-    const browserPairUrlObject = new URL(frontendUrl);
-    browserPairUrlObject.search = '';
-    browserPairUrlObject.hash = '';
-    browserPairUrlObject.pathname = `${browserPairUrlObject.pathname.replace(/\/$/, '')}/`;
+    // web URL (not an app intent) that opens Browser Settings after pairing.
+    const browserPairUrlObject = new URL('/settings', frontendUrl);
     browserPairUrlObject.searchParams.set('pair', session.code);
     result.pairUrl = browserPairUrlObject.toString();
     result.browserQrImageUrl = `https://quickchart.io/qr?size=190&text=${encodeURIComponent(result.pairUrl)}`;
@@ -532,8 +529,21 @@ export async function autoLoginDeviceSession(code) {
   const session = getDeviceSession(code);
   if (!session) return { error: 'Pairing code expired or invalid' };
   if (session.purpose !== 'android-remote' || !session.accountId) return { error: 'Sign in on the Roku before scanning' };
+  if (!session.profileId) return { error: 'Choose a profile on Roku before scanning' };
+  const profile = await getAccountProfile(session.accountId, session.profileId);
+  if (!profile) return { error: 'The selected Roku profile is no longer available' };
   session.approvedAt = Date.now();
-  return { token: issueToken(session, 'browser'), deviceId: session.deviceId };
+  return {
+    token: issueToken(session, 'browser'),
+    deviceId: session.deviceId,
+    profile: {
+      id: profile.id,
+      name: profile.name,
+      code: profile.code,
+      avatar: profile.avatar,
+      avatarImage: profile.avatarImage || '',
+    },
+  };
 }
 
 export async function verifyDeviceSignupCode(code, email, verificationCode) {

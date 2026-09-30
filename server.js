@@ -2579,6 +2579,7 @@ app.get('/api/roku/movies', async (req, res) => {
   const startedAt = Date.now();
   try {
     if (String(req.query.librarySource || '') === 'server') {
+      if (String(req.query.saved || '') === '1') res.set('Cache-Control', 'private, no-store');
       const catalog = String(req.query.saved || '') === '1'
         ? await getRokuServerSavedItems(requestOwner(req), 'movie', requestAccountOwner(req))
         : await getRokuServerCatalog(requestOwner(req), 'movie', req.query.category, requestAccountOwner(req));
@@ -4562,6 +4563,7 @@ app.get('/api/roku/library', async (req, res) => {
 app.get('/api/roku/series', async (req, res) => {
   try {
     if (String(req.query.librarySource || '') === 'server') {
+      if (String(req.query.saved || '') === '1') res.set('Cache-Control', 'private, no-store');
       const catalog = String(req.query.saved || '') === '1'
         ? await getRokuServerSavedItems(requestOwner(req), 'series', requestAccountOwner(req))
         : await getRokuServerCatalog(requestOwner(req), 'series', req.query.category, requestAccountOwner(req));
@@ -4624,6 +4626,7 @@ app.get('/api/roku/series', async (req, res) => {
 app.get('/api/roku/channels', async (req, res) => {
   try {
     if (String(req.query.librarySource || '') === 'server') {
+      if (String(req.query.saved || '') === '1') res.set('Cache-Control', 'private, no-store');
       const catalog = String(req.query.saved || '') === '1'
         ? await getRokuServerSavedItems(requestOwner(req), 'channel', requestAccountOwner(req))
         : await getRokuServerCatalog(requestOwner(req), 'channel', req.query.category, requestAccountOwner(req));

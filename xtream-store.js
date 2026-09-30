@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { accountForLibraryOwner, allAccountDocuments, updateAccountLibrary } from './account-library-data.js';
-import { accountOwnerId } from './account-library-owner.js';
+import { accountOwnerId, profileOwnerId } from './account-library-owner.js';
 import { xtreamProviderUrl } from './xtream.js';
 import { normalizeIdentityBuckets } from './library-identity.js';
 
@@ -30,7 +30,9 @@ function itemFromIdentity(row, source) {
 
 export function selectionFor(source, ownerId, accountOwner) {
   void accountOwner;
-  const raw = source?.selections?.[String(ownerId)] || source?.savedSelections || {};
+  // Profile libraries are the only source of saved items. A provider's
+  // legacy savedSelections field can still contain an item after an unsave.
+  const raw = source?.selections?.[String(ownerId)] || {};
   if (!Array.isArray(raw.series) && !Array.isArray(raw.movies) && !Array.isArray(raw.live) && Array.isArray(raw.enabledKeys)) return { enabledKeys: raw.enabledKeys, enabledItems: raw.enabledItems || [], archivedKeys: raw.archivedKeys || [], archivedItems: raw.archivedItems || [] };
   const saved = identitiesForSource(source, raw);
   const enabledItems = savedKinds.flatMap(bucket => saved[bucket].map(identity => itemFromIdentity(identity, source)));
@@ -62,10 +64,13 @@ function sourcesForAccount(account, ownerId) {
       // Saved selections are profile-specific even for the default profile.
       // The account owner remains the library/database owner, but Roku asks
       // for the selected profile's saved URLs using its profile owner scope.
+      const canonicalProfileOwner = profile.id ? profileOwnerId(account._id, profile.id) : '';
       const profileOwner = String(profile.ownerId || (profile.isDefault ? accountOwner : ''));
-      if (!profileOwner) continue;
       const selection = profile.library?.savedSelections;
-      if (selection) selections[profileOwner] = selection;
+      if (selection) {
+        if (profileOwner) selections[profileOwner] = selection;
+        if (canonicalProfileOwner) selections[canonicalProfileOwner] = selection;
+      }
     }
     return { ...source, ownerId: accountOwner, selections, _accountId: account._id };
   }).sort((a, b) => String(a.name || '').localeCompare(String(b.name || '')) || new Date(b.updatedAt || 0) - new Date(a.updatedAt || 0));

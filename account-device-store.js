@@ -59,6 +59,9 @@ async function updateOne(filter, update, options = {}) {
     if (!deviceId) throw new Error('Device ID is required');
     const target = await locateAccount(accountId);
     const isRoku = deviceId.startsWith('roku-');
+    // This store represents durable linked devices. Browser and Android
+    // heartbeats must never create account.devices entries.
+    if (update.$set?.kind !== 'roku' && !isRoku) return { matchedCount: 0, modifiedCount: 0 };
     if (isRoku) {
       const account = await target.collection.findOne({ _id: target.id }, { projection: { rokuDeviceId: 1 } });
       if (String(account?.rokuDeviceId || '') !== deviceId) return { matchedCount: 0, modifiedCount: 0, rokuDeviceLimitReached: true };

@@ -861,25 +861,16 @@ export async function getLinkedDevices(accountId, profileId = '') {
   }));
 }
 
-// A browser tab or the Android app is not paired like a Roku — it just carries
-// a client-generated deviceId (persisted in localStorage / SharedPreferences)
-// so its presence/streaming heartbeats have somewhere to land. Upserted on
-// every heartbeat; linkedAt is set once.
+// Browser and Android clients are not linked Roku devices. Their client IDs
+// must not create persistent account device records.
 export async function registerBrowserDevice(accountId, profileId, deviceId, label = '', kind = 'browser') {
-  if (!ObjectId.isValid(accountId)) return;
-  const normalizedDeviceId = String(deviceId || '').trim();
-  if (!normalizedDeviceId) return;
-  const normalizedKind = kind === 'android' ? 'android' : 'browser';
-  const selectedProfileId = await accountProfileId(accountId, profileId);
-  const deviceOwnerId = ownerIdFor(normalizedDeviceId);
-  await (await profiles()).updateOne(
-    { deviceId: normalizedDeviceId },
-    {
-      $setOnInsert: { ownerId: deviceOwnerId, deviceId: normalizedDeviceId, createdAt: new Date(), linkedAt: new Date() },
-      $set: { accountId: new ObjectId(accountId), profileId: selectedProfileId, kind: normalizedKind, label: String(label || '').trim().slice(0, 120) || (normalizedKind === 'android' ? 'Android' : 'Browser'), updatedAt: new Date() },
-    },
-    { upsert: true },
-  );
+  // Keep the request contract for existing clients; only a paired Roku has a
+  // durable device record. Heartbeat data from other clients remains ephemeral.
+  void accountId;
+  void profileId;
+  void deviceId;
+  void label;
+  void kind;
 }
 
 export async function getDeviceWeatherLocations(ownerId, accountId = '', deviceId = '', realm = 'roku') {

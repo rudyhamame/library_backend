@@ -145,17 +145,24 @@ export async function removeSavedXtreamItem(sourceId, kind, itemId, accountOwner
   if (!sourceId || !itemId || !accountOwner || !profileOwner) return false;
   const bucket = kindFor(kind);
   const normalizedId = String(itemId);
-  await updateAccountLibrary(profileOwner, library => {
+  let removed = 0;
+  const result = await updateAccountLibrary(profileOwner, library => {
     const saved = savedShape(library.savedSelections);
+    const before = saved[bucket].length;
     saved[bucket] = saved[bucket].filter(row => {
       const identity = row.providerIdentity;
       const savedId = identity.seriesId || identity.itemId;
       return identity.sourceId !== String(sourceId) || String(savedId) !== normalizedId;
     });
+    removed = before - saved[bucket].length;
     library.savedSelections = saved;
     return library;
   });
-  return true;
+  const remaining = savedShape(result.library.savedSelections)[bucket].some(row => {
+    const identity = row.providerIdentity;
+    return identity.sourceId === String(sourceId) && String(identity.seriesId || identity.itemId) === normalizedId;
+  });
+  return { removed, remaining };
 }
 
 export async function deleteXtreamSource(id, ownerId) {

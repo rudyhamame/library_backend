@@ -2858,7 +2858,10 @@ async function toggleRokuLibraryRequest(req, res) {
       if (desiredSaved) {
         await updateXtreamSelection(String(source._id), { enabledKeys: nextKeys, enabledItems: nextItems, archivedKeys: source.archivedKeys || [], archivedItems: source.archivedItems || [] }, accountOwner, ownerId);
       } else {
-        await removeSavedXtreamItem(String(source._id), kind, id, accountOwner, ownerId);
+        const removal = await removeSavedXtreamItem(String(source._id), kind, id, accountOwner, ownerId);
+        if (!removal || removal.remaining) {
+          throw new Error(`Saved item removal did not persist for ${kind}:${id} in profile ${ownerId}`);
+        }
       }
       bumpLibraryRevision(ownerId);
     }

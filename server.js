@@ -2854,17 +2854,22 @@ async function toggleRokuLibraryRequest(req, res) {
       }];
       nextKeys = nextItems.map(candidate => candidate.key);
     }
-    if (desiredSaved !== currentlySaved) {
-      if (desiredSaved) {
+    let didMutate = false;
+    if (desiredSaved) {
+      if (!currentlySaved) {
         await updateXtreamSelection(String(source._id), { enabledKeys: nextKeys, enabledItems: nextItems, archivedKeys: source.archivedKeys || [], archivedItems: source.archivedItems || [] }, accountOwner, ownerId);
-      } else {
-        const removal = await removeSavedXtreamItem(String(source._id), kind, id, accountOwner, ownerId);
-        if (!removal || removal.remaining) {
-          throw new Error(`Saved item removal did not persist for ${kind}:${id} in profile ${ownerId}`);
-        }
+        didMutate = true;
       }
-      bumpLibraryRevision(ownerId);
+    } else {
+      // An explicit unsave is idempotent and always deletes the exact identity,
+      // even when the provider key snapshot incorrectly says it is absent.
+      const removal = await removeSavedXtreamItem(String(source._id), kind, id, accountOwner, ownerId);
+      if (!removal || removal.remaining) {
+        throw new Error(`Saved item removal did not persist for ${kind}:${id} in profile ${ownerId}`);
+      }
+      didMutate = removal.removed > 0;
     }
+    if (didMutate) bumpLibraryRevision(ownerId);
     res.json({ saved: desiredSaved, key, sourceId: String(source._id) });
   } catch (error) { res.status(500).json({ error: error.message }); }
 }

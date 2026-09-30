@@ -375,11 +375,13 @@ export async function createDeviceSession(deviceId, deviceToken = '') {
     purpose: session.purpose,
   };
   if (session.purpose === 'android-remote') {
-    // Android intent only: deliberately omit browser_fallback_url. A camera
-    // scan opens RH when installed and has no browser authentication path.
-    const appPairUrl = `intent://pair?pair=${encodeURIComponent(session.code)}#Intent;scheme=rhstream;package=com.rhstream.library;end`;
-    result.appPairUrl = appPairUrl;
-    result.qrImageUrl = `https://quickchart.io/qr?size=190&text=${encodeURIComponent(appPairUrl)}`;
+    // A verified Android App Link opens the installed GitHub APK from the
+    // phone's camera. The web fallback only offers an explicit app button;
+    // it never exchanges this code for an account token in the browser.
+    const appPairUrl = new URL('/open-android.html', frontendUrl);
+    appPairUrl.searchParams.set('pair', session.code);
+    result.appPairUrl = appPairUrl.toString();
+    result.qrImageUrl = `https://quickchart.io/qr?size=190&text=${encodeURIComponent(result.appPairUrl)}`;
     // Separate QR for the browser auto-login card in Roku Settings: a plain
     // web URL (not an app intent) that opens Browser Settings after pairing.
     const browserPairUrlObject = new URL('/settings', frontendUrl);

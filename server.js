@@ -2719,8 +2719,8 @@ app.delete('/api/streaming-history/item', async (req, res) => {
       itemId: String(req.query.itemId || '').trim(),
       kind: String(req.query.kind || '').trim(),
     };
-    if (!identity.sourceId || !identity.seriesId || !identity.itemId || !['episode', 'series'].includes(identity.kind)) {
-      return res.status(400).json({ error: 'Episode provider identity is required' });
+    if (!identity.sourceId || !identity.itemId || !['episode', 'series', 'movie', 'channel', 'live'].includes(identity.kind)) {
+      return res.status(400).json({ error: 'Provider identity is required' });
     }
     res.set('Cache-Control', 'no-store');
     res.json(await deleteStreamingHistoryItem(ownerId, identity));

@@ -207,20 +207,30 @@ export function removeStreamingHistoryItemFromLibrary(library, identity = {}) {
   const itemId = String(identity.itemId || '');
   const seriesId = String(identity.seriesId || '');
   const kind = historyKey(identity.kind);
-  if (!sourceId || !itemId || kind !== 'episode') return 0;
-  let deleted = 0;
-  const groups = library?.streaming_history?.series || [];
-  for (const group of groups) {
-    const groupIdentity = group?.providerIdentity || {};
-    if (String(groupIdentity.sourceId || '') !== sourceId) continue;
-    if (seriesId && String(groupIdentity.seriesId || '') !== seriesId) continue;
-    const episodes = Array.isArray(group.episodes) ? group.episodes : [];
-    const kept = episodes.filter(episode => String(episode?.providerIdentity?.itemId || '') !== itemId);
-    deleted += episodes.length - kept.length;
-    group.episodes = kept;
+  if (!sourceId || !itemId || !['episode', 'movie', 'live'].includes(kind)) return 0;
+  if (kind === 'episode') {
+    let deleted = 0;
+    const groups = library?.streaming_history?.series || [];
+    for (const group of groups) {
+      const groupIdentity = group?.providerIdentity || {};
+      if (String(groupIdentity.sourceId || '') !== sourceId) continue;
+      if (seriesId && String(groupIdentity.seriesId || '') !== seriesId) continue;
+      const episodes = Array.isArray(group.episodes) ? group.episodes : [];
+      const kept = episodes.filter(episode => String(episode?.providerIdentity?.itemId || '') !== itemId);
+      deleted += episodes.length - kept.length;
+      group.episodes = kept;
+    }
+    library.streaming_history.series = groups.filter(group => (group.episodes || []).length > 0);
+    return deleted;
   }
-  library.streaming_history.series = groups.filter(group => (group.episodes || []).length > 0);
-  return deleted;
+  const bucket = kind === 'live' ? 'live' : 'movies';
+  const records = Array.isArray(library?.streaming_history?.[bucket]) ? library.streaming_history[bucket] : [];
+  const kept = records.filter(record => {
+    const providerIdentity = record?.providerIdentity || {};
+    return String(providerIdentity.sourceId || '') !== sourceId || String(providerIdentity.itemId || '') !== itemId;
+  });
+  library.streaming_history[bucket] = kept;
+  return records.length - kept.length;
 }
 
 export async function deleteStreamingHistoryItem(ownerId, identity = {}) {

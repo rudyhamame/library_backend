@@ -2710,7 +2710,7 @@ app.put('/api/streaming-history/:sessionId', async (req, res) => {
   }
 });
 
-app.delete('/api/streaming-history/item', async (req, res) => {
+async function deleteStreamingHistoryItemRequest(req, res) {
   try {
     const ownerId = requestProfileOwner(req);
     if (!ownerId) return res.status(401).json({ error: 'Authentication required' });
@@ -2726,8 +2726,13 @@ app.delete('/api/streaming-history/item', async (req, res) => {
     res.set('Cache-Control', 'no-store');
     res.json(await deleteStreamingHistoryItem(ownerId, identity));
   }
-  catch (error) { res.status(500).json({ error: error.message }); }
-});
+  catch (error) {
+    console.error('[History] item deletion failed:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+}
+app.delete('/api/streaming-history/item', deleteStreamingHistoryItemRequest);
+app.post('/api/streaming-history/item', deleteStreamingHistoryItemRequest);
 
 app.delete('/api/streaming-history/:sessionId', async (req, res) => {
   try {

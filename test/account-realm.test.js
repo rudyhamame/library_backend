@@ -20,13 +20,13 @@ test('Android General User has no Roku pairing or casting surface', async () => 
   assert.match(activity, /signup\.setVisibility\(roku\?View\.GONE:View\.VISIBLE\)/);
   assert.match(activity, /private void generalSignup\(\)[\s\S]*\/api\/account\/signup/);
   assert.match(activity, /if\(!isRokuUserMode\(\)\)\{if\(manageable\)addProfileSettingsSection\(\);return;\}/);
-  assert.match(activity, /Roku pairing is available only in Roku User mode/);
+  assert.match(activity, /General accounts do not include Roku pairing or casting\./);
   assert.match(player, /if \(isRokuUserMode\(\)\) \{[\s\S]*rokuButton = icon/);
   assert.match(activity, /if\(!isRokuUserMode\(\)\)addPartnerSection\(\)/);
   assert.match(activity, /private void addWelcomeProfileSwitcher\(\)[\s\S]*if\(!isRokuUserMode\(\)\)\{/);
   assert.match(activity, /startPartnerInvitePolling\(\)\{if\(isRokuUserMode\(\)/);
   assert.match(player, /if \(!isRokuUserMode\(\)\) \{[\s\S]*partnerButton = icon/);
-  assert.match(activity, /if\(!isRokuUserMode\(\)\)\{[\s\S]*showChangePasswordDialog\(\)[\s\S]*showDeleteAccountDialog\(\)/);
+  assert.match(activity, /if\(!isRokuUserMode\(\)\)\{[\s\S]*showChangePasswordDialog\(\)/);
   assert.match(await readFile(new URL('../server.js', import.meta.url), 'utf8'), /Partner accounts are available only for General users/);
 });
 

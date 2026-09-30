@@ -249,7 +249,7 @@ export async function deleteStreamingHistoryItem(ownerId, identity = {}) {
   const persisted = await getAccountLibrary(ownerId);
   const remaining = removeStreamingHistoryItemFromLibrary(structuredClone(persisted), identity);
   if (remaining > 0) throw new Error('History deletion did not persist');
-  return { deleted, confirmed: true };
+  return { deleted, confirmed: deleted > 0 };
 }
 
 export async function clearStreamingHistory(ownerId) {

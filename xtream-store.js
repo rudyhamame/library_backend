@@ -138,6 +138,26 @@ export async function updateXtreamSelection(id, selection, accountOwner, profile
   return publicXtreamSource({ ...located.source, selections: { [String(profileOwner)]: next } }, profileOwner, accountOwner);
 }
 
+// Remove one saved identity directly from the owning profile's MongoDB
+// library. This avoids rebuilding the whole provider selection from a possibly
+// stale catalog snapshot during an unsave request.
+export async function removeSavedXtreamItem(sourceId, kind, itemId, accountOwner, profileOwner = accountOwner) {
+  if (!sourceId || !itemId || !accountOwner || !profileOwner) return false;
+  const bucket = kindFor(kind);
+  const normalizedId = String(itemId);
+  await updateAccountLibrary(profileOwner, library => {
+    const saved = savedShape(library.savedSelections);
+    saved[bucket] = saved[bucket].filter(row => {
+      const identity = row.providerIdentity;
+      const savedId = identity.seriesId || identity.itemId;
+      return identity.sourceId !== String(sourceId) || String(savedId) !== normalizedId;
+    });
+    library.savedSelections = saved;
+    return library;
+  });
+  return true;
+}
+
 export async function deleteXtreamSource(id, ownerId) {
   const located = await locateSource(id, ownerId);
   if (!located) return false;

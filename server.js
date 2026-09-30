@@ -11,7 +11,7 @@ import path from 'node:path';
 import { shapeArabicForRoku } from './arabic-shaper.js';
 import { arabicSearchRegexSource, normalizeArabicSearch } from './arabic-search.js';
 import { markProviderCatalogFailure } from './provider-catalog-store.js';
-import { createXtreamSource, deleteXtreamSource, flattenSelection, getAllXtreamSources, getXtreamSource, getXtreamSources, publicXtreamSource, selectionFor, updateXtreamSelection, updateXtreamSource } from './xtream-store.js';
+import { createXtreamSource, deleteXtreamSource, flattenSelection, getAllXtreamSources, getXtreamSource, getXtreamSources, publicXtreamSource, removeSavedXtreamItem, selectionFor, updateXtreamSelection, updateXtreamSource } from './xtream-store.js';
 import { evictXtreamCache, getXtreamCatalog, getXtreamCategories, getXtreamSeriesEpisodes, validateXtreamConnection, xtreamCacheStats, xtreamProviderUrl } from './xtream.js';
 import { evictM3uCache, getM3uCatalog, getM3uCategories, m3uCacheStats, m3uProviderUrl, validateM3uConnection } from './m3u.js';
 import { MediaCapacityError, MediaJobManager, defaultMediaLimits, memoryPressure } from './media-job-manager.js';
@@ -2816,11 +2816,16 @@ async function toggleRokuLibraryRequest(req, res) {
     const enabledKeys = Array.isArray(source.enabledKeys) ? source.enabledKeys.map(String) : [];
     const enabledItems = Array.isArray(source.enabledItems) ? source.enabledItems : [];
     const currentlySaved = enabledKeys.includes(key);
+    const savedValue = String(req.query?.saved ?? req.body?.saved ?? '').trim().toLowerCase();
+    const desiredSaved = savedValue === 'true' ? true : savedValue === 'false' ? false : !currentlySaved;
     let nextKeys;
     let nextItems;
-    if (currentlySaved) {
+    if (!desiredSaved) {
       nextKeys = enabledKeys.filter(candidate => candidate !== key);
       nextItems = enabledItems.filter(candidate => candidate.key !== key);
+    } else if (currentlySaved) {
+      nextKeys = enabledKeys;
+      nextItems = enabledItems;
     } else {
       // Resolve the item's real metadata from the stored catalog snapshot -
       // NEVER trust the client's title, which the Roku has already reshaped to
@@ -2849,9 +2854,15 @@ async function toggleRokuLibraryRequest(req, res) {
       }];
       nextKeys = nextItems.map(candidate => candidate.key);
     }
-    await updateXtreamSelection(String(source._id), { enabledKeys: nextKeys, enabledItems: nextItems, archivedKeys: source.archivedKeys || [], archivedItems: source.archivedItems || [] }, accountOwner, ownerId);
-    bumpLibraryRevision(ownerId);
-    res.json({ saved: !currentlySaved, key, sourceId: String(source._id) });
+    if (desiredSaved !== currentlySaved) {
+      if (desiredSaved) {
+        await updateXtreamSelection(String(source._id), { enabledKeys: nextKeys, enabledItems: nextItems, archivedKeys: source.archivedKeys || [], archivedItems: source.archivedItems || [] }, accountOwner, ownerId);
+      } else {
+        await removeSavedXtreamItem(String(source._id), kind, id, accountOwner, ownerId);
+      }
+      bumpLibraryRevision(ownerId);
+    }
+    res.json({ saved: desiredSaved, key, sourceId: String(source._id) });
   } catch (error) { res.status(500).json({ error: error.message }); }
 }
 app.get('/api/roku/library/toggle', toggleRokuLibraryRequest);

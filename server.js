@@ -1027,8 +1027,10 @@ app.use('/api/streaming-history/item', (req, res, next) => {
   const started = Date.now();
   res.on('finish', () => console.info('[History] item request', {
     method: req.method, status: res.statusCode, kind: String(req.query.kind || req.body?.kind || ''),
-    sourceId: String(req.query.sourceId || req.body?.sourceId || ''),
-    itemId: String(req.query.itemId || req.body?.itemId || ''),
+    sourceId: String(req.body?.sourceId ?? req.body?.sourceid ?? req.query.sourceId ?? req.query.sourceid ?? ''),
+    itemId: String(req.body?.itemId ?? req.body?.itemid ?? req.query.itemId ?? req.query.itemid ?? ''),
+    queryKeys: Object.keys(req.query || {}).filter(key => key !== 'deviceToken'),
+    bodyKeys: Object.keys(req.body || {}),
     authenticated: Boolean(requestProfileOwner(req)), elapsedMs: Date.now() - started,
   }));
   next();
@@ -2724,11 +2726,15 @@ async function deleteStreamingHistoryItemRequest(req, res) {
   try {
     const ownerId = requestProfileOwner(req);
     if (!ownerId) return res.status(401).json({ error: 'Authentication required' });
+    // BrightScript associative arrays can serialize camel-case keys in lower
+    // case. Accept both spellings for Roku query and JSON body requests.
+    const identityField = name => String(req.body?.[name] ?? req.body?.[name.toLowerCase()]
+      ?? req.query?.[name] ?? req.query?.[name.toLowerCase()] ?? '').trim();
     const identity = {
-      sourceId: String(req.body?.sourceId ?? req.query.sourceId ?? '').trim(),
-      seriesId: String(req.body?.seriesId ?? req.query.seriesId ?? '').trim(),
-      itemId: String(req.body?.itemId ?? req.query.itemId ?? '').trim(),
-      kind: String(req.body?.kind ?? req.query.kind ?? '').trim(),
+      sourceId: identityField('sourceId'),
+      seriesId: identityField('seriesId'),
+      itemId: identityField('itemId'),
+      kind: identityField('kind'),
     };
     if (!identity.sourceId || !identity.itemId || !['episode', 'series', 'series-search', 'movie', 'channel', 'live'].includes(identity.kind)) {
       return res.status(400).json({ error: 'Provider identity is required' });

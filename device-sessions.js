@@ -20,6 +20,7 @@ const accountCollectionName = process.env.MONGODB_ACCOUNT_COLLECTION || 'account
 const verifiedEmailCollectionName = process.env.MONGODB_VERIFIED_EMAIL_COLLECTION || 'verified_emails';
 const signingSecret = process.env.DEVICE_AUTH_SECRET || 'local-development-secret-change-before-production';
 const frontendUrl = process.env.FRONTEND_URL || 'http://127.0.0.1:8787';
+const rokuApiPublicUrl = process.env.ROKU_API_PUBLIC_URL || process.env.PUBLIC_BASE_URL || 'https://roku-api.mctoshs.ca';
 let profilesPromise;
 const accountsPromises = new Map();
 const verifiedEmailPromises = new Map();
@@ -381,13 +382,13 @@ export async function createDeviceSession(deviceId, deviceToken = '') {
     const appPairUrl = new URL('/open-android.html', frontendUrl);
     appPairUrl.searchParams.set('pair', session.code);
     result.appPairUrl = appPairUrl.toString();
-    result.qrImageUrl = `https://quickchart.io/qr?size=190&text=${encodeURIComponent(result.appPairUrl)}`;
+    result.qrImageUrl = `${rokuApiPublicUrl}/api/roku/device-session/qr?code=${encodeURIComponent(session.code)}&kind=android`;
     // Separate QR for the browser auto-login card in Roku Settings: a plain
     // web URL (not an app intent) that opens Browser Settings after pairing.
     const browserPairUrlObject = new URL('/settings', frontendUrl);
     browserPairUrlObject.searchParams.set('pair', session.code);
     result.pairUrl = browserPairUrlObject.toString();
-    result.browserQrImageUrl = `https://quickchart.io/qr?size=190&text=${encodeURIComponent(result.pairUrl)}`;
+    result.browserQrImageUrl = `${rokuApiPublicUrl}/api/roku/device-session/qr?code=${encodeURIComponent(session.code)}&kind=browser`;
     const downloadAppUrl = new URL(process.env.ANDROID_DOWNLOAD_PAGE_URL || 'https://iptv.mctoshs.ca/download-app');
     downloadAppUrl.search = '';
     downloadAppUrl.hash = '';
@@ -485,6 +486,15 @@ export async function isProfileOnline(accountId, profileId) {
 }
 
 export function getDeviceSession(code) { purge(); return sessions.get(String(code || '')); }
+
+export function getDeviceSessionQrTarget(code, kind) {
+  const session = getDeviceSession(code);
+  if (!session || session.purpose !== 'android-remote' || !session.accountId) return null;
+  if (!['android', 'browser'].includes(kind)) return null;
+  const target = new URL(kind === 'android' ? '/open-android.html' : '/settings', frontendUrl);
+  target.searchParams.set('pair', session.code);
+  return target.toString();
+}
 
 export async function getPairingInfo(code, token = '') {
   const session = getDeviceSession(code);

@@ -33,7 +33,10 @@ test('Android General User has no Roku pairing or casting surface', async () => 
 test('Roku browser QR inherits the active rh_roku account and profile', async () => {
   const sessions = await readFile(new URL('../device-sessions.js', import.meta.url), 'utf8');
   const frontend = await readFile(new URL('../../library_frontend/src/App.vue', import.meta.url), 'utf8');
-  const roku = await readFile(new URL('../../roku/components/HomeScreen.brs', import.meta.url), 'utf8');
+  const roku = (await Promise.all([
+    'HomeScreen.brs', 'HomeScreenRokuPay.brs', 'HomeScreenStartup.brs', 'HomeScreenLogin.brs',
+    'HomeScreenPreferences.brs', 'HomeScreenLanguageLayout.brs', 'HomeScreenAccount.brs',
+  ].map(name => readFile(new URL(`../../roku/components/${name}`, import.meta.url), 'utf8')))).join('\n');
   assert.match(sessions, /session\.profileId = authorization\.profileId \|\| null/);
   assert.match(sessions, /session\.realm = 'roku'/);
   assert.match(sessions, /browserQrImageUrl/);

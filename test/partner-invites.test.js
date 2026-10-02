@@ -6,7 +6,7 @@ const source = readFileSync(new URL('../server.js', import.meta.url), 'utf8');
 const routes = source.slice(source.indexOf("app.post('/api/partner/invite'"), source.indexOf("app.post('/api/account/password'"));
 function setup(linked = true) {
   const handlers = {}, invites = new Map();
-  const c = vm.createContext({ app: { post: (path, fn) => handlers.post = fn, get: (path, fn) => handlers.get = fn },
+  const c = vm.createContext({ app: { post: (path, fn) => { handlers[path] = fn; if (path === '/api/partner/invite') handlers.post = fn; }, get: (path, fn) => handlers.get = fn },
     requestAccount: () => 'host-account', requestAccountRealm: () => 'general', requestOwner: () => 'host-owner',
     requestAccountOwner: () => 'guest-account-owner', requestProfile: () => 'guest-profile',
     getProfilePartnerEmail: async () => 'guest@example.com', getProfilePartnerCode: async () => 'G1',
@@ -19,7 +19,7 @@ function setup(linked = true) {
     accountOwnerId: () => 'guest-account-owner', partnerInvites: invites,
     bumpPartnerInviteRevision: key => c.bumpedKey = key, waitForPartnerInvite: async key => { c.polledKey = key; return 2; } });
   vm.runInContext(routes, c);
-  const res = { statusCode: 200, status(code) { this.statusCode = code; return this; }, json(body) { this.body = body; return this; }, set() {} };
+  const res = { statusCode: 200, status(code) { this.statusCode = code; return this; }, json(body) { this.body = body; return this; }, set() { return this; } };
   return { c, handlers, invites, res };
 }
 test('send resolves reciprocal email AND profile codes and delivers to that account/profile', async () => {
@@ -37,5 +37,35 @@ test('non-reciprocal profile rejects the invite without delivering it', async ()
   const { handlers, res, invites } = setup(false);
   await handlers.post({ body: { sourceId: 'source', kind: 'movie', id: '1', durationSeconds: 100 } }, res);
   assert.equal(res.statusCode, 409);
+  assert.equal(invites.size, 0);
+});
+
+test('acknowledgment removes the exact recipient invitation so a fresh poll cannot replay it', async () => {
+  const { handlers, invites, res } = setup();
+  const key = 'guest-account-owner:guest-profile';
+  invites.set(key, { wwpSessionId: 'accepted-session', expiresAt: Date.now() + 10000 });
+  await handlers['/api/partner/invite/ack']({ body: { wwpSessionId: 'accepted-session' } }, res);
+  assert.equal(res.body.confirmed, true);
+  await handlers.get({ query: { since: 0, client: 'browser' } }, res);
+  assert.equal(res.body.invite, null);
+});
+test('acknowledgment racing a new invitation preserves it and every other account/profile', async () => {
+  const { handlers, invites, res } = setup();
+  invites.set('guest-account-owner:guest-profile', { wwpSessionId: 'new-session' });
+  invites.set('other-account:other-profile', { wwpSessionId: 'old-session' });
+  await handlers['/api/partner/invite/ack']({ body: { wwpSessionId: 'old-session' } }, res);
+  assert.equal(res.body.confirmed, true);
+  assert.equal(invites.get('guest-account-owner:guest-profile').wwpSessionId, 'new-session');
+  assert.equal(invites.get('other-account:other-profile').wwpSessionId, 'old-session');
+});
+test('repeated acknowledgment is idempotent and an empty identity cannot clear invitations', async () => {
+  const { handlers, invites, res } = setup();
+  invites.set('guest-account-owner:guest-profile', { wwpSessionId: 'session' });
+  await handlers['/api/partner/invite/ack']({ body: {} }, res);
+  assert.equal(res.statusCode, 400);
+  assert.equal(invites.size, 1);
+  await handlers['/api/partner/invite/ack']({ body: { wwpSessionId: 'session' } }, res);
+  await handlers['/api/partner/invite/ack']({ body: { wwpSessionId: 'session' } }, res);
+  assert.equal(res.body.confirmed, true);
   assert.equal(invites.size, 0);
 });

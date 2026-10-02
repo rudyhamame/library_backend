@@ -1730,6 +1730,23 @@ app.get('/api/partner/invite', async (req, res) => {
     res.json({ revision, invite: currentInvite });
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
+// Consume only the exact invitation addressed to this account/profile. An
+// acknowledgment racing a newer invitation must leave the newer one intact.
+app.post('/api/partner/invite/ack', (req, res) => {
+  try {
+    if (requestAccountRealm(req) !== 'general') return res.status(404).json({ error: 'Partner accounts are available only for General users' });
+    if (!requestOwner(req) || !requestAccountOwner(req)) return res.status(401).json({ error: 'Authentication required' });
+    const sessionId = String(req.body?.wwpSessionId || '').trim();
+    if (!sessionId || sessionId.length > 128) return res.status(400).json({ error: 'Invitation session is required' });
+    const recipientKey = `${requestAccountOwner(req)}:${requestProfile(req)}`;
+    if (partnerInvites.get(recipientKey)?.wwpSessionId === sessionId) {
+      partnerInvites.delete(recipientKey);
+      bumpPartnerInviteRevision(recipientKey);
+    }
+    const confirmed = partnerInvites.get(recipientKey)?.wwpSessionId !== sessionId;
+    res.set('Cache-Control', 'no-store').json({ ok: true, confirmed });
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
 app.post('/api/account/password', async (req, res) => {
   try {
     const accountId = requestAccount(req);

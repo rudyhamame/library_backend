@@ -1701,12 +1701,12 @@ app.post('/api/partner/invite', async (req, res) => {
       expiresAt: Date.now() + wwpStreamTicketTtlMs,
     };
     const hostEmail = hostAccount?.email || '';
-    const matchedProfiles = await reciprocalPartnerProfiles(partner.accountId, hostEmail);
-    if (matchedProfiles.length === 0) return res.status(409).json({ error: "Your partner hasn't added you on their end yet." });
-    for (const matched of matchedProfiles) {
-      partnerInvites.set(matched.raw.ownerId, invite);
-      bumpPartnerInviteRevision(matched.raw.ownerId);
-    }
+    const partnerCode = await getProfilePartnerCode(accountId, profileId);
+    const resolved = await resolvePartnerProfile(partnerEmail, partnerCode, hostEmail, hostProfile?.code || '', realm);
+    if (!resolved) return res.status(409).json({ error: "Your partner hasn't added your email and profile code on their end yet." });
+    const recipientKey = `${accountOwnerId(resolved.partner.accountId)}:${resolved.profile.id}`;
+    partnerInvites.set(recipientKey, invite);
+    bumpPartnerInviteRevision(recipientKey);
     res.json({ ok: true, wwpSessionId, partnerEmail: partner.email });
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
@@ -1716,10 +1716,11 @@ app.get('/api/partner/invite', async (req, res) => {
     if (requestAccountRealm(req) !== 'general') return res.status(404).json({ error: 'Partner accounts are available only for General users' });
     const ownerId = requestOwner(req);
     if (!ownerId) return res.status(401).json({ error: 'Authentication required' });
+    const recipientKey = `${requestAccountOwner(req)}:${requestProfile(req)}`;
     const since = Number.parseInt(String(req.query.since || '0'), 10) || 0;
-    const revision = await waitForPartnerInvite(ownerId, since);
-    const invite = partnerInvites.get(ownerId) || null;
-    if (invite && invite.expiresAt < Date.now()) partnerInvites.delete(ownerId);
+    const revision = await waitForPartnerInvite(recipientKey, since);
+    const invite = partnerInvites.get(recipientKey) || null;
+    if (invite && invite.expiresAt < Date.now()) partnerInvites.delete(recipientKey);
     res.set('Cache-Control', 'no-store');
     const currentInvite = invite && invite.expiresAt >= Date.now() ? invite : null;
     if (currentInvite && String(req.query.client || '').toLowerCase() === 'browser') {

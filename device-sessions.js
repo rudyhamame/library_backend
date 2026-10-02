@@ -1,5 +1,6 @@
 import { createHash, createHmac, randomBytes, randomInt, scryptSync, timingSafeEqual } from 'node:crypto';
 import { MongoClient, ObjectId } from 'mongodb';
+import { createClientPresence } from './client-presence.js';
 import { deduplicateXtreamSources, moveXtreamSources } from './xtream-store.js';
 import { accountOwnerId, canonicalSessionOwner } from './account-library-owner.js';
 import { moveLibraryCategories } from './library-category-store.js';
@@ -28,6 +29,7 @@ const signupVerificationPromises = new Map();
 const heartbeatCache = new Map();
 const heartbeatIntervalMs = 10_000;
 const runningWindowMs = 30_000;
+const clientPresence = createClientPresence({ windowMs: runningWindowMs });
 const streamingWindowMs = 30_000;
 const verificationResendDelaysMs = [0, 60_000, 150_000, 300_000, 900_000, 1_800_000];
 
@@ -467,6 +469,7 @@ export async function listAllAccountsBasic() {
 // status indicator.
 export async function isAccountOnline(accountId) {
   if (!accountId || !ObjectId.isValid(accountId)) return false;
+  if (clientPresence.online(accountId)) return true;
   const since = new Date(Date.now() - runningWindowMs);
   const device = await (await profiles()).findOne(
     { accountId: new ObjectId(accountId), lastSeenAt: { $gte: since } },
@@ -477,6 +480,7 @@ export async function isAccountOnline(accountId) {
 
 export async function isProfileOnline(accountId, profileId) {
   if (!accountId || !ObjectId.isValid(accountId) || !profileId) return false;
+  if (clientPresence.online(accountId, profileId)) return true;
   const since = new Date(Date.now() - runningWindowMs);
   const device = await (await profiles()).findOne(
     { accountId: new ObjectId(accountId), profileId: String(profileId), lastSeenAt: { $gte: since } },
@@ -878,9 +882,7 @@ export async function getLinkedDevices(accountId, profileId = '') {
 export async function registerBrowserDevice(accountId, profileId, deviceId, label = '', kind = 'browser') {
   // Keep the request contract for existing clients; only a paired Roku has a
   // durable device record. Heartbeat data from other clients remains ephemeral.
-  void accountId;
-  void profileId;
-  void deviceId;
+  if (ObjectId.isValid(accountId)) clientPresence.record(accountId, profileId, deviceId);
   void label;
   void kind;
 }

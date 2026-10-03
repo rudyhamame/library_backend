@@ -1101,6 +1101,23 @@ export async function changeAccountPassword(accountId, currentPassword, newPassw
   return { ok: true };
 }
 
+// This flow is authorized by a signed, still-linked Roku device session.
+// Browser/Android password changes keep their current-password verification.
+export async function changeRokuAccountPassword(token, newPassword) {
+  const session = resolveDeviceToken(token);
+  if (session?.type !== 'roku' || session.realm !== 'roku' || !ObjectId.isValid(session.accountId) || !await isRokuSessionLinked(session)) {
+    return { error: 'Sign in on a linked Roku to change your password' };
+  }
+  if (!validPassword(newPassword)) return { error: 'Password must contain 8 to 256 characters' };
+  const collection = await accounts('roku');
+  const result = await collection.updateOne(
+    { _id: new ObjectId(session.accountId), rokuDeviceId: String(session.deviceId) },
+    { $set: { passwordHash: hashPassword(newPassword), updatedAt: new Date() }, $unset: { account: '', credentials: '', firstName: '', lastName: '' } },
+  );
+  if (result.matchedCount !== 1) return { error: 'Sign in on a linked Roku to change your password' };
+  return { ok: true };
+}
+
 export async function deleteAccount(accountId, currentPassword, realm = 'roku') {
   if (!ObjectId.isValid(accountId)) return { error: 'Sign in to delete your account' };
   if (!validPassword(currentPassword)) return { error: 'Enter your current password' };

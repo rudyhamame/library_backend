@@ -20,7 +20,7 @@ import { HlsStrategy, PlaybackStrategy, choosePlaybackStrategy, determineHlsStra
 import { clearStreamingHistory, deleteStreamingHistoryItem, deleteStreamingSession, getSeriesWatchedEpisodes, getStreamingContinueWatching, getStreamingHistory, getStreamingResume, saveStreamingHistory } from './streaming-history-store.js';
 import { getFavorites, toggleFavorite } from './favorites-store.js';
 import { accountOwnerId, profileOwnerId } from './account-library-owner.js';
-import { authorizeDeviceSession, autoLoginDeviceSession, castHandoffLink, changeAccountPassword, claimAutomaticPairing, confirmPasswordReset, createDeviceSession, deleteAccount, getAccountBasicInfo, getDeviceSession, getDeviceSessionQrTarget, getDeviceWeatherLocations, getLinkedDevices, getPairingInfo, getRokuDeviceSessionStatus, getRokuSourcePreferenceByOwner, initializeAccountDatabases, isProfileOnline, isRokuSessionLinked, listAllAccountsBasic, listAllLinkedDevices, loginAccount, loginDeviceSession, recordDeviceHeartbeat, registerAccount, registerBrowserDevice, requestAccountSignupVerification, requestDeviceSignupVerification, requestPasswordReset, resendAccountSignupVerification, resendDeviceSignupVerification, resolveAccountByEmail, resolveDeviceToken, saveDeviceWeatherLocations, selectAccountProfile, setupDeviceSession, unlinkAccountDevice, verifyDeviceSignupCode } from './device-sessions.js';
+import { authorizeDeviceSession, autoLoginDeviceSession, castHandoffLink, changeAccountPassword, changeRokuAccountPassword, claimAutomaticPairing, confirmPasswordReset, createDeviceSession, deleteAccount, getAccountBasicInfo, getDeviceSession, getDeviceSessionQrTarget, getDeviceWeatherLocations, getLinkedDevices, getPairingInfo, getRokuDeviceSessionStatus, getRokuSourcePreferenceByOwner, initializeAccountDatabases, isProfileOnline, isRokuSessionLinked, listAllAccountsBasic, listAllLinkedDevices, loginAccount, loginDeviceSession, recordDeviceHeartbeat, registerAccount, registerBrowserDevice, requestAccountSignupVerification, requestDeviceSignupVerification, requestPasswordReset, resendAccountSignupVerification, resendDeviceSignupVerification, resolveAccountByEmail, resolveDeviceToken, saveDeviceWeatherLocations, selectAccountProfile, setupDeviceSession, unlinkAccountDevice, verifyDeviceSignupCode } from './device-sessions.js';
 import { createAccountProfile, deleteAccountProfile, getAccountProfile, getAccountProfiles, getProfileByCode, getProfilePartnerCode, getProfilePartnerEmail, setProfilePartnerEmail, setProfileRokuSourcePreference, updateAccountProfile } from './account-profile-store.js';
 import { isCloudinaryProfileUrl } from './cloudinary-upload.js';
 import { enforceLibraryOnly } from './library-route-policy.js';
@@ -1745,6 +1745,15 @@ app.post('/api/partner/invite/ack', (req, res) => {
     }
     const confirmed = partnerInvites.get(recipientKey)?.wwpSessionId !== sessionId;
     res.set('Cache-Control', 'no-store').json({ ok: true, confirmed });
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+app.post('/api/roku/account/password', async (req, res) => {
+  try {
+    const token = String(req.get('x-device-token') || req.query.deviceToken || '');
+    const result = await changeRokuAccountPassword(token, req.body?.newPassword);
+    res.set('Cache-Control', 'no-store');
+    if (result.error) return res.status(result.error.startsWith('Sign in') ? 401 : 400).json(result);
+    res.json(result);
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 app.post('/api/account/password', async (req, res) => {

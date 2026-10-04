@@ -32,6 +32,7 @@ import { providerPlaybackUrlIsUsable, resolveProviderMediaId, resolveProviderTit
 import { acquireProviderStreamLease } from './provider-stream-leases.js';
 import { deleteProviderCatalog, findProviderSeriesForEpisode, getProviderCatalogCategories, getProviderCatalogItem, getProviderCatalogItems, getProviderCatalogItemsByIds, getProviderCatalogItemsForCategory, getProviderCatalogLanguagePrefixes, getProviderCatalogMeta, getProviderCatalogRails, getProviderSeriesEpisodes, listProviderCatalogMeta, queryProviderCatalogItems, recordProviderCatalogDuration, replaceProviderCatalog, replaceProviderCatalogCategories, replaceProviderSeriesEpisodes } from './provider-catalog-store.js';
 import { arabicText, freshDashboardTimes, rokuPage, rokuPagePayload, detectXtreamLanguage, titleLanguageCode, displayDuration, durationSeconds } from './roku-catalog-format.js';
+import { personalWelcomeRails } from './welcome-personal-rails.js';
 
 const app = express();
 app.use(enforceLibraryOnly);
@@ -2118,12 +2119,13 @@ app.get('/api/roku/bootstrap', async (req, res) => {
     // Roku entries without expanding every series into episodes.
     const ownerId = requestOwner(req), accountOwner = requestAccountOwner(req);
     const requestedSourceId = String(req.query.sourceId || '').trim();
-    const [selectedSeries, selectedMovies, selectedChannels, sources, favorites] = await Promise.all([
+    const [selectedSeries, selectedMovies, selectedChannels, sources, favorites, history] = await Promise.all([
       getRokuSelectedItems('series', ownerId, accountOwner, requestedSourceId),
       getRokuSelectedItems('movie', ownerId, accountOwner, requestedSourceId),
       getRokuSelectedItems('channel', ownerId, accountOwner, requestedSourceId),
       getAllXtreamSources(accountOwner),
       getFavorites(accountOwner, requestProfile(req)).catch(() => []),
+      getStreamingHistory(requestProfileOwner(req)),
     ]);
     const selectedSourcePreference = requestedSourceId || await getRokuSourcePreferenceByOwner(ownerId);
     const selectedSourceId = pickRokuSourceId(selectedSourcePreference, sources);
@@ -2200,9 +2202,17 @@ app.get('/api/roku/bootstrap', async (req, res) => {
       if (!match) return null;
       return rokuDiscoveryItem({ ...match, providerIdentity: identity });
     }).filter(Boolean).slice(0, 30);
+    const personalRails = personalWelcomeRails({
+      history,
+      selectedItems: selectedSeries.concat(selectedMovies, selectedChannels),
+      catalogItems: liveCatalog.series.concat(liveCatalog.movie, liveCatalog.channel),
+      sourceId: selectedSourceId,
+    });
     res.set('Cache-Control', 'no-store');
     res.json({
       items: [...series, ...movies],
+      lastWatched: railItems(personalRails.lastWatched),
+      savedItems: railItems(personalRails.savedItems),
       favorites: hydratedFavorites,
       // Keys ("<kind>:<id>") the account has saved into its Library for the
       // active provider - the Roku marks matching cards with a saved badge.

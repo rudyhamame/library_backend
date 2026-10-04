@@ -1753,6 +1753,7 @@ app.post('/api/roku/account/password', async (req, res) => {
     const token = String(req.get('x-device-token') || req.query.deviceToken || '');
     const result = await changeRokuAccountPassword(token, req.body?.newPassword);
     res.set('Cache-Control', 'no-store');
+    if (result.error) console.warn('[Roku password] rejected', { error: result.error, contentType: req.get('content-type') || '', bodyType: typeof req.body, bodyKeys: Object.keys(req.body || {}), passwordType: typeof req.body?.newPassword, passwordLength: String(req.body?.newPassword ?? '').length });
     if (result.error) return res.status(result.error.startsWith('Sign in') ? 401 : 400).json(result);
     res.json(result);
   } catch (error) { res.status(500).json({ error: error.message }); }

@@ -151,6 +151,21 @@ export async function getXtreamCatalog(source, kind, categoryId = 'all') {
   }), { timeoutMs: catalogTimeoutMs });
 }
 
+export async function getXtreamMovieItem(source, movieId) {
+  const data = await request(source, { action: 'get_vod_info', vod_id: String(movieId) });
+  const movie = data?.movie_data;
+  if (!movie || String(movie.stream_id ?? '') !== String(movieId) || !String(movie.name || '').trim()) return null;
+  const extension = String(movie.container_extension || '').toLowerCase();
+  if (!/^[a-z0-9]+$/.test(extension)) return null;
+  return {
+    key: `movie:${movieId}`, id: String(movieId), kind: 'movie', metadata: movie,
+    title: String(movie.name), categoryId: stringId(movie.category_id), category: '',
+    logo: String(data?.info?.movie_image || movie.stream_icon || ''), extension,
+    duration: String(data?.info?.duration || movie.duration || ''),
+    rating: String(data?.info?.rating || movie.rating || ''), added: String(movie.added || ''),
+  };
+}
+
 export async function getXtreamMovieInfo(source, movieId) {
   const data = await request(source, { action: 'get_vod_info', vod_id: movieId });
   let duration = String(data?.info?.duration || data?.movie_data?.duration || '');

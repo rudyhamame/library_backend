@@ -13,7 +13,7 @@ import { shapeArabicForRoku } from './arabic-shaper.js';
 import { arabicSearchRegexSource, normalizeArabicSearch } from './arabic-search.js';
 import { markProviderCatalogFailure } from './provider-catalog-store.js';
 import { createXtreamSource, deleteXtreamSource, flattenSelection, getAllXtreamSources, getXtreamSource, getXtreamSources, publicXtreamSource, removeSavedXtreamItem, selectionFor, updateXtreamSelection, updateXtreamSource } from './xtream-store.js';
-import { evictXtreamCache, getXtreamCatalog, getXtreamCategories, getXtreamSeriesEpisodes, validateXtreamConnection, xtreamCacheStats, xtreamProviderUrl } from './xtream.js';
+import { evictXtreamCache, getXtreamCatalog, getXtreamCategories, getXtreamMovieItem, getXtreamSeriesEpisodes, validateXtreamConnection, xtreamCacheStats, xtreamProviderUrl } from './xtream.js';
 import { evictM3uCache, getM3uCatalog, getM3uCategories, m3uCacheStats, m3uProviderUrl, validateM3uConnection } from './m3u.js';
 import { MediaCapacityError, MediaJobManager, defaultMediaLimits, memoryPressure } from './media-job-manager.js';
 import { HlsStrategy, PlaybackStrategy, choosePlaybackStrategy, determineHlsStrategy, hlsCodecArgs, hlsHwDeviceArgs } from './playback-strategy.js';
@@ -2346,7 +2346,9 @@ app.get('/api/roku/deep-link-item', async (req, res) => {
     }
     const sourceId = String(source._id);
     if (kind) {
-      const row = (await getSourceCatalog(source, kind)).find(item => String(item.id) === contentId);
+      const singleMovie = kind === 'movie' && sourceType(source) === 'xtream'
+        ? await getXtreamMovieItem(source, contentId).catch(() => null) : null;
+      const row = singleMovie || (await getSourceCatalog(source, kind)).find(item => String(item.id) === contentId);
       if (!row) {
         console.warn(`[Roku deep link] mediaType=${mediaType} id=${contentId} source=${sourceId.slice(0, 8)} not found`);
         return res.status(404).json({ error: 'Content not found' });

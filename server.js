@@ -2120,39 +2120,13 @@ app.get('/api/roku/bootstrap', async (req, res) => {
     // Roku entries without expanding every series into episodes.
     const ownerId = requestOwner(req), accountOwner = requestAccountOwner(req);
     const requestedSourceId = String(req.query.sourceId || '').trim();
-    const [selectedSeries, selectedMovies, selectedChannels, sources, favorites, history] = await Promise.all([
-      getRokuSelectedItems('series', ownerId, accountOwner, requestedSourceId),
-      getRokuSelectedItems('movie', ownerId, accountOwner, requestedSourceId),
-      getRokuSelectedItems('channel', ownerId, accountOwner, requestedSourceId),
+    const [sources, favorites, history] = await Promise.all([
       getAllXtreamSources(accountOwner),
       getFavorites(accountOwner, requestProfile(req)).catch(() => []),
       getStreamingHistory(requestProfileOwner(req)),
     ]);
     const selectedSourcePreference = requestedSourceId || await getRokuSourcePreferenceByOwner(ownerId);
     const selectedSourceId = pickRokuSourceId(selectedSourcePreference, sources);
-    const newestFirst = (items) => [...items]
-      .sort((a, b) => Number(b.added || 0) - Number(a.added || 0))
-      .slice(0, 3);
-    const series = newestFirst(selectedSeries).map((item) => ({
-      id: `series-search:${item.sourceId}:${item.id}`,
-      title: item.title,
-      rokuTitle: rokuText(item.title),
-      rokuTextKind: /[A-Za-z]/.test(item.title) ? 'latin' : 'arabic',
-      category: item.category,
-      sourceId: String(item.sourceId),
-      seriesId: item.id,
-      thumbnail: item.logo,
-      added: item.added,
-      contentKind: 'series-search',
-      originalFormat: String(item.extension || 'mp4').replace(/[^a-z0-9]/gi, '').toUpperCase(),
-    }));
-    const movies = newestFirst(selectedMovies).map((item) => ({
-      ...directXtreamItem(item),
-      thumbnail: item.logo,
-      kind: 'movie',
-      contentKind: 'movie',
-      rokuEnabled: true,
-    }));
     const accountSourceIds = new Set(sources.map(source => String(source._id)));
     const discoveryItems = items => (Array.isArray(items) ? items : [])
       .filter(item => !selectedSourceId || String(item?.sourceId || '') === selectedSourceId)
@@ -2184,6 +2158,37 @@ app.get('/api/roku/bootstrap', async (req, res) => {
         channel: liveCatalog.channel.slice().sort((a, b) => Number(b.added || 0) - Number(a.added || 0)).slice(0, welcomeRailLimit),
       };
     }
+    // Resolve persisted saved identities from the SAME active-provider
+    // catalogs already fetched above. Fetching them first through the saved
+    // library path then again here doubled cold bootstrap provider traffic.
+    const savedKeys = new Set(Array.isArray(selectedSource?.enabledKeys) ? selectedSource.enabledKeys.map(String) : []);
+    const savedRows = kind => liveCatalog[kind].filter(item => savedKeys.has(`${kind}:${item.id}`));
+    const selectedSeries = savedRows('series');
+    const selectedMovies = savedRows('movie');
+    const selectedChannels = savedRows('channel');
+    const newestFirst = (items) => [...items]
+      .sort((a, b) => Number(b.added || 0) - Number(a.added || 0))
+      .slice(0, 3);
+    const series = newestFirst(selectedSeries).map((item) => ({
+      id: `series-search:${item.sourceId}:${item.id}`,
+      title: item.title,
+      rokuTitle: rokuText(item.title),
+      rokuTextKind: /[A-Za-z]/.test(item.title) ? 'latin' : 'arabic',
+      category: item.category,
+      sourceId: String(item.sourceId),
+      seriesId: item.id,
+      thumbnail: item.logo,
+      added: item.added,
+      contentKind: 'series-search',
+      originalFormat: String(item.extension || 'mp4').replace(/[^a-z0-9]/gi, '').toUpperCase(),
+    }));
+    const movies = newestFirst(selectedMovies).map((item) => ({
+      ...directXtreamItem(item),
+      thumbnail: item.logo,
+      kind: 'movie',
+      contentKind: 'movie',
+      rokuEnabled: true,
+    }));
     const railItems = list => (Array.isArray(list) ? list : [])
       .map(item => rokuDiscoveryItem(selectedSource
         ? selectedXtreamItem(selectedSource, { ...item, sourceId: selectedSourceId })

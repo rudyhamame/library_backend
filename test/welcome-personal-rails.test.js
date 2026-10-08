@@ -58,14 +58,13 @@ test('bootstrap reads only authenticated scopes and returns bounded provider-spe
   const provider = { _id: 'provider', name: 'Active provider', enabledKeys: selected.map(item => `movie:${item.id}`) };
   let handler;
   let response;
+  const catalogReads = [];
   const context = vm.createContext({
     app: { get: (path, callback) => { handler = callback; } },
     requestOwner: () => 'canonical-owner', requestAccountOwner: () => 'canonical-account-owner',
     requestProfileOwner: () => 'canonical-profile-owner', requestProfile: () => 'active-profile',
     getRokuSelectedItems: async (kind, owner, account, requestedSource) => {
-      assert.equal(owner, 'canonical-owner'); assert.equal(account, 'canonical-account-owner');
-      assert.equal(requestedSource, '');
-      return kind === 'movie' ? selected : [];
+      assert.fail('Welcome must not fetch selected-item catalogs separately');
     },
     getAllXtreamSources: async owner => { assert.equal(owner, 'canonical-account-owner'); return [provider]; },
     getFavorites: async (owner, profile) => { assert.equal(owner, 'canonical-account-owner'); assert.equal(profile, 'active-profile'); return []; },
@@ -76,7 +75,11 @@ test('bootstrap reads only authenticated scopes and returns bounded provider-spe
     getRokuSourcePreferenceByOwner: async owner => { assert.equal(owner, 'canonical-owner'); return 'provider'; },
     pickRokuSourceId: preference => preference,
     flattenSelection: (sources, owner, account) => { assert.equal(owner, 'canonical-owner'); assert.equal(account, 'canonical-account-owner'); return sources; },
-    getSourceCatalog: async (source, kind) => kind === 'movie' ? media : [],
+    getSourceCatalog: async (source, kind) => {
+      assert.equal(source._id, 'provider');
+      catalogReads.push(kind);
+      return kind === 'movie' ? media : [];
+    },
     selectedXtreamItem: (source, item) => ({ ...item, sourceId: String(source._id) }),
     directXtreamItem: item => item, rokuDiscoveryItem: item => item, rokuText: text => text,
     personalWelcomeRails, welcomeRailLimit: 10,
@@ -89,4 +92,6 @@ test('bootstrap reads only authenticated scopes and returns bounded provider-spe
   assert.equal(response.savedItems.length, 10);
   assert.equal(response.savedItems[0].id, '5');
   assert.equal(response.stats.selectedSourceId, 'provider');
+  assert.deepEqual(catalogReads.sort(), ['channel', 'movie', 'series']);
+  assert.equal(response.savedKeys.length, selected.length);
 });

@@ -1,3 +1,4 @@
+import { rankCatalogMatches } from './catalog-search.js';
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
@@ -2278,36 +2279,30 @@ app.get('/api/roku/search', async (req, res) => {
         return res.json({ items: [] });
       }
       const catalog = await getSourceCatalog(source, kind);
-      const normalizedQuery = normalizeArabicSearch(query);
-      const matches = catalog
-        .map(item => selectedXtreamItem(source, item))
-        .filter(item => normalizeArabicSearch(item.title).includes(normalizedQuery))
-        .slice(0, 60);
+      const matches = rankCatalogMatches(catalog, query)
+        .map(item => ({ ...selectedXtreamItem(source, item), searchScore: item.searchScore }));
       console.log(`[Roku search] kind=${kind} q="${query}" source=${String(source._id).slice(0, 8)} matches=${matches.length}`);
       const savedKeys = Array.isArray(source.enabledKeys) ? source.enabledKeys.map(String) : [];
       if (kind === 'series') {
         return res.json({ savedKeys, items: matches.map(item => ({
           id: `series-search:${item.sourceId}:${item.id}`, title: item.title, rokuTitle: rokuText(item.title),
           category: item.category, rokuCategory: rokuText(item.category), sourceId: String(item.sourceId), seriesId: item.id,
-          thumbnail: item.logo, contentKind: 'series-search',
+          searchScore: item.searchScore, thumbnail: item.logo, contentKind: 'series-search',
           originalFormat: String(item.extension || 'mp4').replace(/[^a-z0-9]/gi, '').toUpperCase(),
         })) });
       }
       if (kind === 'movie') {
-        return res.json({ savedKeys, items: matches.map(item => ({ ...directXtreamItem(item), thumbnail: item.logo, duration: item.duration || '', kind: 'movie', contentKind: 'movie', rokuEnabled: true })) });
+        return res.json({ savedKeys, items: matches.map(item => ({ ...directXtreamItem(item), searchScore: item.searchScore, thumbnail: item.logo, duration: item.duration || '', kind: 'movie', contentKind: 'movie', rokuEnabled: true })) });
       }
-      return res.json({ savedKeys, items: buildXtreamChannelsPayload(matches) });
+      return res.json({ savedKeys, items: buildXtreamChannelsPayload(matches).map((item, index) => ({ ...item, searchScore: matches[index].searchScore })) });
     }
-    const normalizedQuery = normalizeArabicSearch(query);
-    const matches = (await getRokuSelectedItems(kind, requestOwner(req), requestAccountOwner(req)))
-      .filter(item => normalizeArabicSearch(item.title).includes(normalizedQuery))
-      .slice(0, 60);
+    const matches = rankCatalogMatches(await getRokuSelectedItems(kind, requestOwner(req), requestAccountOwner(req)), query);
     if (kind === 'series') {
       return res.json({ items: matches.map(item => ({
         id: `series-search:${item.sourceId}:${item.id}`,
         title: item.title,
         rokuTitle: rokuText(item.title),
-        category: item.category,
+        searchScore: item.searchScore, category: item.category,
         rokuCategory: item.rokuCategory,
         sourceId: String(item.sourceId),
         seriesId: item.id,
@@ -2315,9 +2310,9 @@ app.get('/api/roku/search', async (req, res) => {
         originalFormat: String(item.extension || 'mp4').replace(/[^a-z0-9]/gi, '').toUpperCase(),
       })) });
     }
-    if (kind === 'channel') return res.json({ items: buildXtreamChannelsPayload(matches) });
+    if (kind === 'channel') return res.json({ items: buildXtreamChannelsPayload(matches).map((item, index) => ({ ...item, searchScore: matches[index].searchScore })) });
     const items = matches.map(item => ({
-      ...directXtreamItem(item),
+      ...directXtreamItem(item), searchScore: item.searchScore,
       thumbnail: item.logo,
       duration: item.duration || '',
       kind: 'movie', contentKind: 'movie', rokuEnabled: true,
